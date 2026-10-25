@@ -1,25 +1,28 @@
-# 资产生产规范
+# 规范
 
-本目录规定 Table-1000 资产（对象、机器人、场景）的文件结构与接口，覆盖从建模到物理仿真资产、专家轨迹的生产和验收。
+本目录规定 Table-1000 资产（对象、机器人、场景）与专家程序的文件、接口和格式，供编写代码和资产的 agent 阅读。命令与人工验收见[操作手册](../tutorials/README.md)。
 
-README 说明每个文件放在哪里、由哪份规范约定。各文件的字段、单位、默认值与约束见对应规范；具体执行命令见[操作手册](../../tutorials/README.md)。
+| 规范 | 内容 |
+| --- | --- |
+| [建模](modeling.md) | `object.py`：坐标、刚体与部件、命名、关节 |
+| [几何预览](preview.md) | `preview.json`：姿态、相机、关键帧与自动检查 |
+| [物理属性](physics.md) | `physics.py` 与单刚体资产的物理配置 |
+| [行为插件](behaviors.md) | `behavior.py`：原生物理表达不了的附加力或状态转换 |
+| [物理测试](physics-tests.md) | `physics_test.py`：测试接口、结果与 RTF 基准 |
+| [机器人](robots.md) | 机器人源码、碰撞与物理、机器人层、验收用例 |
+| [场景](scenes.md) | `scene.py`：随机初始化、布局、初态检查 |
+| [专家](experts.md) | `expert.py`：分层、编写规则、步骤、重试与失败恢复 |
+| [专家数据](expert-data.md) | 批次、轨迹、报告、检查点、调用帧与求解记录 |
+
+本页说明每个文件放在哪里，以及资产共用的单位、名称表示和 README。
 
 ## 资产布局
 
-仓库顶层按“由谁产生、是否进 Git”分成四个目录。三个忽略目录体积大，多个检出可以用软链接指向同一份。
-
-| 目录 | 放什么 | Git |
-| --- | --- | --- |
-| `asset_sources/` | 资产源码：建模、物理、场景、专家程序，以及很小的缩略图 | 提交 |
-| `assets/` | 由源码构建或下载的资产，以及验收要看的预览、测试结果和场景初态 | 忽略 |
-| `data/` | 生成的数据：专家轨迹（HDF5）及其录像 | 忽略 |
-| `outputs/` | 日志和临时实验 | 忽略 |
-
-`assets/isaac/` 是 Isaac Sim 5.1 运行时取用的在线资产（地面等）的本地镜像，由 `scripts/assets/download_isaac_assets.py` 从 NVIDIA 资产服务器下载，许可同 Isaac Sim；目录存在时仿真从这里加载，不再联网。
+顶层目录的用途见[仓库与目录](../conventions/repository.md#目录)。`assets/isaac/` 是 Isaac Sim 5.1 运行时取用的在线资产（地面等）的本地镜像，由 `scripts/assets/download_isaac_assets.py` 从 NVIDIA 资产服务器下载，许可同 Isaac Sim；目录存在时仿真从这里加载，不再联网。
 
 同一资产在 `asset_sources/` 与 `assets/` 下使用相同的相对路径：对象 `objects/<category>/<六位编号>`、机器人 `robots/<名称>`、场景 `scenes/<六位编号>`；编号从 `000000` 开始。下面按资产类型列出每个文件，括号内为规范文档。
 
-**对象**
+### 对象
 
 ```text
 asset_sources/objects/cabinet/000000/
@@ -42,7 +45,7 @@ assets/objects/cabinet/000000/
   physics_test/       第二阶段验收：summary.json，isaac-cpu/、isaac-gpu/ 各后端结果
 ```
 
-**机器人**
+### 机器人
 
 ```text
 asset_sources/robots/x1pro/
@@ -61,7 +64,7 @@ assets/robots/x1pro/
   prepare.json、check.json、源码快照
 ```
 
-**场景**
+### 场景
 
 ```text
 asset_sources/scenes/000000/
@@ -95,10 +98,6 @@ runs/teleop/000000/<运行>/        人工遥操一个案例的一步（scripts/
                                   <运行> = <日期>-<时间>-<提交>-step<k>-seed<s>
 ```
 
-`runs/` 放开发和实验的运行，按类型分子目录（专家轨迹为 `runs/expert/`，人工遥操为 `runs/teleop/`，离线重解为 `runs/resolve/`），每次运行一个目录。
-
-规范：[建模](modeling.md)、[几何预览](preview.md)、[物理属性](physics.md)、[行为插件](behaviors.md)、[物理测试](physics-tests.md)、[机器人](robots.md)、[场景与专家轨迹](scenes.md)。
-
 统一单位：m、kg、s、rad、N、N·m；四元数顺序为 `[w, qx, qy, qz]`。各文件另行注明坐标系。USD 原生属性遵循各 Schema 的单位，详见[物理属性](physics.md)。源码快照重建依赖同版本的 `table_1000` 包，共用模块不复制到资产目录。外部资源引用须注明版本、来源和许可，不使用私有绝对路径。
 
 ## 名称压缩表示
@@ -127,7 +126,7 @@ cabinet
 
 资产树展示所有刚体及其部件，省略部件下的视觉与碰撞网格；使用空格缩进表示实际父子层级，森林保留多个根节点。
 
-带 `physics_test.py` 的资产另列[物理实测](physics-tests.md#人工验收)表，记录各测试测得的关键物理量，如拔出力、合紧力、起滑角：每行写明物理量、CPU 与 GPU 实测值、来源测试及测量方式。数值取自 `physics_test/summary.json`，注明软件版本，并标明为未标定的仿真值；修改几何、`physics.py` 或测试后重新运行并更新。已知后端差异在表下说明或链接 issue。
+带 `physics_test.py` 的资产另列“物理实测”表，记录各测试测得的关键物理量，如拔出力、合紧力、起滑角：每行写明物理量、CPU 与 GPU 实测值、来源测试及测量方式。数值取自 `physics_test/summary.json`，注明软件版本，并标明为未标定的仿真值；修改几何、`physics.py` 或测试后重新运行并更新。已知后端差异在表下说明或链接 issue。
 
 同一节另列典型条件下的性能：CPU 后端 1 个环境、GPU 后端 4 个并行环境，分别给出无渲染和含视频的 RTF 范围，以及测量期间的本进程 CPU 占用和 GPU 利用率。数值取自 `--benchmark` 运行的 `result.json` 中的 `performance`，注明机器负载等条件，测量方法见 [RTF 基准](physics-tests.md#rtf-基准)。
 

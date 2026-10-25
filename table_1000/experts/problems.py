@@ -1,4 +1,21 @@
-"""Recorded numerical solve problems; usable with MPlib without a simulator."""
+"""Recorded numerical solve problems; usable with MPlib without a simulator.
+
+A record (``problems/<seed>[-<r>].json.gz``, the report's ``solve_trace``) holds, per skill frame
+(``frame`` of the call trace), the decision tree: each ``decision``, its ``candidate``s in their
+original lazy order (an unexpanded suffix stays unexpanded; budgets, approach angles and the
+candidates already tried are kept as stop conditions; a place keeps its whole candidate list;
+a cached need keeps its original candidates, holds and verdicts), and the ``stage`` at which each
+was dropped (grasp IK, pre-grasp IK, then, need, place release / above IK, plan).
+
+``operations`` are numbered: standalone IK, the path checks inside skills and the motion solves,
+nested ones linked by ``parent``; ``step`` is the control step within the original segment.
+Each holds the full robot configuration, base pose, target or joint goals, solve budget and
+lift, and the planning world of the moment: object geometry, world poses, attached relative
+poses, allowed contacts and the padding each object used; repeated worlds and geometry are
+shared. Results give status, reason, path length, points, motion duration and solve time; an
+executed motion also its tracking error. IK failures are counted per decision and stage; the
+first five also get a collision-free CLIK check and a colliding-pair probe, for diagnosis only.
+"""
 
 from contextlib import contextmanager
 from functools import wraps

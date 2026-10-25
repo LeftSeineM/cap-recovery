@@ -314,7 +314,10 @@ class Grip:
 
     # -- commands ------------------------------------------------------------------------
     def move_to(self, *, duration, position=None, rotation=None, wait=True):
-        """Straight line and constant-axis rotation, quintic in time, to a world pose."""
+        """Straight line and constant-axis rotation to a world pose, quintic in time.
+
+        Starts where the previous motion ends; zero velocity and acceleration at both ends.
+        """
         start_position, start_quaternion = self.planned
         end_position = start_position if position is None else np.asarray(position, dtype=float)
         start = quaternion_rotation(start_quaternion)
@@ -329,7 +332,9 @@ class Grip:
     def follow(self, path, *, duration, wait=True):
         """Track ``path(t) -> (position, quaternion)`` for ``t`` in ``[0, duration]``.
 
-        The path must start at the pose where the previous motion ends.
+        The path must start at the pose where the previous motion ends; ``duration`` is a
+        positive multiple of the physics step. ``wait=True`` steps until the motion ends,
+        ``wait=False`` queues it and returns the :class:`Motion`.
         """
         steps = duration / self.ctx.dt
         if duration <= 0 or abs(steps-round(steps)) > 1e-7:
@@ -370,6 +375,7 @@ class Grip:
         self.force_limit, self.torque_limit = force, torque
 
     def release(self):
+        """Let go: the body is free, queued motions are dropped."""
         self.motions.clear()
         self.fixture.release()
 

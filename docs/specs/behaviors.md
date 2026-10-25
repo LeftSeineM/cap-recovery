@@ -1,7 +1,5 @@
 # behavior.py
 
-Isaac Sim 5.1 无界面应用已通过带盖笔的官方脚本加载、物理步回调、多实例配对及停止/复位/卸载验证；GUI 路径尚未验证。
-
 `behavior.py` 为可选的资产行为源码，负责原生物理属性不能表达的附加力或状态转换。普通刚体及原生关节能够表达的行为无需脚本。
 
 ## 挂载与生命周期
@@ -39,8 +37,8 @@ def Xform "Asset" (
 }
 ```
 
-Isaac Sim 5.1 的官方加载器实测不能执行 `archive.usdz[behavior.py]` 包内路径，因此不将脚本打包进 USDZ。无行为资产可直接加载 `object.usdz`。引用使用相对路径；公共工具依赖同版本 `table_1000`，不逐资产复制。
+Isaac Sim 5.1 的官方加载器不能执行 `archive.usdz[behavior.py]` 包内路径，因此脚本不打包进 USDZ。无行为资产可直接加载 `object.usdz`。引用使用相对路径；公共工具依赖同版本 `table_1000`，不逐资产复制。
 
-验收包括独立目录加载、同资产多实例、跨实例行为、停止/重置/卸载，以及 GUI 与无界面应用的加载。未完成的路径明确标为未支持，不以自定义加载器成功代替官方组件验证。
+验收包括独立目录加载、同资产多实例、跨实例行为、停止/重置/卸载，以及 GUI 与无界面应用的加载。验收用官方组件加载；无界面应用已验证，GUI 路径未验证，标为未支持。
 
 参考：[Isaac 行为脚本](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/replicator_tutorials/tutorial_replicator_modular_scripting.html)、[官方脚本组件生命周期](https://docs.omniverse.nvidia.com/extensions/latest/ext_python-scripting-component/user_manual.html)。

@@ -3,6 +3,17 @@
 ``wall_s`` includes measured children; ``self_s`` excludes them and can be summed across
 categories. Native-library collision checks inside IK or RRT remain in their parent's time.
 Generator calls measure each resume only, never the work a consumer does between yields.
+
+In an expert report (``run_expert.py --profile``): ``wall_profile`` covers the whole run, a
+step's field of the same name is cumulative up to it, and ``subtask_profiles`` matches
+``subtasks``. Each category has ``calls``, ``wall_s`` and ``self_s``, and the calling thread's
+``thread_cpu_s`` / ``self_thread_cpu_s`` by the same rule; where Linux allows, also user-space
+``instructions`` / ``self_instructions`` (``profile_counters`` says why not otherwise).
+Thread CPU leaves out library worker threads and Isaac's background threads, which only the
+process ``cpu_s`` counts. ``physics_step`` (action conversion, physics, recording) is
+multithreaded: it has wall time and the whole process's ``process_cpu_s`` over it, not to be added
+to other categories' thread CPU. ``profile_totals`` gives the recorded span's totals. Thread CPU
+varies far less with load than wall time, so compare categories by it.
 """
 
 from contextlib import contextmanager

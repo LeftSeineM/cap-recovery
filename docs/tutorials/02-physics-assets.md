@@ -1,79 +1,36 @@
 # 02 物理资产与物理测试
 
-为第 1 章的模型配置质量、摩擦和关节驱动，导出 USD 物理资产，并在 Isaac Sim 中用 CPU 和 GPU 两种物理后端测试。以[带盖笔 pen/000002](../../asset_sources/objects/pen/000002/) 和[三抽屉盒 cabinet/000000](../../asset_sources/objects/cabinet/000000/) 为例。
+为第 1 章的模型配置质量、摩擦和关节驱动，导出 USD 物理资产，用 CPU 和 GPU 两种物理后端测试。以[带盖笔 pen/000002](../../asset_sources/objects/pen/000002/) 和[三抽屉盒 cabinet/000000](../../asset_sources/objects/cabinet/000000/) 为例。
 
 ## 交付物
 
-源码目录 `asset_sources/objects/<类别>/<编号>/` 中新增两个文件，由 AI 按规范编写：
-
-| 文件 | 作用 |
-| --- | --- |
-| `physics.py` | 物理属性：质量、接触材料、关节摩擦与驱动（[规范](../designs/asset-pipeline/physics.md)） |
-| `physics_test.py` | 物理测试：每项测试的初始状态、施力或夹持动作、相机和关注曲线（[规范](../designs/asset-pipeline/physics-tests.md)） |
-
-原生物理表达不了的行为另写 `behavior.py`（[规范](../designs/asset-pipeline/behaviors.md)），本章两个资产都不需要。
-
-构建结果在 `assets/objects/<类别>/<编号>/`：`object.usdz` 是仿真加载的资产，`physics_build.json` 是构建报告；测试结果在 `physics_test/`。
-
-## 命令
-
-构建物理资产（省略 `--assets` 时构建所有带 `physics.py` 的资产和 [`configs/rigid_physics.json`](../../configs/rigid_physics.json) 中的单刚体资产）：
-
-```bash
-uv run python scripts/assets/build_physics.py --assets pen/000002 cabinet/000000 --gpu 0
-```
-
-构建报告中，笔应有 5 个刚体、11 个部件、79 个碰撞形状，盒子应有 4 个刚体、26 个部件、33 个碰撞形状。
-
-运行物理测试（省略 `--assets` 时测试所有带 `physics_test.py` 的资产）：
-
-```bash
-uv run python scripts/assets/physics_test.py --assets pen/000002 cabinet/000000 --physics isaac-cpu isaac-gpu --gpus 0 1 2
-```
-
-- `--physics` 必填，列出要运行的物理后端：`isaac-cpu`、`isaac-gpu`。
-- 每个资产的每个后端是一个进程，`--jobs` 个同时运行：本机运行时平均分到 `--gpus` 列出的显卡上，`--jobs` 默认每张卡一个；`--launcher PREFIX` 把每个进程交给作业调度器，以 `PREFIX bash -c '<命令>'` 提交，由调度器选卡，例如 `--launcher "srun --gres=gpu:1"`，这时不给 `--gpus`，`--jobs` 默认 16。本例 4 组在三张卡上约 5 分钟。
-- 进程中途退出（如显存不足、被调度器终止）时，没有写出结果的测试自动重跑，次数由 `--retries` 设置（默认 1）；运行完但未通过的测试不重跑。
-- `--tests close pull_comparison` 只运行指定的测试。
-- `--scripts asset_sources/objects` 使用源码目录中正在修改的测试，默认用构建时复制的快照。快照与源码不同时会打印 `WARNING`：修改了测试就重新构建，或加 `--scripts`。
-- GPU 默认同时模拟 4 个相同的环境，结果取第一个环境；`--num-envs` 可修改。
-- 默认每项测试只跑一遍；需要在 README 记录性能时加 `--benchmark`，按标准方法测量 RTF（实时因子），耗时约为默认的 3–5 倍。
-
-## 测试项与关键指标
-
-**带盖笔**：笔帽靠三颗钢珠弹簧卡在笔颈的凸棱上。
-
-| 测试 | 内容 | 关键指标（CPU / GPU） |
+| 交付物 | 位置 | 内容 |
 | --- | --- | --- |
-| `pull_comparison` | 固定笔身，夹住笔帽以 5 mm/s 拔出，紧帽和松帽各一支 | 拔帽力：紧帽 2.36 / 2.73 N，松帽约 0 N |
-| `close` | 夹住笔帽沿笔轴推：先限力 0.3 N，应停在卡扣前；再逐渐加大推力直到盖紧 | 合帽力 3.74 / 2.14 N |
-| `drop_heights` | 三支笔从 0.2、0.5、1 m 同时落地 | 落地后能稳定下来；笔帽被震出的距离：CPU 0.3 / 4.3 / 12.9 mm，GPU 0.4 / 2.2 / 3.5 mm |
-| `gravity_rotation` | 紧帽和松帽两支笔从帽朝上慢慢转到帽朝下 | 紧帽保持，松帽滑落 |
+| 物理源码（进 Git） | `asset_sources/objects/<类别>/<编号>/` | `physics.py`（质量、接触材料、关节摩擦与驱动，见[规范](../specs/physics.md)）、`physics_test.py`（物理测试，见[规范](../specs/physics-tests.md)）；README 的“物理实测”一节记录关键指标和性能 |
+| 物理资产 | `assets/objects/<类别>/<编号>/` | `object.usdz`（仿真加载的资产）、`physics_build.json` 构建报告 |
+| 测试结果 | 同上 `physics_test/` | `summary.json` 汇总；`<后端>/<测试>.mp4` 视频与 `<后端>/<测试>/plots.jpg` 曲线 |
 
-**三抽屉盒**：抽屉滑轨用关节摩擦，静摩擦 0.50 N、动摩擦 0.35 N。
-
-| 测试 | 内容 | 关键指标（CPU / GPU） |
-| --- | --- | --- |
-| `drawer_slide` | 固定外壳，逐渐拉开第一个抽屉后松手，再以 2 N 推拉到全开和全关 | 松手后立即被摩擦停住；停在两端限位（0–173 mm），不越界 |
-| `pull_cabinet` | 盒子靠橡胶脚垫放在地面上，拉力逐渐加到 8 N 拉第三个抽屉 | 抽屉拉到底（0.173 m）后，盒子在地面上被拉动 15.3 / 15.9 cm |
-| `gravity_tilt` | 夹住外壳，从水平慢慢前倾到 45° | 抽屉起滑角 18.9° / 15.8–16.6°（解析值约 18.6°，要求不低于 15°） |
-
-这些参数都是未经实物标定的仿真值。CPU 与 GPU 的合帽力相差较大，见 [#15](https://github.com/xucj98/table-1000/issues/15)。
+每项测试是为这个资产专门设计的过程，例如笔的拔帽、合帽、跌落和倒置，盒子的抽屉推拉、起滑角。
 
 ## 验收
 
-有测试失败时，脚本以非零退出码结束。每个资产的 `physics_test/` 下有一份 `summary.json`，先看它：
+**`summary.json`**：每个后端的 `failed` 为空；每项测试的关键指标（带中文标签，CPU 与 GPU 并排）与 README“物理实测”的记录相符，例如笔的合帽力 CPU 约 3.7 N、GPU 约 2.1 N；`rtf.physics` 不明显低于 README 的记录（本例 CPU 约 0.3–1）。
 
-| 字段 | 看什么 |
-| --- | --- |
-| `backends` | 每个后端的引擎版本、并行环境数；`failed` 应为空 |
-| `tests.<测试>.status` | 每个后端应为 `completed`；失败时 `error` 写明原因 |
-| `tests.<测试>.metrics` | 上表的关键指标，各后端的值并排列出，应与预期相符 |
-| `tests.<测试>.rtf` | 物理推进（`physics`）和含视频（`video`）的 RTF，不应明显低于 README 中的记录 |
+**视频**：过程符合测试意图，没有穿透、抖动、飞出；有疑问时对照 `plots.jpg` 的曲线。
 
-然后在 `physics_test/isaac-cpu/` 和 `physics_test/isaac-gpu/` 中，每项测试看两个文件：
+验收通过后，把关键指标和性能（加 `--benchmark` 测量）更新到 README。
 
-1. `<测试名>.mp4`：完整过程是否符合上表的测试意图，有没有穿透、抖动、飞出等异常；
-2. `<测试名>/plots.jpg`：关注曲线的趋势和峰值是否与视频一致。
+## 命令
 
-验收通过后，把关键指标和 `--benchmark` 测得的性能更新到资产 README 的“物理实测”一节。不通过时，修改 `physics.py` 或 `physics_test.py`，重新构建并重跑受影响的测试。
+```bash
+# 构建物理资产
+uv run python scripts/assets/build_physics.py --assets pen/000002 cabinet/000000 --gpu 0
+# 物理测试，本例约 5 分钟；跑完为每个资产打印一行 SUMMARY <路径>
+uv run python scripts/assets/physics_test.py --assets pen/000002 cabinet/000000 --physics isaac-cpu isaac-gpu --gpus 0 1 2
+```
+
+其他参数用 `--help` 查看。
+
+## 不通过时
+
+修改 `physics.py` 或 `physics_test.py`，重新构建，再用 `--tests` 只重跑受影响的测试。测试默认运行构建时复制的 `physics_test.py`，改了测试要重新构建。

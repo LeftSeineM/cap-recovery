@@ -4,13 +4,14 @@ Table-1000 是面向机器人桌面整理任务的 benchmark 与场景资产项�
 
 ## 文档
 
-- [一期实施计划](docs/core/plan.md)
-- [研究方案](docs/core/research-proposal.md)
-- [技术参考](docs/reference/reference-assessment.md)
-- [开发约定](docs/repository-conventions.md)
-- [资产生产规范](docs/designs/asset-pipeline/README.md)
-- [可拆装笔帽方案选型](docs/designs/assembly-method-selection.md)
-- [操作手册](docs/tutorials/README.md)
+| 文档 | 读者 | 内容 |
+| --- | --- | --- |
+| [研究方案](docs/research/proposal.md)、[一期计划](docs/research/plan.md)、[技术参考](docs/research/references.md)、[专家迭代](docs/research/expert-iteration.md) | 所有人 | 研究问题、交付物、计划 |
+| [操作手册](docs/tutorials/README.md) | 人 | 命令、产出与人工验收 |
+| [协作约定](docs/conventions/workflow.md)、[开发原则](docs/conventions/development.md)、[仓库与目录](docs/conventions/repository.md)、[文档写法](docs/conventions/writing.md) | 所有人与 agent | 怎样协作、开发和写文档 |
+| [规范](docs/specs/README.md) | agent | 资产、场景与专家的文件、接口和格式 |
+| [方案选择](docs/decisions/pen-cap-snap.md) | 所有人 | 重要方案的结论与依据 |
+| [实验台账](docs/experiments/README.md) | 所有人 | 研究结论与关键实验结果，可按提交复现 |
 
 ## 开发环境
 
@@ -41,16 +42,4 @@ uv sync --locked --all-extras        # 或 --extra sim 等只装需要的组
 
 ## 目录
 
-```text
-docs/                         # 计划、研究方案与设计文档
-configs/                      # pipeline、场景与测试配置
-asset_sources/                # 资产生成源码、配置与资源引用
-assets/                       # 本地生成或下载的资产，不提交
-data/                         # 生成的轨迹与数据集，不提交
-table_1000/                   # 可复用代码
-scripts/                      # 薄入口与教程示例
-tests/                        # 以单元测试为主，目录对应 table_1000/
-outputs/                      # 日志与临时实验，不提交
-pyproject.toml                 # 包定义与依赖
-uv.lock                       # 核心环境锁文件
-```
+顶层目录的用途和是否进 Git 见[仓库与目录](docs/conventions/repository.md#目录)。

@@ -41,7 +41,7 @@ Stage 使用米、千克和 Z 向上。USD 原生转动关节/驱动角度使用
 
 ## 单刚体资产
 
-不需要机构行为的资产（大部分文具、容器）整体按一个刚体仿真，不写自己的 `physics.py`，在 [`configs/rigid_physics.json`](../../../configs/rigid_physics.json) 中各占一行：
+不需要机构行为的资产（大部分文具、容器）整体按一个刚体仿真，不写自己的 `physics.py`，在 [`configs/rigid_physics.json`](../../configs/rigid_physics.json) 中各占一行：
 
 ```json
 {

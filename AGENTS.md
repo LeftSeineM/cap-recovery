@@ -1,7 +1,8 @@
 # Table-1000 agent 入口
 
-开始工作前阅读 [README.md](README.md)、[开发约定](docs/repository-conventions.md)、[资产存储布局](docs/designs/asset-pipeline/README.md#资产布局) 和任务涉及的设计文档。
+开始工作前阅读 [README.md](README.md)、[协作约定](docs/conventions/workflow.md)、[开发原则](docs/conventions/development.md)、[仓库与目录](docs/conventions/repository.md)、[文档写法](docs/conventions/writing.md)，以及任务涉及的[规范](docs/specs/README.md)。
 
-- 改动通过 PR 提交到 `main`，合并前完成审查和相应验证。
-- 本地环境、凭据、机器配置和调试产物不进入公共仓库；资产定义放在 `asset_sources/`，生成或下载的资产放在已忽略的 `assets/`，生成的轨迹与数据集放在已忽略的 `data/`，开发和实验的运行（每次一个不被覆盖的目录，如 `runs/expert/`）放在已忽略的 `runs/`，日志和测试结果放在已忽略的 `outputs/`。
-- 几何、层级、关节和物理属性由资产文件表示；仅在出现明确消费者需求时扩展 `metadata.json`，并同步设计文档和读取方。
+- 改动通过 PR 提交到 `main`，合并前完成审查和相应验证；合并需要项目负责人批准。新 issue 先与负责人确认再创建。
+- 本地环境、凭据、机器配置和调试产物不进入公共仓库；资产定义放在 `asset_sources/`，生成或下载的资产放在已忽略的 `assets/`，开发运行放在已忽略的 `runs/`，日志和临时结果放在已忽略的 `outputs/`。
+- 几何、层级、关节和物理属性由资产文件表示；仅在出现明确消费者需求时扩展 `metadata.json`，并同步规范和读取方。
+- 改变行为或接口时同步更新规范与手册；研究结论和关键实验结果写进[实验台账](docs/experiments/README.md)。
