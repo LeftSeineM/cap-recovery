@@ -251,3 +251,13 @@ def open_gripper(ctx, arm, gap=None):
 
 def close_gripper(ctx, arm):
     ctx.solver(arm).close_gripper()
+
+
+# Public skill calls are the evaluated, replayable boundary.
+from table_1000.experts.trace import traced
+
+for _name in ('grasp', 'pick', 'place', 'push', 'move_by_displacement', 'release', 'handover',
+              'make_room', 'ready', 'open_gripper', 'close_gripper'):
+    globals()[_name] = traced()(globals()[_name])
+retry = traced(concrete=False)(retry)
+chain = traced(concrete=False)(chain)

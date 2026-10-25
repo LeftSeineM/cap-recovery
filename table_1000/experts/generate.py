@@ -110,9 +110,12 @@ class Generator:
 
     DEVICES = {'isaac-cpu': 'cpu'}
 
-    def __init__(self, scene_name, output, assets, root, physics='isaac-cpu', steps=None, source=None):
+    def __init__(self, scene_name, output, assets, root, physics='isaac-cpu', steps=None, source=None,
+                 problems='failed', **env_kwargs):
         """``steps``: ``(first, last)`` of the expert's steps to run (all when None); ``source``: where
-        the states come from (a checkpoint file), for the reports."""
+        the states come from (a checkpoint file), for the reports; ``problems`` saves numerical
+        problems of failed/error runs, all runs, or none; ``env_kwargs`` (cameras, views) go to
+        the :class:`~table_1000.sim.isaaclab.env.RobotEnv`."""
         from table_1000.robots import load_spec
         from table_1000.robots.kinematics import RobotModel
         from table_1000.sim.isaaclab import recording
@@ -120,14 +123,14 @@ class Generator:
         self.recording = recording
         started = time.perf_counter()
         self.name, self.output, self.assets = scene_name, Path(output), Path(assets)
-        self.steps, self.source = steps, source
+        self.steps, self.source, self.problems = steps, source, problems
         self.scene, self.expert = load(scene_name, 'scene', root), load(scene_name, 'expert', root)
         if steps and not 1 <= steps[0] <= steps[1] <= len(getattr(self.expert, 'STEPS', ())):
             raise ValueError(f'steps {steps[0]}-{steps[1]}: the expert of {scene_name} has '
                              f'{len(getattr(self.expert, "STEPS", ()))} STEPS')
         self.spec = load_spec(Path(self.scene.ROBOT['asset']).name, root)
         self.env = RobotEnv(self.scene, self.spec, self.assets, root=root, device=self.DEVICES[physics],
-                            recorders=recording.recorder_cfg(self.output))
+                            recorders=recording.recorder_cfg(self.output), **env_kwargs)
         self.model = RobotModel(self.spec, self.output / 'planning', root)
         for name in ('episodes', 'checkpoints'):
             (self.output / name).mkdir(parents=True, exist_ok=True)
@@ -154,6 +157,8 @@ class Generator:
         first = self.steps[0] if self.steps else 1
         report = {'scene': self.name, 'seed': seed, 'attempt': attempt, 'steps_run': self.steps, 'from': self.source,
                   'repeat': repeat}
+        snapshot = json.loads(state['_expert_frame']) if '_expert_frame' in state else None
+        state = {key: value for key, value in state.items() if key != '_expert_frame'}
         self.env.reset_to_state(state)
         init_s = time.perf_counter() - started
         self.recording.begin(self.env)
@@ -165,10 +170,24 @@ class Generator:
                                    else seed + 1 + 1_000_003 * (first - 1))   # OMPL rejects 0
         ctx = Context(self.env, self.model, self.scene, self.assets, np.random.default_rng(streams), start=start,
                       only=self.steps)
+        from table_1000.experts.trace import CallTrace, replay, restore, encode
+        ctx.trace = CallTrace(ctx, seed, attempt, repeat)
+        from table_1000.experts.problems import Problems
+        if self.problems != 'none' and not getattr(self.expert, 'human', False):
+            ctx.trace.problems = Problems(ctx)
+            ctx.trace.problems.install()
         try:
-            if start is not None:
-                ctx.hold(RESUME_S)
-            self.expert.solve(ctx)
+            if snapshot:
+                if getattr(self.expert, 'human', False):
+                    restore(ctx, snapshot['frame'])
+                    self.expert.solve(ctx)
+                else:
+                    ctx.step_names = [step.name for step in self.expert.STEPS]
+                    report['result'] = encode(replay(ctx, snapshot, self.expert))
+            else:
+                if start is not None:
+                    ctx.hold(RESUME_S)
+                self.expert.solve(ctx)
             report['status'] = 'success'
         except ExpertFailed as error:
             report.update(status='failed', failure={'subtask': error.subtask, 'reason': error.reason,
@@ -178,8 +197,28 @@ class Generator:
             report.update(status='error', failure={'subtask': ctx.current, 'reason': 'error',
                                                    'traceback': traceback.format_exc()})
         finally:
+            if ctx.trace.problems:
+                ctx.trace.problems.close()
             for solver in ctx.solvers.values():
                 solver.world.clear()
+        name = f'{seed}-{repeat}' if repeat else str(seed)
+        report['call_trace'] = f'calls/{name}.json.gz'
+        report['failure_frame'] = ctx.trace.failure_frame
+        ctx.trace.save(self.output / report['call_trace'])
+        report['solve_trace'] = None
+        if ctx.trace.problems and (self.problems == 'all' or report['status'] != 'success'):
+            report['solve_trace'] = f'problems/{name}.json.gz'
+            ctx.trace.problems.save(self.output / report['solve_trace'])
+        if snapshot:
+            failed = ctx.trace.frames[ctx.trace.failure_frame] if ctx.trace.failure_frame is not None else None
+            original = snapshot['failure']
+            report['replay'] = {'source_batch': snapshot.get('batch'), 'source_frame': snapshot['frame']['id'],
+                                'source_enter': snapshot['frame']['enter'], 'name': snapshot['frame']['name'],
+                                'check': snapshot['check'], 'original_failure': original,
+                                'same_frame': bool(failed and (failed.get('source_id') == snapshot['failed_frame_id'])),
+                                'same_reason': report.get('failure', {}).get('reason') == original.get('reason')}
+            if snapshot['check'] and failed and failed.get('phase') == 'check':
+                report['replay']['same_frame'] = True
         report.update(
             step_names=ctx.step_names, steps=[{key: entry[key] for key in ('step', 'name', 'at', 'wall_s', 'cpu_s')}
                                               for entry in ctx.checkpoints],

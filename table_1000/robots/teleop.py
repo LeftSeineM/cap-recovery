@@ -102,10 +102,14 @@ def action_from_keys(keys, arm, gap, dt, yaw=0.):
 
 
 class Server:
-    """Serves the page, the camera stream, key events and a status line."""
+    """Serves the page, the camera stream, key events and a status line; ``page`` replaces the
+    keyboard page (``__IMAGES__`` becomes the streams), ``gets`` and ``posts`` add paths:
+    ``{path: function}`` returning ``(body bytes, content type)``, a POST's function given the JSON
+    body."""
 
-    def __init__(self, keys, views, port):
+    def __init__(self, keys, views, port, page=PAGE, gets=None, posts=None):
         self.keys, self.views, self.frames, self.status = keys, list(views), {}, ''
+        gets, posts = gets or {}, posts or {}
         self.condition = threading.Condition()
         server = self
 
@@ -115,8 +119,10 @@ class Server:
 
             def do_GET(self):
                 if self.path == '/':
-                    images = ''.join(f'<img src="/stream/{name}">' for name in server.views)
-                    return self.reply(PAGE.replace('__IMAGES__', images).encode(), 'text/html')
+                    images = ''.join(f'<img src="/stream/{name}" data-view="{name}">' for name in server.views)
+                    return self.reply(page.replace('__IMAGES__', images).encode(), 'text/html')
+                if self.path in gets:
+                    return self.reply(*gets[self.path]())
                 if self.path == '/status':
                     return self.reply(server.status.encode(), 'text/plain')
                 if self.path.startswith('/stream/'):
@@ -124,9 +130,11 @@ class Server:
                 self.send_error(404)
 
             def do_POST(self):
-                if self.path != '/key':
+                if self.path != '/key' and self.path not in posts:
                     return self.send_error(404)
-                event = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                event = json.loads(self.rfile.read(int(self.headers['Content-Length'])) or b'{}')
+                if self.path in posts:
+                    return self.reply(*posts[self.path](event))
                 server.keys.event(event['key'], bool(event['down']))
                 self.reply(b'ok', 'text/plain')
 

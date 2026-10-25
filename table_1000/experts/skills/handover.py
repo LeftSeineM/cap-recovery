@@ -23,6 +23,7 @@ from table_1000.experts.grasps import grasp_candidates, standoff
 from table_1000.experts.skills.common import APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, Unmet, collisions, normalized
 from table_1000.experts.skills.grasping import HELD_TOLERANCE
 from table_1000.experts.solver import PlanningFailed
+from table_1000.experts.problems import decision, mark
 
 REACH = (.30, .20)                  # m ahead of the point between the shoulders
 HEIGHTS = (0., .10)                 # m above the object's height now, or TABLE_CLEARANCE above the table
@@ -62,6 +63,7 @@ class Handing:
                                       pose))
         return [pose for *_, pose in sorted(poses, key=lambda option: option[:2])]
 
+    @decision
     def handoffs(self, target, giver, to, need):
         """Feasible handovers ``(pose, q_give, grasp)``, the first grasp of each pose, as they are found
         (see the module docstring)."""
@@ -74,13 +76,16 @@ class Handing:
         checked = 0
         self.rejected = {'giving IK': 0, 'receiving IK': 0, 'pre-grasp IK': 0, 'need': 0}
         asked = need is None
-        for pose in self.handover_poses(body, giver):
+        for index, pose in enumerate(self.handover_poses(body, giver)):
+            mark(self, 'candidate', index, pose=pose)
             if checked >= MAX_HANDOVER_IK:
                 return
             checked += 1
             give = pose @ np.linalg.inv(tcp_object)
+            mark(self, 'giving IK')
             status, q_give = self.model.ik(giver, give, self.model.q, world=True, lift=True, attempts=IK_ATTEMPTS)
             if status != 'Success':
+                mark(self, 'giving IK', outcome='rejected', status=status)
                 self.rejected['giving IK'] += 1
                 continue
             transform = pose @ target.offset
@@ -92,6 +97,7 @@ class Handing:
                 holds = itertools.islice(grasp_candidates(target.shape, transform, self.hands[to], obstacles, preferred,
                                                           approach_distance=APPROACH), NEED_HOLDS)
                 if not any(need.accepts(to, np.linalg.inv(grasp.pose) @ pose) for grasp in holds):
+                    mark(self, 'need', outcome='rejected')
                     self.rejected['need'] += NEED_HOLDS
                     return
             moved = pose @ np.linalg.inv(body)
@@ -110,18 +116,25 @@ class Handing:
                     for name in target.names:
                         receiving.world.set_pose(name, moved @ poses[receiving.world.objects[name].body])
                     start = self.model.vector(side.finger_targets(grasp.open_gap), q_give)
+                    mark(self, 'receiving IK', f'{index}/{count}', grasp=grasp)
                     status, q_grasp = self.model.ik(to, grasp.pose, start, world=True, attempts=IK_ATTEMPTS)
                     if status != 'Success':
+                        mark(self, 'receiving IK', outcome='rejected', status=status)
                         self.rejected['receiving IK'] += 1
                         continue
+                    mark(self, 'pre-grasp IK')
                     status, _ = self.model.ik(to, standoff(grasp.pose, APPROACH), q_grasp, world=True,
                                               attempts=IK_ATTEMPTS)
                     if status != 'Success':
+                        mark(self, 'pre-grasp IK', outcome='rejected', status=status)
                         self.rejected['pre-grasp IK'] += 1
                         continue
+                    mark(self, 'need')
                     if need is not None and not need.accepts(to, np.linalg.inv(grasp.pose) @ pose):
+                        mark(self, 'need', outcome='rejected')
                         self.rejected['need'] += 1
                         continue
+                    mark(self, 'screen', outcome='accepted')
                     found = grasp
                     break
             finally:

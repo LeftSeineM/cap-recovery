@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from table_1000.experts.context import Unreachable
+from table_1000.experts.trace import traced
 from table_1000.experts.skills.common import Unmet
 
 ADAPT = ('base', 'handover')
@@ -30,6 +31,7 @@ class InHand:
     accepts: callable
     arms: list
     hands: callable = None
+    recipe: dict = None
 
 
 class Action:
@@ -41,6 +43,7 @@ class Action:
         """What this action needs of the state the one before leaves it (None: nothing)."""
         return None
 
+    @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
         """Do it, leaving the state as ``need`` asks (else :class:`Unmet`); ``base``: whether the base may move."""
         raise NotImplementedError
@@ -52,6 +55,7 @@ class Pick(Action):
     def __init__(self, obj, *, instruction=None, **options):
         self.obj, self.options, self.instruction = obj, options, instruction
 
+    @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
         from table_1000.experts import skills
         return skills.retry(ctx, lambda: skills.pick(ctx, self.obj, need=need, base=base, **self.options))
@@ -76,6 +80,7 @@ class Place(Action):
         region, options = self.where(ctx)
         return ctx.skills().need(self.obj, region, **{key: value for key, value in options.items() if key != 'arm'})
 
+    @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
         from table_1000.experts import skills
 
@@ -91,6 +96,7 @@ class Handover(Action):
     def __init__(self, obj, *, instruction=None):
         self.obj, self.instruction = obj, instruction
 
+    @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
         from table_1000.experts import skills
         return skills.handover(ctx, self.obj, need=need)

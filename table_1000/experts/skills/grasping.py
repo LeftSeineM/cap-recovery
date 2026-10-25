@@ -10,6 +10,7 @@ from table_1000.experts.grasps import SUPPORT_CLEARANCE, fitted, grasp_candidate
 from table_1000.experts.skills.common import (APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, ROOM_PLACES, SUPPORT_DISTANCE,
                                               Target, Unmet, collisions, normalized, planning_object)
 from table_1000.experts.solver import PlanningFailed
+from table_1000.experts.problems import decision, mark
 
 LIFT = .10              # m, pick's lift
 HELD_TOLERANCE = .005   # m the closed gap may fall short of the gap at which the pads touch the object
@@ -103,6 +104,7 @@ class Grasping:
             obstacles.append((body, SUPPORT_CLEARANCE if support else 0.))
         return obstacles, supports
 
+    @decision
     def options(self, target, arms, skip, point=None, approach=None, then=None, max_angle=None, tried=None,
                 need=None):
         """Feasible ``(arm, grasp, supports, q_grasp, q_pre)``, in the order tried: those of either
@@ -137,30 +139,39 @@ class Grasping:
                 supports, candidates = found[arm]
                 checked = 0
                 for index, grasp in enumerate(candidates):
+                    mark(self, 'candidate', f'{arm}/{index}/{lift}', grasp=grasp, lift=lift)
                     if tried[lift] >= MAX_PLANS:
+                        mark(self, 'budget', outcome='not checked')
                         break
                     if (arm, index) in skip:
+                        mark(self, 'already planned', outcome='not checked')
                         continue
                     if checked >= MAX_IK or grasp.info['approach_deg'] > limit + 1e-6:
+                        mark(self, 'IK budget or approach', outcome='not checked', checked=checked, limit=limit)
                         break
                     checked += 1
                     start = self.model.vector(side.finger_targets(grasp.open_gap))
                     solver.sync()
                     # The fingers touch the object and come closer to its supports than the padding.
                     solver.allow([*target.names, *supports])
+                    mark(self, 'grasp IK')
                     status, q_grasp = self.model.ik(arm, grasp.pose, start, world=True, lift=lift, attempts=IK_ATTEMPTS)
                     solver.allow([*target.names, *supports], False)
                     if status != 'Success':
+                        mark(self, 'grasp IK', outcome='rejected', status=status)
                         self.rejected['grasp IK'] += 1
                         if self.rejected['grasp IK'] <= WHY_LIMIT:
                             self.why(arm, grasp.pose, start, [*target.names, *supports])
                         continue
+                    mark(self, 'pre-grasp IK')
                     status, q_pre = self.model.ik(arm, standoff(grasp.pose, APPROACH), q_grasp, world=True,
                                                   attempts=IK_ATTEMPTS)
                     if status != 'Success':
+                        mark(self, 'pre-grasp IK', outcome='rejected', status=status)
                         self.rejected['pre-grasp IK'] += 1
                         continue
                     if then is not None:
+                        mark(self, 'then')
                         end = translated(grasp.pose, then)
                         status, q_end = self.model.ik(arm, end, q_grasp, world=True, lift=lift, attempts=IK_ATTEMPTS)
                         if status == 'Success' and not upward:
@@ -180,14 +191,19 @@ class Grasping:
                         # Close to the body the hand may not reach higher; then the torso must rise that far.
                         headroom = self.model.limits[self.model.lift_indices(), 1] - q_grasp[self.model.lift_indices()]
                         if status != 'Success' and not (lift and upward and np.min(headroom) >= then[2]):
+                            mark(self, 'then', outcome='rejected', status=status)
                             self.rejected['then'] += 1
                             continue
+                    mark(self, 'need')
                     if need is not None and not need.accepts(arm, np.linalg.inv(grasp.pose) @ body):
+                        mark(self, 'need', outcome='rejected')
                         self.rejected['need'] += 1
                         continue
+                    mark(self, 'screen', outcome='accepted')
                     skip.add((arm, index))
                     yield arm, grasp, supports, q_grasp, q_pre, lift
 
+    @decision
     def why(self, arm, pose, start, allowed):
         """Count, in ``self.rejected['collisions']``, what an IK solution of ``pose`` that ignores
         collisions would collide with (``'no IK'`` when there is none)."""
@@ -301,12 +317,14 @@ class Grasping:
                 paths[arm].append(path)
         return paths
 
+    @decision
     def reach(self, target, arms, skip, point, approach, then, max_angle=None, need=None):
         """Move to the first grasp of :meth:`options` whose motion plans, fingers open around the
         object; ``(arm, grasp, supports)``, or None when no candidate is left."""
         ctx, tried = self.ctx, {False: 0, True: 0}
         for arm, grasp, supports, q_grasp, q_pre, lift in self.options(target, arms, skip, point, approach, then,
                                                                       max_angle, tried, need):
+            mark(self, 'plan', f'{arm}/{tried[lift]}/{lift}', grasp=grasp)
             tried[lift] += 1
             solver = self.solvers[arm]
             try:
@@ -316,9 +334,11 @@ class Grasping:
                                                     attempts=CANDIDATE_PLANS if lift else 1)
                 solver.allow([*target.names, *supports])
                 solver.move_to_pose_with_screw(grasp.pose)
+                mark(self, 'plan', outcome='accepted')
                 return arm, grasp, supports
             except PlanningFailed as error:
                 solver.allow([*target.names, *supports], False)
+                mark(self, 'plan', outcome='rejected', reason=error.reason)
                 ctx.note('next grasp', arm=arm, cost=grasp.cost, lift=lift, reason=error.reason, **collisions(error))
                 if not lift and error.reason.startswith('RRTConnect'):
                     # No way there at this torso height: the other candidates held so share the narrow

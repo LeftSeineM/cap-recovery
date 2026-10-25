@@ -7,6 +7,7 @@ from table_1000.experts.grasps import standoff, translated
 from table_1000.experts.skills.common import (CANDIDATE_PLANS, IK_ATTEMPTS, RETREATS, ROOM_PLACES, SUPPORT_DISTANCE,
                                               collisions, normalized)
 from table_1000.experts.solver import PlanningFailed, note_torso
+from table_1000.experts.problems import decision, mark
 
 PARTIALS = (.75, .5, .25)     # fractions of a straight move tried when all of it does not plan
 SHORT_RETREAT = .02     # m back along the approach that takes the fingers off what they held
@@ -127,6 +128,7 @@ class Motion:
         ctx.note('rise short', rest=rest, reason=reason, collisions=collisions)
         return 1. - rest / rise
 
+    @decision
     def push(self, target, direction, distance, arm=None):
         """Push ``target`` (:class:`Target`) by ``distance`` along world ``direction``; see the
         module docstring. Returns ``{'arm', 'tilt', 'moved'}`` (how far its body went)."""
@@ -154,18 +156,25 @@ class Motion:
         while not pushed:
             for lift, (index, (candidate, tilt, contact)) in ((lift, option) for lift in (False, True)
                                                               for option in enumerate(options)):
+                mark(self, 'candidate', f'{index}/{lift}', arm=candidate, contact=contact, tilt=tilt, lift=lift)
                 if index in tried:
+                    mark(self, 'already planned', outcome='not checked')
                     continue
                 solver = self.solvers[candidate]
                 start = self.model.vector(ctx.spec.arms[candidate].finger_targets(0.))
+                mark(self, 'pre-push IK')
                 status, q_pre = self.model.ik(candidate, translated(contact, -direction * PUSH_GAP), start, world=True,
                                               lift=lift, attempts=IK_ATTEMPTS)
                 if status != 'Success':
+                    mark(self, 'pre-push IK', outcome='rejected', status=status)
                     continue
+                mark(self, 'end IK')
                 status, _ = self.model.ik(candidate, translated(contact, direction * distance), q_pre, world=True,
                                           lift=lift, attempts=IK_ATTEMPTS, check_collision=False)
                 if status != 'Success':
+                    mark(self, 'end IK', outcome='rejected', status=status)
                     continue
+                mark(self, 'plan')
                 tried.add(index)
                 # The fingertips push the part and may touch the rest of its body (a drawer's front).
                 touched = [name for name, obj in solver.world.objects.items() if obj.body == target.body] or target.names
@@ -174,10 +183,12 @@ class Motion:
                     solver.move_to_pose_with_RRTConnect(None, lift=True, goals=[q_pre], attempts=CANDIDATE_PLANS)
                     solver.allow(touched)
                     solver.move_to_pose_with_screw(contact)
+                    mark(self, 'plan', outcome='accepted')
                     pushed = True
                     break
                 except PlanningFailed as error:
                     solver.allow(touched, False)
+                    mark(self, 'plan', outcome='rejected', reason=error.reason)
                     ctx.note('next push', arm=candidate, tilt=float(tilt), reason=error.reason, **collisions(error))
             if not pushed:
                 if not stowed and self.stow():

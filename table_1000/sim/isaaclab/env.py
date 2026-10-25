@@ -324,20 +324,31 @@ class RobotEnv:
         self.contacts.clear()
         return self.observe()
 
+    def targets(self):
+        """``{group: [N, d]}`` (NumPy) what each action term holds: joint targets, the gripper's
+        commanded gap (below the measured one while it squeezes), the base's ``(v, w)``. With the
+        scene state it is what :meth:`reset_to_state` restores; an action in ``'pos'`` mode is it."""
+        return {name: term.get_target().cpu().numpy() for name, term in self.terms.items()
+                if hasattr(term, 'get_target')}
+
     def reset_to_state(self, state):
         """Reset to a scene state (``InteractiveScene.get_state(is_relative=True)``, as NumPy or
         tensors with the environment axis): every body where it was, the action targets holding
-        the restored joints."""
+        the restored joints, or ``state['targets']`` (:meth:`targets`) where the state has them."""
         def to_tensors(tree):
             return {key: to_tensors(value) if isinstance(value, dict) else torch.as_tensor(value, device=self.device)
                     for key, value in tree.items()}
 
+        state = to_tensors(state)
         self.env.pending_reset = ({}, self.initial_robot_q(), {})
-        self.env.reset_to(to_tensors(state), None, is_relative=True)
+        self.env.reset_to(state, None, is_relative=True)
         # Lab resets the action terms before writing the state; they hold the joints written.
         for term in self.terms.values():
             term.reset()
-        self.place_kinematic(to_tensors(state))
+        # A gripper holding an object squeezes it: its target is not where its fingers are.
+        for name, target in state.get('targets', {}).items():
+            self.terms[name].set_target(target.to(torch.float32))
+        self.place_kinematic(state)
         self.env.sim.forward()
         self.steps = 0
         self.contacts.clear()

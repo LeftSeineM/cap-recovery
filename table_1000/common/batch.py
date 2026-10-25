@@ -225,6 +225,12 @@ def worker_gpu(gpu):
     return int(visible)
 
 
+def run_name(checkout, label=None):
+    """A development run's name: ``<date>-<time>-<commit>[-<label>]``, ``nocommit`` outside a checkout."""
+    parts = [time.strftime('%Y%m%d-%H%M%S'), (checkout or 'nocommit').replace('+', '-')]
+    return '-'.join(parts + ([label] if label else []))
+
+
 def commit(root):
     """The checked-out commit of ``root``, ``+dirty`` with uncommitted changes; None unless ``root``
     is a checkout's top (a copy of the sources inside another checkout is not that checkout)."""

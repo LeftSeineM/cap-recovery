@@ -10,6 +10,7 @@ from table_1000.experts.context import ExpertFailed, Unreachable
 from table_1000.experts.grasps import translated
 from table_1000.experts.skills.common import CANDIDATE_PLANS, IK_ATTEMPTS, ROOM_PLACES, collisions
 from table_1000.experts.solver import PlanningFailed
+from table_1000.experts.problems import decision, mark
 
 PLACE_ABOVE = .08       # m, place comes down from this high above the release pose
 PLACE_CLEARANCE = .01   # m between the held object and the surface at the release
@@ -44,6 +45,7 @@ def overlaps(outline, low, high):
 class Placing:
     """The place skill of :class:`~table_1000.experts.skills.Skills`."""
 
+    @decision
     def placements(self, target, current, region, near, keep_out, step, margin):
         """``[(object pose at rest on the surface, spot)]`` in ``region`` (see :meth:`place`), the
         footprint at least ``margin`` inside it and out of ``keep_out``, nearest ``near`` first, then
@@ -86,6 +88,7 @@ class Placing:
                 kept.append((pose, spot))
         return kept
 
+    @decision
     def put_down(self, arm, options, tcp_object, clearance, above):
         """Move the held object down at the first of ``options`` (``(object pose, spot)``) in reach
         (IK above and at the release) whose motion plans; ``{'done', 'spot', 'ik_checked',
@@ -100,6 +103,7 @@ class Placing:
                     break
                 if index in planned:
                     continue
+                mark(self, 'candidate', f'{index}/{lift}', placed=placed, spot=spot, lift=lift)
                 checked += 1
                 count = result['planned']
                 if self.lower(arm, placed, spot, tcp_object, clearance, above, lift, result):
@@ -108,6 +112,7 @@ class Placing:
                     planned.add(index)
         return result
 
+    @decision
     def lower(self, arm, placed, spot, tcp_object, clearance, above, lift, result):
         """Down at one of :meth:`put_down`'s options if it is in reach (``lift``: the torso lift
         moving too) and its motion plans; whether it is, counted in ``result``."""
@@ -116,31 +121,38 @@ class Placing:
         release = translated(placed, [0., 0., clearance]) @ np.linalg.inv(tcp_object)
         # Where it is let go (the hand and arm low by a wall), then above it at that torso height:
         # the way down moves the arm alone.
+        mark(self, 'release IK')
         status, q_release = self.model.ik(arm, release, self.model.q, world=True, lift=lift, attempts=IK_ATTEMPTS)
         if status != 'Success':
+            mark(self, 'IK', outcome='rejected', status=status)
             return False
+        mark(self, 'above IK')
         status, q_above = self.model.ik(arm, translated(release, [0., 0., above]), q_release, world=True,
                                         attempts=IK_ATTEMPTS)
         if status != 'Success':
+            mark(self, 'IK', outcome='rejected', status=status)
             return False
+        mark(self, 'plan')
         result['planned'] += 1
         try:
             solver.move_to_pose_with_RRTConnect(None, lift=True, goals=[q_above], attempts=CANDIDATE_PLANS)
             solver.move_to_pose_with_screw(release)
+            mark(self, 'plan', outcome='accepted')
             result.update(done=True, spot=spot)
             return True
         except PlanningFailed as error:
+            mark(self, 'plan', outcome='rejected', reason=error.reason)
             result.update(last=error.reason, **collisions(error))
             ctx.note('next placement', arm=arm, spot=spot.tolist(), reason=error.reason, **collisions(error))
             return False
 
+    @decision
     def need(self, obj, region, near=None, keep_out=(), clearance=PLACE_CLEARANCE, above=PLACE_ABOVE,
              step=PLACE_STEP, margin=PLACE_MARGIN):
         """What :meth:`place` with these arguments needs of the hand that will hold ``obj`` (not held
         yet, at its pose now): an :class:`~table_1000.experts.skills.chain.InHand` accepting the holds
         from which ``NEED_REACHED`` of its placements are in reach (IK at the release and above it),
         and the hands at the first of them (the TCP at the release and above it, per hold)."""
-        from table_1000.experts.skills.chain import InHand
         ctx = self.ctx
         target = self.target(obj)
         current = ctx.poses()[target.body]
@@ -150,13 +162,26 @@ class Placing:
         options = self.placements(target, current, region, np.asarray(near, dtype=float)[:3], keep_out, step, margin)
         options = options[:MAX_PLACE_IK]       # those place checks
         options = [options[i] for i in np.unique(np.linspace(0, len(options) - 1, NEED_PLACES).astype(int))] if options else []
-        verdicts, obj_prefix = {}, f'{obj}:'
+        return self.restore_need({'obj': obj, 'target': target, 'options': options, 'clearance': clearance,
+                                  'above': above, 'arms': [arm for arm in self.arms if arm not in self.held],
+                                  'verdicts': [], 'origin': {'obj': obj, 'region': region, 'near': near, 'keep_out': keep_out,
+                                                            'clearance': clearance, 'above': above, 'step': step, 'margin': margin}})
 
-        def accepts(arm, tcp_object):
+    def restore_need(self, recipe):
+        """Rebuild a Place requirement with its evaluated candidates and cached verdicts."""
+        from table_1000.experts.skills.chain import InHand
+        ctx = self.ctx
+        obj, target, options = recipe['obj'], recipe['target'], recipe['options']
+        clearance, above = recipe['clearance'], recipe['above']
+        verdicts, obj_prefix = dict(recipe['verdicts']), f'{obj}:'
+
+        @decision
+        def accepts(self, arm, tcp_object):
             rotation = Rotation.from_matrix(tcp_object[:3, :3]).as_rotvec()
             # Per hold and per robot state (the base and joints, as a base move or a stow leaves them).
             key = (arm, *np.round(tcp_object[:3, 3] / NEED_ROUND[0]).astype(int), *np.round(rotation / NEED_ROUND[1]).astype(int),
                    self.model.base.round(3).tobytes(), self.model.q.round(2).tobytes())
+            mark(self, 'cache', cached=key in verdicts, tcp_object=tcp_object, options=options, origin=recipe['origin'])
             if key not in verdicts:
                 # Held so (its parts carried with the hand), as it will be when it is put down.
                 solver, poses = self.solvers[arm], ctx.poses()
@@ -171,26 +196,33 @@ class Placing:
                     reached = (self.in_reach_down(arm, placed, tcp_object, clearance, above) for placed, _ in options)
                     required = min(NEED_REACHED, len(options)) or 1     # a small region may have fewer
                     verdicts[key] = sum(itertools.islice((1 for ok in reached if ok), required)) >= required
+                    recipe['verdicts'] = list(verdicts.items())
                 finally:
                     for name in parts:
                         solver.detach(name)
                     solver.world.update(poses)
+            mark(self, 'need', outcome='accepted' if verdicts[key] else 'rejected')
             return verdicts[key]
         def hands(arm, tcp_object):
             # Down to each of the first NEED_REACHED of those placements, one path each: release, then above.
             releases = [translated(placed, [0., 0., clearance]) @ np.linalg.inv(tcp_object) for placed, _ in options]
             return [[release, translated(release, [0., 0., above])] for release in releases[:NEED_REACHED]]
-        return InHand(obj, accepts, [arm for arm in self.arms if arm not in self.held], hands)
+        return InHand(obj, lambda arm, tcp_object: accepts(self, arm, tcp_object), recipe['arms'], hands, recipe)
 
+    @decision
     def in_reach_down(self, arm, placed, tcp_object, clearance, above):
         """Whether ``arm`` holding the object as ``tcp_object`` has IK at its release at ``placed``
         (the torso lift moving too) and above it."""
         release = translated(placed, [0., 0., clearance]) @ np.linalg.inv(tcp_object)
+        mark(self, 'release IK')
         status, q_release = self.model.ik(arm, release, self.model.q, world=True, lift=True, attempts=NEED_IK_ATTEMPTS)
         if status != 'Success':
+            mark(self, 'IK', outcome='rejected', status=status)
             return False
+        mark(self, 'above IK')
         status, _ = self.model.ik(arm, translated(release, [0., 0., above]), q_release, world=True,
                                   attempts=NEED_IK_ATTEMPTS)
+        mark(self, 'above IK', outcome='accepted' if status == 'Success' else 'rejected', status=status)
         return status == 'Success'
 
     def place(self, obj, region, arm=None, near=None, keep_out=(), clearance=PLACE_CLEARANCE, above=PLACE_ABOVE,

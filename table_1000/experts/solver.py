@@ -13,6 +13,7 @@ made raises :class:`PlanningFailed` with the reason (``IK Failed``,
 ``tracking``).
 """
 
+from contextlib import nullcontext
 import time
 
 import numpy as np
@@ -60,6 +61,7 @@ class MotionSolver:
         self.world = PlanningScene(self.planner, np.linalg.inv(self.model.base))
         self.log = []
         self.timings = {'planning_s': 0., 'executing_s': 0.}
+        self.attachments = {}
         self.overlaps = []      # pairs allowed for the plan being made (see _plan)
 
     # -- planning world --------------------------------------------------------------
@@ -113,8 +115,10 @@ class MotionSolver:
         self.planner.planning_world.attach_object(
             name, self.planner.robot.get_name(), self.planner.link_name_2_idx[self.arm.tcp_link], pose(relative),
             list(self.arm.finger_links))
+        self.attachments[name] = np.asarray(relative).copy()
 
     def detach(self, name):
+        self.attachments.pop(name)
         self.planner.planning_world.detach_object(name, False)
 
     def carry(self, names, contacts):
@@ -142,7 +146,7 @@ class MotionSolver:
         return self.arm.gap(self.ctx.env.qpos(self.arm.fingers)[0])
 
     # -- planning ------------------------------------------------------------------------
-    def _plan(self, kind, function, goals=()):
+    def _plan(self, kind, function, goals=(), problem=None):
         self.world.set_padding(PADDING if kind == 'rrt' else 0.)
         self.sync()
         # What the robot is in contact with at its ends is allowed in this plan: in a free-space plan,
@@ -161,8 +165,15 @@ class MotionSolver:
         for link, other in overlaps:
             self.world.allow([link], [other])
         started = time.perf_counter()
+        record = getattr(getattr(self.ctx, 'trace', None), 'problems', None)
+        capture = (record.operation('motion', self.arm.name, dict(kind=kind, start_allowed=overlaps, **problem))
+                   if record else nullcontext(None))
         try:
-            result = function()
+            with capture as problem_entry:
+                result = function()
+                if problem_entry is not None:
+                    from table_1000.experts.problems import summary
+                    problem_entry['result'] = summary(result)
         finally:
             for link, other in self.overlaps:
                 self.world.allow([link], [other], False)
@@ -175,6 +186,8 @@ class MotionSolver:
         if overlaps:
             entry['start_allowed'] = overlaps
         self.log.append(entry)
+        if record:
+            entry['problem'] = problem_entry['id']
         if result['status'] != 'Success':
             entry.update({key: value for key, value in result.items()
                           if key not in ('position', 'velocity', 'acceleration', 'time')})
@@ -182,7 +195,7 @@ class MotionSolver:
         entry['duration_s'] = float(result['duration'])
         return result
 
-    def _validated(self, result):
+    def _validated(self, result, step=VALIDATION_STEP):
         """Fail ``result`` if its path collides anywhere at VALIDATION_STEP."""
         if result['status'] != 'Success':
             return result
@@ -192,7 +205,7 @@ class MotionSolver:
             self.world.allow([link], [other], False)
         self.overlaps = []
         self.world.set_padding(0.)
-        checks, pairs = self.model.check_path(self.arm.name, result['position'], VALIDATION_STEP, result.get('lift'))
+        checks, pairs = self.model.check_path(self.arm.name, result['position'], step, result.get('lift'))
         if pairs:
             return {'status': 'path collision', 'reason': 'path collision', 'collisions': pairs}
         return result
@@ -250,7 +263,9 @@ class MotionSolver:
             try:
                 result = self._plan('rrt', lambda: self._validated(self.model.plan_rrt(
                     self.arm.name, target, world=True, time_step=DT, planning_time=planning_time * 2 ** attempt,
-                    lift=lift, goals=goals)), goals=list(goals or []))
+                    lift=lift, goals=goals)), goals=list(goals or []),
+                    problem=dict(target=target, world=True, time_step=DT, planning_time=planning_time * 2 ** attempt,
+                                 lift=lift, goals=goals, attempt=attempt, attempts=attempts, validation_step=VALIDATION_STEP))
                 break
             except PlanningFailed as error:
                 if not error.reason.startswith(('RRTConnect', 'path collision')) or attempt == attempts - 1:
@@ -261,7 +276,8 @@ class MotionSolver:
         """Move the TCP along a straight screw path to world pose ``target``; ``lift`` moves the
         torso lift as well."""
         self.follow(self._plan('screw', lambda: self.model.plan_screw(self.arm.name, target, world=True,
-                                                                      time_step=DT, lift=lift)))
+                                                                      time_step=DT, lift=lift),
+                               problem=dict(target=target, world=True, time_step=DT, lift=lift, attempts=1)))
 
     def first_reachable(self, targets, move=None):
         """Move to the first of ``targets`` that plans (``move``: default the screw move); a plan
@@ -283,26 +299,38 @@ class MotionSolver:
         started = time.perf_counter()
         positions = np.asarray(result['position'])
         lift = result.get('lift')
-        worst = 0.
-        for index, target in enumerate(positions):
-            action = {self.arm.name: target[None]}
+        worst, held = 0., 0
+        final = np.r_[positions[-1], lift[-1]] if lift is not None else positions[-1]
+        try:
+            for index, target in enumerate(positions):
+                action = {self.arm.name: target[None]}
+                if lift is not None:
+                    action['lift'] = lift[index][None]
+                self.ctx.step(action)
+                worst = max(worst, float(np.abs(self.qpos() - target).max()))
             if lift is not None:
-                action['lift'] = lift[index][None]
-            self.ctx.step(action)
-            worst = max(worst, float(np.abs(self.qpos() - target).max()))
-        if lift is not None:
-            positions = np.c_[positions, lift]
-        final, held = positions[-1], 0
-        while np.abs(self.qpos(lift is not None) - final).max() > ARRIVAL_TOLERANCE:
-            if held * DT >= SETTLE_LIMIT:
-                raise PlanningFailed(self.ctx.current, 'tracking',
-                                     final_error_rad=float(np.abs(self.qpos(lift is not None) - final).max()))
-            self.ctx.step()
-            held += 1
-        self.log[-1].update(max_tracking_error_rad=worst, settle_steps=held)
-        self.timings['executing_s'] += time.perf_counter() - started
-        if lift is not None:
-            note_torso(self.ctx, lift)
+                positions = np.c_[positions, lift]
+            final, held = positions[-1], 0
+            while np.abs(self.qpos(lift is not None) - final).max() > ARRIVAL_TOLERANCE:
+                if held * DT >= SETTLE_LIMIT:
+                    raise PlanningFailed(self.ctx.current, 'tracking',
+                                         final_error_rad=float(np.abs(self.qpos(lift is not None) - final).max()))
+                self.ctx.step()
+                held += 1
+            self.log[-1].update(max_tracking_error_rad=worst, settle_steps=held)
+            self.timings['executing_s'] += time.perf_counter() - started
+            if lift is not None:
+                note_torso(self.ctx, lift)
+        finally:
+            measured = self.qpos(lift is not None)
+            self._tracking(max(worst, float(np.abs(measured[:len(target)] - target).max())), held,
+                           float(np.abs(measured - final).max()), time.perf_counter() - started)
+
+    def _tracking(self, worst, held, final, elapsed):
+        record = getattr(getattr(self.ctx, 'trace', None), 'problems', None)
+        if record:
+            record.operations[self.log[-1]['problem']]['execution'] = dict(
+                max_tracking_error_rad=worst, settle_steps=held, final_error_rad=final, wall_s=elapsed)
 
     def gripper(self, gap, seconds=GRIPPER_TIME):
         """Command the pad gap ``gap`` for ``seconds``; opening to where the fingers are (within

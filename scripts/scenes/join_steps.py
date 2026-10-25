@@ -19,7 +19,11 @@ The joined episodes are the scene's batch like one run of the whole expert: ``DI
 last part's status) and a ``summary.json``; ``render.py <scene> --physics <backend>``
 renders them. ``episodes/<seed>.json`` is the last part's report placed in the joined episode
 (control steps shifted, ``status`` and ``failure`` as the joined episode's, ``parts``, the
-summed ``wall_s``), and ``summary.json`` counts them as ``run_expert.py`` does, with the commits
+summed ``wall_s``). The last part's call and solve records are copied alongside,
+with ``call_trace_offset`` mapping their control steps and ``call_trace_initial_state``
+keeping that part's own initial state for entry at local step zero. Earlier parts'
+records and later repeats stay in their source batches. ``summary.json`` counts
+the joined reports as ``run_expert.py`` does, with the commits
 joined. Into the scene's data (no ``--output``) only a join of every seed through every step
 goes.
 """
@@ -27,6 +31,7 @@ goes.
 import argparse
 import json
 import shlex
+import shutil
 from pathlib import Path
 import sys
 
@@ -64,6 +69,27 @@ def shifted(report, offset, length):
     report['steps'] = [{**entry, 'at': entry['at'] + offset} for entry in report.get('steps') or []]
     report['control_steps'] = offset + length
     return report
+
+
+def carry_traces(batch, report, group, output, offset):
+    """Keep the last part's numerical records and map its frames into the joined trajectory."""
+    import h5py
+    for key in ('call_trace', 'solve_trace'):
+        if report.get(key):
+            target = output / report[key]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(batch / report[key], target)
+    if report.get('call_trace'):
+        # Resuming a checkpoint can change the scene before its first control step.
+        # Keep that initial state instead of substituting the previous part's last sample.
+        initial = Path(report['call_trace']).with_name(f"{report['seed']}-initial.hdf5")
+        if report.get('call_trace_initial_state'):
+            shutil.copyfile(batch / report['call_trace_initial_state'], output / initial)
+        else:
+            with h5py.File(output / initial, 'w') as file:
+                group.file.copy(group['initial_state'], file, 'initial_state')
+        report['call_trace_initial_state'] = str(initial)
+        report['call_trace_offset'] = report.get('call_trace_offset', 0) + offset
 
 
 def main(argv=None):
@@ -172,6 +198,7 @@ def main(argv=None):
             # The last part's report, placed in the joined episode, for the tools that read reports.
             report = shifted(json.loads((args.batches[index] / 'episodes' / f'{seed}.json').read_text()),
                              records[-1]['start'], length)
+            carry_traces(args.batches[index], report, last, args.output, records[-1]['start'])
             report.update(status=status, parts=records, duration_s=offset / CONTROL_HZ,
                           wall_s=sum(json.loads((args.batches[part] / 'episodes' / f'{seed}.json').read_text())['wall_s']
                                      for part, *_ in chain))

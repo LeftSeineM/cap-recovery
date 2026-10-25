@@ -9,6 +9,7 @@ from scipy.spatial.transform import Rotation
 from table_1000.experts.context import steps
 from table_1000.experts.skills.common import IK_ATTEMPTS, collisions
 from table_1000.experts.solver import PlanningFailed
+from table_1000.experts.problems import decision, mark
 
 # The base drives at most BASE_SPEED (m/s) and turns at most BASE_TURN (rad/s), proportionally to the
 # error (BASE_GAIN) until within BASE_TOLERANCE (m, rad), then settles for BASE_SETTLE s.
@@ -100,6 +101,7 @@ class Base:
             solver.sync()
         ctx.note('base moved', forward=forward, turn=turn, pose=self.base_pose().tolist())
 
+    @decision
     def base_for(self, poses, arms=None, need=None, path=False, touch=None):
         """World pose ``(x, y, yaw)`` of the base from where one of ``arms`` (default the free ones)
         reaches ``need`` (default all) of ``poses`` with each joint ``BASE_MARGIN`` inside its limits:
@@ -136,7 +138,9 @@ class Base:
         spread = np.array(BASE_SPREAD)
         rejected = {'out of reach': 0, 'collision': 0, 'IK': 0, 'way': 0, 'collisions': {}}
         try:
+            mark(self, 'samples', samples=[current, *samples], groups=groups, need=need)
             for index, pose in enumerate([current, *samples]):
+                mark(self, 'candidate', index, pose=pose)
                 if len(checked) >= BASE_CHECKS[most[0] <= 0]:
                     break
                 if any(np.all(np.abs([*(pose[:2] - other[:2]), wrapped(pose[2] - other[2])]) < spread[[0, 0, 1]])
@@ -144,17 +148,21 @@ class Base:
                     continue
                 self.put_base(pose, world_poses)
                 if index and not self.in_reach(groups, need):
+                    mark(self, 'out of reach', outcome='rejected')
                     rejected['out of reach'] += 1
                     continue
                 if index and not self.clear(q):
+                    mark(self, 'collision', outcome='rejected')
                     rejected['collision'] += 1
                     for pair in self.touching(q)[:3]:
                         key = f'{pair[0]} / {pair[1]}'
                         rejected['collisions'][key] = rejected['collisions'].get(key, 0) + 1
                     continue
                 checked.append(pose)
+                mark(self, 'IK')
                 reached, margin = self.reached(groups, need, touch)
                 if reached < need:
+                    mark(self, 'IK', outcome='rejected', reached=reached, margin=margin)
                     rejected['IK'] += 1
                     if (reached, margin) > most:
                         best, most = pose, (reached, margin)
@@ -167,8 +175,10 @@ class Base:
                 if not index:
                     return current
                 if all(self.put_base(along, world_poses) or self.clear(q) for along in drive_path(current, pose)):
+                    mark(self, 'way', outcome='accepted')
                     chosen = pose
                     break
+                mark(self, 'way', outcome='rejected')
                 rejected['way'] += 1
         finally:
             model.base = actual

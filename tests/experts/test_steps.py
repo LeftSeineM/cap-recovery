@@ -217,3 +217,115 @@ def test_the_steps_of_a_resumed_run_keep_the_seed_s_start():
     start = {'qpos': np.zeros(2), 'base_pose': np.zeros(3)}
     assert Context(env, model, scene, '.', None, start=start).start is start
     assert Context(env, model, scene, '.', None).start['qpos'].tolist() == [1., 1.]
+
+
+def test_successful_step_teleop_keeps_source_batch_and_can_be_joined(tmp_path):
+    from scripts.experts.teleop import save_attempt
+    from scripts.scenes.join_steps import main as join
+    from table_1000.experts.teleop import start_checkpoint
+
+    source, output = tmp_path / 'source-batch', tmp_path / 'teleop-result'
+    write_batch(source, {4: ('success', [1, 2], {'steps': [{'step': 1, 'at': 2}], 'subtasks': []})},
+                {'scene': 'scene', 'robot': 'r', 'physics': 'isaac-cpu', 'steps_run': [1, 1]})
+    write_batch(output, {4: ('success', [3, 4], {'steps': [{'step': 2, 'at': 2}], 'subtasks': []})}, {})
+    (source / 'checkpoints').mkdir()
+    (output / 'checkpoints').mkdir()
+    start = {'qpos': np.zeros(3), 'base_pose': np.zeros(3)}
+    write_checkpoints(source / 'checkpoints/4.hdf5', 4, 0, start,
+                      [{'step': 1, 'name': 'a', 'at': 2, 'state': state(2)}])
+    merge_checkpoints([source / 'checkpoints/4.hdf5'], source, {})
+    (source / 'checkpoints/4.hdf5').unlink()
+    write_checkpoints(output / 'checkpoints/4.hdf5', 4, 0, start,
+                      [{'step': 2, 'name': 'b', 'at': 2, 'state': state(4)}])
+    # The case can come from a later failed batch; step starts at its source's checkpoint.
+    case = {'batch': str(tmp_path / 'failed-case'), 'start': str(source / 'checkpoints/step1.hdf5')}
+    episode = json.loads((output / 'episodes/4.json').read_text())
+    episode['steps_run'] = [2, 2]
+    summary = save_attempt(output, episode, case, {'start': {'kind': 'step'}, 'verdict': 'done'},
+                           {'scene': 'scene', 'robot': 'r', 'physics': 'isaac-cpu', 'commit': 'abc', 'steps_run': [2, 2]})
+    assert summary['from'] == str(source)
+    assert start_checkpoint(output, summary, 2) == source / 'checkpoints/step1.hdf5'
+    assert start_checkpoint(output, summary, 2).is_file()
+    assert not (output / 'checkpoints/4.hdf5').exists()
+    assert list(read_checkpoints(output / 'checkpoints/step2.hdf5')[1]) == [4]
+    joined = tmp_path / 'joined'
+    join([str(source), str(output), '--output', str(joined)])
+    with h5py.File(joined / 'trajectories.hdf5', 'r') as file:
+        assert file['data/demo_4/actions'][:, 0].tolist() == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize('enter, expected', [(0, 19), (1, 20)])
+def test_joined_failure_keeps_traces_entry_state_and_offline_problems(tmp_path, enter, expected):
+    import gzip
+    from scripts.experts.failure_snapshots import main as snapshots
+    from scripts.experts.resolve import main as resolve
+    from scripts.scenes.join_steps import main as join
+    from table_1000.experts.problems import Problems
+    from table_1000.experts.solver import MotionSolver
+    from table_1000.experts.trace import CallTrace, frame, read_trace, snapshot_state
+    from table_1000.robots import load_spec
+    from table_1000.robots.kinematics import RobotModel
+
+    first, last, joined = (tmp_path / name for name in ('first', 'last', 'joined'))
+    write_batch(first, {4: ('success', [1, 2, 3], {'steps': [{'step': 1, 'at': 2}], 'subtasks': []})},
+                {'scene': 'scene', 'robot': 'x1pro_rm001', 'physics': 'isaac-cpu', 'steps_run': [1, 1]})
+    write_batch(last, {4: ('failed', [20, 21], {'steps': [], 'subtasks': [],
+                                             'failure': {'subtask': 'pick', 'reason': 'no grasp'}})},
+                {'scene': 'scene', 'robot': 'x1pro_rm001', 'physics': 'isaac-cpu',
+                 'steps_run': [2, 2], 'from': str(first)})
+    for batch, kind in ((first, 'trajectories'), (last, 'trajectories_failed')):
+        with h5py.File(batch / f'{kind}.hdf5', 'a') as file:
+            file['data'].attrs['env_args'] = json.dumps({'action_layout': {'gripper': [0, 1]}})
+            length = file['data/demo_4'].attrs['num_samples']
+            file.create_dataset('data/demo_4/obs/qpos', data=np.zeros((length, 2)))
+            file.create_dataset('data/demo_4/obs/base_pose', data=np.zeros((length, 3)))
+    model = RobotModel(load_spec('x1pro_rm001'), tmp_path / 'planning')
+    model.set_state(model.spec.keyframe('ready'))
+    ctx = types.SimpleNamespace(model=model, spec=model.spec, steps=enter, current='pick', _skills=None,
+                                rng=np.random.default_rng(4), scene=types.SimpleNamespace(OBJECTS={}),
+                                env=types.SimpleNamespace(targets=lambda: {'gripper': np.array([[.03]])}))
+    ctx.solvers = {'left': MotionSolver(ctx, 'left')}
+    ctx.trace = CallTrace(ctx, 4, 0)
+    record = ctx.trace.problems = Problems(ctx)
+    record.install()
+    try:
+        with pytest.raises(ExpertFailed):
+            with frame(ctx, 'step', 'b', {'index': 2}):
+                with frame(ctx, 'skill', 'pick', {'arm': 'left'}, concrete=True):
+                    assert model.ik('left', model.tcp('left', world=True), world=True)[0] == 'Success'
+                    ctx.steps = 2
+                    raise ExpertFailed('pick', 'no grasp')
+    finally:
+        record.close()
+    path = last / 'episodes/4.json'
+    report = json.loads(path.read_text())
+    report.update(steps_run=[2, 2], call_trace='calls/4.json.gz', solve_trace='problems/4.json.gz', failure_frame=1)
+    path.write_text(json.dumps(report))
+    ctx.trace.save(last / report['call_trace'])
+    record.save(last / report['solve_trace'])
+    join([str(first), str(last), '--output', str(joined)])
+    # A joined batch stays usable after its sources are moved, and after being joined again.
+    first.rename(tmp_path / 'first-moved')
+    last.rename(tmp_path / 'last-moved')
+    again = tmp_path / 'joined-again'
+    join([str(joined), '--output', str(again)])
+    joined.rename(tmp_path / 'joined-moved')
+    report = json.loads((again / 'episodes/4.json').read_text())
+    assert (again / report['call_trace']).is_file() and (again / report['solve_trace']).is_file()
+    assert report['call_trace_offset'] == 2
+    trace = read_trace(again, report)
+    assert trace['frames'][1]['enter'] == 2 + enter and trace['frames'][1]['exit'] == 4
+    state, snapshot = snapshot_state(again, report)
+    assert state['x'][0, 0] == expected
+    assert snapshot['frame']['id'] == 1 and snapshot['step'] == 2
+    assert state['targets']['gripper'][0, 0] == .03
+    snapshots([str(again), '--output', str(tmp_path / 'snapshots')])
+    (checkpoint,) = (tmp_path / 'snapshots').glob('scene/*/checkpoints/step1.hdf5')
+    saved = read_checkpoints(checkpoint)[1][4][1]
+    assert saved['x'][0, 0] == expected
+    assert json.loads(saved['_expert_frame'])['frame']['enter'] == 2 + enter
+    resolve([str(again), '--seeds', '4', '--frame', '1', '--runs', '1', '--output', str(tmp_path / 'resolve')])
+    with gzip.open(tmp_path / 'resolve/4.json.gz', 'rt') as file:
+        result = json.load(file)
+    assert result['selected'] == [0]
+    assert result['operations'][0]['frame'] == 1 and result['operations'][0]['successes'] == 1

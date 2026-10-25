@@ -177,7 +177,7 @@ class PlanningScene:
 
     def __init__(self, planner, frame=np.eye(4)):
         self.planner, self.objects, self.frame = planner, {}, np.asarray(frame, dtype=float)
-        self.padding, self.poses = 0., {}
+        self.padding, self.poses, self.object_padding = 0., {}, {}
         # Re-adding an object drops its matrix entries, so permissions are kept here.
         self.permissions = set()
 
@@ -197,6 +197,7 @@ class PlanningScene:
         if world.has_object(name):
             world.remove_object(name)
         self.poses[name] = np.asarray(world_pose, dtype=float)
+        self.object_padding[name] = self.padding if self.objects[name].padded else 0.
         world.add_object(self.objects[name].fcl(self.frame @ world_pose, self.padding))
         others = sorted(other for pair in self.permissions if name in pair for other in pair if other != name)
         if others:
@@ -210,7 +211,7 @@ class PlanningScene:
                 world.detach_object(name, False)
             if world.has_object(name):
                 world.remove_object(name)
-        self.objects, self.poses, self.permissions = {}, {}, set()
+        self.objects, self.poses, self.permissions, self.object_padding = {}, {}, set(), {}
 
     def set_frame(self, frame):
         """The planner's frame from the world (the robot's base moved): objects re-placed in it."""

@@ -57,6 +57,8 @@ import traceback
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from table_1000.common.batch import run_name
+
 # Simulation backends, as for asset physics tests (only CPU PhysX is validated for scenes yet).
 BACKENDS = ('isaac-cpu',)
 
@@ -66,12 +68,6 @@ def scene_robot(scene, root):
     from table_1000.robots import load_spec
     from table_1000.scenes import load
     return load_spec(Path(load(scene, 'scene', root).ROBOT['asset']).name, root).name
-
-
-def run_name(checkout, label=None):
-    """A development run's name: ``<date>-<time>-<commit>[-<label>]``, ``nocommit`` outside a checkout."""
-    parts = [time.strftime('%Y%m%d-%H%M%S'), (checkout or 'nocommit').replace('+', '-')]
-    return '-'.join(parts + ([label] if label else []))
 
 
 def step_range(text):
@@ -98,11 +94,13 @@ def worker(args):
         if args.checkpoints:
             attrs, states = read_checkpoints(args.states)
             if attrs['step'] == 0:      # the initial states: run as from them
-                states = {seed: (attempt, state, None) for seed, (attempt, state, _) in states.items()}
+                states = {seed: (attempt, state, start if '_expert_frame' in state else None)
+                          for seed, (attempt, state, start) in states.items()}
         else:
             states = {seed: (attempt, state, None) for seed, (attempt, state) in read_states(args.states)[1].items()}
         generator = Generator(args.scene, work, args.assets.resolve(), args.root.resolve(), physics=args.physics,
-                              steps=args.steps, source=str(args.states) if args.checkpoints else None)
+                              steps=args.steps, source=str(args.states) if args.checkpoints else None,
+                              problems=args.problems)
         for seed, repeat in itertools.product(parse_seeds(args.seeds), range(args.repeats)):
             report = generator.run(seed, *states[seed], repeat=repeat)
             print(seed, *([f'repeat {repeat}'] if repeat else []), report['status'],
@@ -138,6 +136,9 @@ def main(argv=None):
     parser.add_argument('--repeats', type=int, default=1,
                         help='runs of each seed from its state, with other random streams after the first '
                              '(a development run)')
+    parser.add_argument('--problems', choices=('failed', 'all', 'none'), default='failed',
+                        help='save numerical solve problems for failed/error runs (default), all runs, or none; '
+                             'none also disables recording and extra IK diagnostics')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--seeds', nargs='+', help='only these seeds of the initial states or checkpoints: 12 27, 0:20')
     parser.add_argument('--states', type=Path, help=argparse.SUPPRESS)
@@ -204,7 +205,7 @@ def main(argv=None):
     else:
         run = None
         directory = ((args.output or root / 'data' / 'scenes') / args.scene / args.physics).resolve()
-    staging = root / 'outputs' / 'scenes' / args.scene / (run or args.physics)
+    staging = directory / 'parts' if args.dev else root / 'outputs' / 'scenes' / args.scene / args.physics
     clear_batch(directory)
     clear_batch(staging)
     works = {}
@@ -215,6 +216,7 @@ def main(argv=None):
         argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--physics', args.physics,
                 '--seeds', *seed_range(part).split(), '--states', str(states), '--work', str(staging / name),
                 '--root', str(root), '--assets', str(args.assets.resolve()), '--repeats', str(args.repeats),
+                '--problems', args.problems,
                 *(['--steps', '-'.join(map(str, args.steps))] if args.steps else []),
                 *(['--checkpoints'] if args.source else [])]
         return argv, staging / f'{name}.log', f'{args.scene} {args.physics} {name} seeds {seed_range(part)}'
@@ -240,6 +242,11 @@ def main(argv=None):
     for path in staging.glob('part*/checkpoints/*.hdf5'):
         path.unlink()
     runs = []
+    for kind in ('calls', 'problems'):
+        (directory / kind).mkdir(exist_ok=True)
+        for path in sorted(staging.glob(f'part*/{kind}/*.json.gz')):
+            if (path.parent.parent / 'episodes' / f'{path.name.removesuffix(".json.gz")}.json').is_file():
+                shutil.move(path, directory / kind / path.name)
     for path in sorted(staging.glob('part*/episodes/*.json')):
         runs.append(json.loads(path.read_text()))
         shutil.move(path, directory / 'episodes' / path.name)
@@ -247,6 +254,7 @@ def main(argv=None):
     summary = {'run': run, 'command': shlex.join(sys.argv if argv is None else ['run_expert.py', *argv]),
                'scene': args.scene, 'robot': robot, 'physics': args.physics, 'commit': checkout,
                'steps_run': args.steps, 'from': str(args.source.resolve()) if args.source else None,
+               'problems': args.problems,
                **summarize(reports, seeds), 'steps': step_rates(reports, seeds, parent),
                'repeats': repeat_rates(runs, seeds, args.repeats) if args.repeats > 1 else None,
                'load': load_record(runs), 'total_s': time.perf_counter() - started, 'videos': {}, 'fails': {}}

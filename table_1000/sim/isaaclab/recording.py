@@ -69,6 +69,18 @@ def recorder_cfg(directory, name='trajectories'):
     return TrajectoryRecorderCfg(dataset_export_dir_path=str(directory), dataset_filename=name)
 
 
+def redirect(env, directory, name='trajectories'):
+    """Write later episodes to ``<directory>/<name>.hdf5`` and ``<name>_failed.hdf5`` (the files
+    written so far are closed)."""
+    import os
+    manager = env.env.recorder_manager
+    for attribute, suffix in (('_dataset_file_handler', ''), ('_failed_episode_dataset_file_handler', '_failed')):
+        handler = getattr(manager, attribute)
+        handler.close()
+        handler.create(os.path.join(str(directory), f'{name}{suffix}'), env_name=getattr(env.env.cfg, 'env_name', None))
+    manager.cfg.dataset_export_dir_path = str(directory)
+
+
 def begin(env):
     """Start an episode at the current state: drop what was recorded since the reset (settling)."""
     manager = env.env.recorder_manager

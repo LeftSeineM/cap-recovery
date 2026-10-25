@@ -69,6 +69,14 @@ class JointTargetAction(ActionTerm):
         self.target[env_ids] = q
         self.start[env_ids] = q
 
+    def get_target(self):
+        """The joint targets held (absolute, also in ``delta`` mode)."""
+        return self.target.clone()
+
+    def set_target(self, target):
+        """Hold joint targets ``target``, reached from the current ones within the next step."""
+        self.target = torch.clamp(target, self.lower, self.upper)
+
     def process_actions(self, actions):
         self.raw[:] = actions
         self.start = self.target.clone()
@@ -122,6 +130,13 @@ class GripperGapAction(ActionTerm):
     def set_state(self, q, env_ids=slice(None)):
         """Gap of ``env_ids`` from finger positions ``q``."""
         self.gap[env_ids] = control.finger_gap(q, self.signs, self.cfg.pivot)
+
+    def get_target(self):
+        """The gap commanded: below the measured one while the fingers squeeze an object."""
+        return self.gap.clone()
+
+    def set_target(self, gap):
+        self.gap[:] = torch.clamp(gap, 0., self.cfg.max_gap)
 
     def process_actions(self, actions):
         self.gap[:] = torch.clamp(actions, 0., self.cfg.max_gap)
@@ -191,6 +206,15 @@ class BaseVelocityAction(ActionTerm):
     def process_actions(self, actions):
         self.pose = control.clamp_lag(self.pose, self._asset.data.joint_pos[:, self.joint_ids], self.lag)
         self.command[:] = torch.clamp(actions, -self.max_speed, self.max_speed)
+
+    def get_target(self):
+        """The commanded ``(v, w)``."""
+        return self.command.clone()
+
+    def set_target(self, command):
+        """Command ``(v, w)``, taken as the speed reached (a restored base keeps moving as it did)."""
+        self.command[:] = torch.clamp(command, -self.max_speed, self.max_speed)
+        self.speed[:] = self.command
 
     def apply_actions(self):
         dt = self._env.physics_dt

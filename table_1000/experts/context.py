@@ -30,6 +30,7 @@ from typing import Callable
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from table_1000.experts.trace import frame
 from table_1000.scenes.geometry import AssetGeometry
 from table_1000.sim import CONTROL_HZ
 
@@ -60,13 +61,15 @@ def run_steps(ctx, steps):
         raise ValueError(f'steps {first}-{last} of an expert with {len(steps)}')
     ctx.step_names = [step.name for step in steps]
     for index, step in enumerate(steps[first - 1:last], first):
-        step.run(ctx)
-        if step.check:
-            ctx.current = step.name     # a failed check is the step's
-            try:
-                step.check(ctx)
-            finally:
-                ctx.current = None
+        with frame(ctx, 'step', step.name, {'index': index}) as entry:
+            step.run(ctx)
+            if step.check:
+                entry['phase'] = 'check'
+                ctx.current = step.name
+                try:
+                    step.check(ctx)
+                finally:
+                    ctx.current = None
         ctx.checkpoint(index, step.name)
 
 
@@ -86,6 +89,7 @@ class Context:
         self.subtasks, self.current = [], None
         self.solvers = {}
         self._skills = None
+        self.trace = None
         self.events = []        # (step, note) along the way, for the episode report
         self.origin = env.steps  # the episode starts here, after settling
         self.started, self.cpu_started = time.perf_counter(), time.process_time()
@@ -156,7 +160,8 @@ class Context:
         self.current = instruction
         self.env.contacts.phase = instruction
         try:
-            yield entry
+            with frame(self, 'subtask', instruction):
+                yield entry
         finally:
             entry['end'] = self.steps
             self.subtask_wall_s.append(time.perf_counter() - started)
@@ -164,10 +169,11 @@ class Context:
             self.env.contacts.phase = None
 
     def checkpoint(self, index, name):
-        """Keep the scene state after step ``index`` (``name``), at control step :attr:`steps`,
-        ``wall_s`` seconds since the context was made and ``cpu_s`` CPU seconds of the process since."""
+        """Keep the scene state after step ``index`` (``name``) with the action targets
+        (``state['targets']``), at control step :attr:`steps`, ``wall_s`` seconds since the context
+        was made and ``cpu_s`` CPU seconds of the process since."""
         from table_1000.sim.isaaclab.replay import numpy_state
-        state = numpy_state(self.env)
+        state = {**numpy_state(self.env), 'targets': self.env.targets()}
         self.checkpoints.append({'step': index, 'name': name, 'at': self.steps,
                                  'wall_s': time.perf_counter() - self.started,
                                  'cpu_s': time.process_time() - self.cpu_started, 'state': state})
