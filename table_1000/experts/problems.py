@@ -106,6 +106,7 @@ class Problems:
             bound.apply_defaults()
             arguments = dict(bound.arguments)
             arm = arguments.pop('arm')
+            arguments.pop('check', None)
             with self.operation(name, arm, arguments) as entry:
                 result = function(*args, **kwargs)
                 entry['result'] = summary(result)
@@ -121,7 +122,7 @@ class Problems:
         preserve the actual planner pose too, since an IK call may have left another pose.
         """
         owner = entry['decision']
-        while owner is not None and self.decisions[owner]['name'].split('.')[-1] in ('lower', 'in_reach_down', 'why'):
+        while owner is not None and self.decisions[owner]['name'].split('.')[-1] in ('lower', 'in_reach_down', 'down_goals', 'why'):
             owner = self.decisions[owner]['parent']
         key = (owner, entry['stage'])
         count = self._diagnostics.get(key, 0)
@@ -296,10 +297,14 @@ class Offline:
             validation_step = arguments.pop('validation_step', None)
             for key in ('attempt', 'attempts'):
                 arguments.pop(key, None)
+            if kind == 'rrt':
+                arguments['check'] = lambda rows: solver.check_geometry(rows, validation_step)
             result = getattr(self.model, f'plan_{kind}')(entry['arm'], **arguments)
             if kind == 'rrt':
                 result = solver._validated(result, validation_step)
         else:
+            if entry['kind'] == 'plan_rrt':
+                arguments['check'] = solver.check_geometry
             result = getattr(self.model, entry['kind'])(entry['arm'], **arguments)
         return summary(result)
 

@@ -26,7 +26,7 @@ the table too.
 
 Each skill reaches with the least of the robot it can, in this order: one arm with the torso
 lift where it is, the other arm so, the torso lift moving too, the free arms that are out back
-at their start pose (where none is in reach as they are), then the base moving
+at their ready pose (where none is in reach as they are), then the base moving
 (:func:`make_room`); a free-space plan (RRTConnect) that may move the torso lift holds it first
 where its goal leaves it where it is.
 
@@ -45,8 +45,10 @@ leave straight back ``APPROACH`` from its end, where it lets go (a drawer pulled
 leaves the arm no room to). The hand plans (RRTConnect) to the
 pre-grasp with the fingers open to the object's width plus a margin, moves straight
 in (the only move in which the fingers may touch the object), and closes; the finger
-gap must stop within ``HELD_TOLERANCE`` of the gap at which the pads touch the object, else it backs out, re-observes the
-object and chooses again (at most ``MAX_REGRASPS`` times). The grasped part then
+gap must stop within ``HELD_TOLERANCE`` of the gap at which the pads touch the object,
+and the measured object and hand poses must still meet the candidate's minimum pad-area
+condition, else it backs out, re-observes the object and chooses again (at most
+``MAX_REGRASPS`` times). The grasped part then
 moves with the hand in the planning world until :func:`release`.
 
 **move_by_displacement** -- the TCP straight by a world displacement, with the torso
@@ -78,7 +80,7 @@ surface, then :func:`release`.
 straight move) are reachable with every joint a margin inside its limits: where it stands
 if they are, else the base pose that it gets to soonest among poses sampled around them
 (facing them, at a distance), the robot clear of the planning world there and on the way
-(the table's legs included). The free arms go back to their start pose first where they would
+(the table's legs included). The free arms go back to their ready pose first where they would
 sweep something on the way; the base turns in place, drives straight and turns in place. Given no poses, the base goes back to where it
 started.
 
@@ -86,12 +88,13 @@ started.
 (:mod:`~table_1000.experts.skills.handover`, after WRS): the giving arm brings it in front of the
 body, the receiving one grasps it, the giving one lets go.
 
-**ready** -- the arms that hold nothing back at their start pose (each step then starts
-alike, out of the way of the other arm).
+**ready** -- the arms that hold nothing back at the robot's declared ready pose, using
+their initial values for undeclared joints. The shared torso stays where it is.
 
-**retry** -- a step run again when it fails (``ATTEMPTS`` in all), the arms that hold nothing back at their start pose
-first, so that its choices start afresh; not when nothing was in reach (``Unreachable``: the
-planners sampled their candidates already, a high share of it points at the planning).
+**retry** -- a callback run again when it fails, up to the context's ``skill_attempts``
+(``ATTEMPTS`` otherwise). Later tries restore its entry state and use new random streams,
+including for ``Unreachable``. ``Unmet`` propagates to chain adaptation. Each discarded
+failed branch retains its own trajectory and call/solve records.
 
 **chain** -- actions (:class:`Pick`, :class:`Place`) run in order, each asked for what the next
 needs of it: a place needs the object held by a hand, and with a hold, from which one of its
@@ -144,8 +147,16 @@ class Skills(Grasping, Handing, Motion, Placing, Base):
                     parts = [obj.name for obj in solver.add_object(name, lambda body, part: (part, body),
                                                                    merged=ctx.geometry[name].solid)]
                     solver.world.allow(parts, parts)
-        # The arms' poses where the episode began, to return to (see ready), and the base's.
+        # The ready arm pose (initial values for undeclared joints) and initial base pose.
         self.home = self.model.vector(dict(zip(ctx.env.joints, ctx.start['qpos'])))
+        # A folded start pose need not stay clear when the shared torso lowers.
+        # Prefer the robot's declared ready arm pose; leave lift and head alone.
+        rest = ctx.spec.keyframes.get('ready', {})
+        for arm in self.arms:
+            for name in ctx.spec.arms[arm].joints:
+                if name in rest:
+                    self.home[self.model.index[name]] = rest[name]
+
         self.start_base = np.asarray(ctx.start['base_pose'], dtype=float) if ctx.spec.base else None
         self.held = {}      # arm -> {'target', 'supports', 'grasp'}
         self.log, self.rejected = [], {}
@@ -162,24 +173,33 @@ def make_room(ctx, poses, arms=None, path=False):
 
 
 def ready(ctx):
-    """The arms that hold nothing back at their start pose (see :meth:`Skills.ready`)."""
+    """The arms that hold nothing back at their ready pose (see :meth:`Skills.ready`)."""
     _skills(ctx).ready()
 
 
 def retry(ctx, step, attempts=ATTEMPTS):
-    """``step()``, again up to ``attempts`` times in all when it fails (each choice of grasp, path
-    and spot starts afresh from where things are), the free arms back at their start pose first;
-    not when nothing was in reach (:class:`Unreachable`)."""
-    for attempt in range(1, attempts + 1):
-        try:
-            return step()
-        except Unreachable:
-            raise       # the planners tried their candidates already: nothing to gain from the same again
-        except ExpertFailed as failure:
-            if attempt == attempts:
+    """Call ``step`` at most ``attempts`` times, restoring its entry before another try.
+
+    The context's ``skill_attempts`` overrides the limit. Later attempts use new
+    random streams, including for Unreachable; Unmet propagates to chain adaptation.
+    Discarded failed branches have their own trajectories and call/solve records.
+    """
+    from table_1000.experts.retrying import RetryState
+    attempts = getattr(ctx, 'skill_attempts', None) or attempts
+    saved = RetryState(ctx) if attempts > 1 else None
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                return step()
+            except Unmet:
                 raise
-            ctx.note('retry', attempt=attempt, reason=failure.reason)
-            _skills(ctx).ready()
+            except ExpertFailed as failure:
+                if attempt == attempts:
+                    raise
+                saved.reset(attempt, failure)
+    finally:
+        if saved:
+            saved.close()
 
 
 def relaxed(limits, attempt):

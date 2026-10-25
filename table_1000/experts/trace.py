@@ -1,6 +1,7 @@
 """Serializable expert call frames and replay of an evaluated atomic skill."""
 
 from contextlib import contextmanager, nullcontext
+from copy import deepcopy
 from dataclasses import fields, is_dataclass
 from functools import wraps
 import gzip
@@ -63,7 +64,7 @@ def planner_state(ctx):
                   'poses': encode(solver.world.poses), 'frame': encode(solver.world.frame),
                   'qpos': encode(solver.planner.robot.get_qpos()),
                   'permissions': [sorted(pair) for pair in sorted(solver.world.permissions, key=lambda p: sorted(p))],
-                  'padding': solver.world.padding,
+                  'padding': solver.world.padding, 'object_padding': getattr(solver.world, 'object_padding', {}).copy(),
                   'extra_objects': [dict(name=obj.name, body=obj.body, raw=encode(obj.raw), padded=obj.padded,
                                          pose=encode(solver.world.poses[name]))
                                     for name, obj in solver.world.objects.items()
@@ -78,6 +79,7 @@ class CallTrace:
         self.failure_frame = None
         self.replay_entry = None
         self.problems = None
+        self.retry_path = []
 
     @contextmanager
     def frame(self, kind, name, arguments=None, concrete=False):
@@ -90,7 +92,9 @@ class CallTrace:
                  'rng': encode(ctx.rng.bit_generator.state), 'targets': encode(ctx.env.targets()), 'concrete': concrete}
         if kind == 'skill':
             import mplib.pymp
-            entry['mplib_seed'] = int(np.random.SeedSequence([self.seed, self.attempt, number, self.repeat]).generate_state(1)[0]) | 1
+            entry['mplib_seed'] = int(np.random.SeedSequence([self.seed, self.attempt, number, self.repeat, *self.retry_path]).generate_state(1)[0]) | 1
+            if self.retry_path:
+                entry['retry_path'] = list(self.retry_path)
             if self.replay_entry is not None and concrete:
                 saved = self.replay_entry
                 self.replay_entry = None
@@ -123,6 +127,26 @@ class CallTrace:
         path.parent.mkdir(parents=True, exist_ok=True)
         with gzip.open(path, 'wt') as file:
             json.dump({'version': 1, 'failure_frame': self.failure_frame, 'frames': self.frames}, file, separators=(',', ':'))
+
+    def failed_branch(self, error, control):
+        """Freeze a caught failure before retry unwinds its still-active control frame.
+
+        Successful cleanup may have cleared ``failure_frame``. The exception retains
+        its originating frame; a failure in the callback itself belongs to the control
+        frame, whose concrete children remain available for skill-only replay.
+        """
+        from table_1000.experts.context import Unreachable
+        frames = deepcopy(self.frames)
+        failed = getattr(error, 'skill_frame_id', None)
+        if failed is None or not 0 <= failed < len(frames):
+            failed = control
+        frames[failed]['exception'] = dict(type=type(error).__name__, reason=getattr(error, 'reason', str(error)),
+                                            details=encode(getattr(error, 'details', {})),
+                                            unreachable=isinstance(error, Unreachable))
+        for entry in frames:
+            if entry['exit'] is None:
+                entry['exit'] = self.ctx.steps
+        return dict(version=1, failure_frame=failed, frames=frames)
 
 
 def frame(ctx, kind, name, arguments=None, concrete=False):
@@ -208,6 +232,11 @@ def restore(ctx, entry, restore_rng=True):
         solver.world.set_padding(state['padding'])
         for name, pose in decode(state.get('poses', {})).items():
             solver.world.set_pose(name, pose)
+        for name, padding in state.get('object_padding', {}).items():
+            default = solver.world.padding
+            solver.world.padding = padding
+            solver.world.set_pose(name, solver.world.poses[name])
+            solver.world.padding = default
         for name, relative in decode(state['attached']).items():
             solver.attach_at(name, relative)
         for pair in state['permissions']:

@@ -73,6 +73,7 @@ def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeyp
         generator = object.__new__(Generator)
         generator.name, generator.output, generator.assets = 'fake', tmp_path / mode, tmp_path
         generator.steps, generator.source, generator.problems = None, None, mode
+        generator.skill_attempts = 1
         generator.env, generator.model, generator.spec = env, model, model.spec
         generator.env_args = {}
         generator.scene = SimpleNamespace(OBJECTS={}, ROBOT={'position': [0., 0., 0.]})

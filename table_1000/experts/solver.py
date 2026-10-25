@@ -33,8 +33,8 @@ GRIPPER_TIME = .6         # s for the fingers to close or open
 OPEN_GAP = .08            # m
 GRIPPER_THERE = .002     # m from a commanded opening the fingers count as there
 TORSO_STILL = .001        # m of torso lift travel below which a path leaves it where it was
-# A free-space plan allows the contacts it starts in all the way along; fingers starting within the
-# padding of an object they are not meant to touch (a hand that just let go of a handle) back off
+# Fingers starting within the padding of an object they are not meant to touch
+# (a hand that just let go of a handle) back off
 # straight first, along the approach or up, by the first of DEPARTS that leaves the padding.
 DEPARTS = (.03, .06)      # m
 
@@ -149,11 +149,10 @@ class MotionSolver:
     def _plan(self, kind, function, goals=(), problem=None):
         self.world.set_padding(PADDING if kind == 'rrt' else 0.)
         self.sync()
-        # What the robot is in contact with at its ends is allowed in this plan: in a free-space plan,
-        # objects closer than the padding at the start or a given goal (a hand that just let go of
-        # one); in a straight move, the robot's grown planning links overlapping where the bare links
-        # do not (an elbow by the torso after a pull). A free-space path is then checked on the bare
-        # geometry without them (see _validated).
+        # Find overlaps caused by padding at the endpoints. RRT uses the affected
+        # objects' bare geometry throughout its search and checks the final route
+        # without implicit contact exemptions. Straight moves retain their existing
+        # robot-link padding exemptions (an elbow by the torso after a pull).
         robot = self.planner.robot.get_name()
         overlaps = [(link, other if name == robot else name)
                     for q in [self.model.q, *goals]
@@ -161,6 +160,16 @@ class MotionSolver:
                     if kind == 'rrt' or name == robot]
         overlaps = list(dict.fromkeys(overlaps))
         overlaps = [pair for pair in overlaps if frozenset(pair) not in self.world.permissions]
+        if kind == 'rrt':
+            # Near an endpoint, use the object's real geometry instead of ignoring
+            # its collisions with a robot link along the whole path.
+            names = {other for _, other in overlaps if other in self.world.objects}
+            padding = self.world.padding
+            self.world.padding = 0.
+            for name in names:
+                self.world.set_pose(name, self.world.poses[name])
+            self.world.padding = padding
+            overlaps = [pair for pair in overlaps if pair[1] not in names]
         self.overlaps = overlaps
         for link, other in overlaps:
             self.world.allow([link], [other])
@@ -195,6 +204,15 @@ class MotionSolver:
         entry['duration_s'] = float(result['duration'])
         return result
 
+    def check_geometry(self, rows, step=VALIDATION_STEP):
+        for link, other in self.overlaps:
+            self.world.allow([link], [other], False)
+        self.overlaps = []
+        self.world.set_padding(0.)
+        count = len(self.model.spec.lift)
+        return self.model.check_path(self.arm.name, np.asarray(rows)[:, count:], step,
+                                     np.asarray(rows)[:, :count])[1]
+
     def _validated(self, result, step=VALIDATION_STEP):
         """Fail ``result`` if its path collides anywhere at VALIDATION_STEP."""
         if result['status'] != 'Success':
@@ -216,6 +234,11 @@ class MotionSolver:
         re-planned up to ``attempts`` times, each with twice the time of the one before. ``lift``
         lets the torso lift move as well: where the goal leaves it where it is (or ``target`` has
         an IK solution that does), the plan holds it first, once, and frees it only if that fails."""
+        skill = getattr(self.ctx, '_skills', None)
+        if lift and skill is not None:
+            # The torso moves both arms. Clear its free arm before this arm
+            # approaches contact, while an escape is still possible.
+            skill.stow([arm for arm in skill.arms if arm != self.arm.name], why='shared torso lift')
         self.depart()
         free = [lift]
         if lift:
@@ -263,7 +286,7 @@ class MotionSolver:
             try:
                 result = self._plan('rrt', lambda: self._validated(self.model.plan_rrt(
                     self.arm.name, target, world=True, time_step=DT, planning_time=planning_time * 2 ** attempt,
-                    lift=lift, goals=goals)), goals=list(goals or []),
+                    lift=lift, goals=goals, check=self.check_geometry)), goals=list(goals or []),
                     problem=dict(target=target, world=True, time_step=DT, planning_time=planning_time * 2 ** attempt,
                                  lift=lift, goals=goals, attempt=attempt, attempts=attempts, validation_step=VALIDATION_STEP))
                 break

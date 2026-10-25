@@ -6,7 +6,7 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.context import steps
+from table_1000.experts.context import DT, steps
 from table_1000.experts.skills.common import IK_ATTEMPTS, collisions
 from table_1000.experts.solver import PlanningFailed
 from table_1000.experts.problems import decision, mark
@@ -14,7 +14,7 @@ from table_1000.experts.problems import decision, mark
 # The base drives at most BASE_SPEED (m/s) and turns at most BASE_TURN (rad/s), proportionally to the
 # error (BASE_GAIN) until within BASE_TOLERANCE (m, rad), then settles for BASE_SETTLE s.
 BASE_SPEED, BASE_TURN, BASE_GAIN = .15, .4, 2.
-READY_TOLERANCE = .05   # rad from its start pose an arm counts as there
+READY_TOLERANCE = .05   # rad from its ready pose an arm counts as there
 BASE_TOLERANCE, BASE_SETTLE = (.005, np.radians(1.)), .5
 # make_room samples BASE_SAMPLES poses of the base BASE_DISTANCES (m) from the poses to reach, facing
 # them within BASE_FACING (rad); in the order the base gets there (turn, drive straight, turn), at
@@ -69,6 +69,28 @@ def drive_path(start, goal):
     return path
 
 
+def drive_routes(start, goal):
+    """Direct local drive, then along the current heading before turning sideways.
+
+    The second route uses the goal's projection on the current heading. It lets
+    the robot back away from an edge before turning, without another sampled
+    stance, a clearance distance, or a navigation search.
+    """
+    start, goal = np.asarray(start, dtype=float), np.asarray(goal, dtype=float)
+    yield [goal]
+    heading = np.array([np.cos(start[2]), np.sin(start[2])])
+    distance = float((goal[:2] - start[:2]) @ heading)
+    via = start.copy()
+    via[:2] += distance * heading
+    if abs(distance) > BASE_TOLERANCE[0] and np.linalg.norm(goal[:2] - via[:2]) > BASE_TOLERANCE[0]:
+        yield [via, goal]
+
+
+def path_poses(group):
+    """TCP poses of a reach path; marked paths distinguish free transfers."""
+    return group['poses'] if isinstance(group, dict) else group
+
+
 class Base:
     """The base skills of :class:`~table_1000.experts.skills.Skills` (and ``ready``)."""
 
@@ -102,12 +124,15 @@ class Base:
         ctx.note('base moved', forward=forward, turn=turn, pose=self.base_pose().tolist())
 
     @decision
-    def base_for(self, poses, arms=None, need=None, path=False, touch=None):
+    def base_for(self, poses, arms=None, need=None, path=False, touch=None, relocate=False):
         """World pose ``(x, y, yaw)`` of the base from where one of ``arms`` (default the free ones)
         reaches ``need`` (default all) of ``poses`` with each joint ``BASE_MARGIN`` inside its limits:
         where it stands if they are reached from there, else the sampled pose (see the constants)
         the base gets to soonest, the robot clear of the planning world there and on its way; else
-        the one reaching most, with the widest margin (None when none reaches any). No poses: its start pose. Each of ``poses`` is a world TCP pose or a list of them
+        the one reaching most, with the widest margin (None when none reaches any).
+        ``relocate=True`` requires another stance after an approach failed, excluding the current
+        pose and its existing sample spread. No poses: its start pose.
+        Each of ``poses`` is a world TCP pose or a list of them
         along a straight move, each solved from the one before at the torso height of the first
         (``path``: ``poses`` are one such list); ``{arm: poses}`` gives each arm its own. The fingers
         may touch the planning objects ``touch`` there (default: any; see :meth:`reached`)."""
@@ -115,14 +140,14 @@ class Base:
         if not isinstance(poses, dict):
             arms = list(arms) if arms else [a for a in self.arms if a not in self.held]
             poses = dict.fromkeys(arms, poses)
-        groups = {arm: [list(own)] if path else [[pose] if np.ndim(pose) == 2 else list(pose) for pose in own]
+        groups = {arm: [list(own)] if path else [pose if isinstance(pose, dict) else [pose] if np.ndim(pose) == 2 else list(pose) for pose in own]
                   for arm, own in poses.items() if len(own)}
         if not groups:
             return self.start_base
         need = max(map(len, groups.values())) if need is None else need
         current = self.base_pose()
         # Sampled around the poses to reach, facing them.
-        centre = np.mean([group[0][:2, 3] for own in groups.values() for group in own], axis=0)
+        centre = np.mean([path_poses(group)[0][:2, 3] for own in groups.values() for group in own], axis=0)
         distance = ctx.rng.uniform(*BASE_DISTANCES, BASE_SAMPLES)
         bearing = ctx.rng.uniform(-np.pi, np.pi, BASE_SAMPLES)
         facing = ctx.rng.uniform(-BASE_FACING, BASE_FACING, BASE_SAMPLES)
@@ -143,8 +168,10 @@ class Base:
                 mark(self, 'candidate', index, pose=pose)
                 if len(checked) >= BASE_CHECKS[most[0] <= 0]:
                     break
+                previous = [current, *checked] if relocate else checked
                 if any(np.all(np.abs([*(pose[:2] - other[:2]), wrapped(pose[2] - other[2])]) < spread[[0, 0, 1]])
-                       for other in checked):
+                       for other in previous):
+                    mark(self, 'previous stance', outcome='rejected')
                     continue
                 self.put_base(pose, world_poses)
                 if index and not self.in_reach(groups, need):
@@ -168,14 +195,14 @@ class Base:
                         best, most = pose, (reached, margin)
                     # Short of the margin but within BASE_MARGIN_LOW: the first such, kept in case.
                     if (index and fallback is None and need == 1 and margin >= BASE_MARGIN_LOW
-                            and all(self.put_base(along, world_poses) or self.clear(q)
-                                    for along in drive_path(current, pose))):
+                            and self.base_route(current, pose, q, world_poses) is not None):
                         fallback = pose
                     continue
                 if not index:
                     return current
-                if all(self.put_base(along, world_poses) or self.clear(q) for along in drive_path(current, pose)):
-                    mark(self, 'way', outcome='accepted')
+                route = self.base_route(current, pose, q, world_poses)
+                if route is not None:
+                    mark(self, 'way', outcome='accepted', route=route)
                     chosen = pose
                     break
                 mark(self, 'way', outcome='rejected')
@@ -226,7 +253,7 @@ class Base:
         for arm, own in groups.items():
             shoulder, radius = self.arm_reach(arm)
             shoulder = (self.model.base @ np.r_[shoulder, 1.])[:2]
-            if sum(all(np.linalg.norm(pose[:2, 3] - shoulder) <= radius for pose in group) for group in own) >= need:
+            if sum(all(np.linalg.norm(pose[:2, 3] - shoulder) <= radius for pose in path_poses(group)) for group in own) >= need:
                 return True
         return False
 
@@ -257,26 +284,47 @@ class Base:
         return most
 
     def path_margin(self, arm, poses, attempts=IK_ATTEMPTS):
-        """Least distance (rad) of ``arm``'s joints to their limits through ``poses`` (world TCP), each
-        solved from the one before (one branch) at the torso height of the first, as a straight move
-        does; -inf where one has no IK (``attempts`` restarts each)."""
+        """Joint margin of a continuous reach path, or -inf when no sampled branch
+        completes it. Marked paths may start a new free transfer between straight sections."""
         model, indices = self.model, self.model.arm_indices(arm)
-        q, margin = None, np.inf
-        for index, pose in enumerate(poses):
-            status, q = model.ik(arm, pose, q, world=True, lift=index == 0, attempts=attempts)
+        linear = poses.get('linear') if isinstance(poses, dict) else None
+        poses = path_poses(poses)
+        linear = linear or [False] + [True] * (len(poses) - 1)
+        starts = [index for index, straight in enumerate(linear) if not straight] + [len(poses)]
+        overall = np.inf
+        for begin, end in zip(starts[:-1], starts[1:]):
+            status, goals = model.ik(arm, poses[begin], world=True, lift=True, attempts=attempts, closest=False)
             if status != 'Success':
                 return -np.inf
-            margin = min(margin, float(np.min(np.minimum(q[indices] - model.limits[indices, 0],
-                                                         model.limits[indices, 1] - q[indices]))))
-        return margin
+            best = -np.inf
+            for first in sorted(goals, key=lambda q: np.linalg.norm(q - model.q)):
+                q = first.copy()
+                margin = float(np.min(np.minimum(q[indices] - model.limits[indices, 0],
+                                                  model.limits[indices, 1] - q[indices])))
+                for pose in poses[begin + 1:end]:
+                    result = model.plan_screw(arm, pose, q, world=True, time_step=DT)
+                    if result['status'] != 'Success':
+                        break
+                    rows = result['position']
+                    q[indices] = rows[-1]
+                    margin = min(margin, float(np.min(np.minimum(rows - model.limits[indices, 0],
+                                                                  model.limits[indices, 1] - rows))))
+                else:
+                    best = max(best, margin)
+                    if best >= BASE_MARGIN:
+                        break
+            overall = min(overall, best)
+            if not np.isfinite(overall):
+                return -np.inf
+        return overall
 
-    def make_room(self, poses, arms=None, need=None, path=False, touch=None):
+    def make_room(self, poses, arms=None, need=None, path=False, touch=None, relocate=False):
         """Move the base (see :meth:`base_for`) to where ``poses`` are reachable with a margin: the
         free arms in where they would sweep something on the way, turned in place, straight on,
         turned in place."""
         if not self.ctx.spec.base:
             return
-        chosen = self.base_for(poses, arms, need, path, touch)
+        chosen = self.base_for(poses, arms, need, path, touch, relocate=relocate)
         self.ctx.note('room', chosen=None if chosen is None else [float(v) for v in chosen])
         if chosen is None:
             return
@@ -284,18 +332,41 @@ class Base:
         first, distance, last = drive(before, chosen)
         if abs(distance) < BASE_TOLERANCE[0] * 2 and abs(first) + abs(last) < BASE_TOLERANCE[1] * 2:
             return
-        if not self.clear_way(before, chosen):
+        route = self.base_route(before, chosen)
+        if route is None:
             self.ready()    # the free arms in, so that they sweep nothing as the base turns
-        self.move_base(0., first)
-        self.move_base(distance, last)
+            route = self.base_route(before, chosen)
+        if route is None:
+            self.ctx.fail('no clear base route', start=before.tolist(), goal=np.asarray(chosen).tolist())
+        self.ctx.note('base route', waypoints=[pose.tolist() for pose in route])
+        for goal in route:
+            first, distance, last = drive(self.base_pose(), goal)
+            self.move_base(0., first)
+            self.move_base(distance, last)
         self.note_relocated(before)
 
     def clear_way(self, start, goal):
         """Whether the robot as it is (the arms where they are) is clear of the planning world all
         the way from base pose ``start`` to ``goal``."""
-        actual, world_poses = self.model.base.copy(), self.ctx.poses()
+        return self.base_route(start, goal) is not None
+
+    def base_route(self, start, goal, q=None, world_poses=None):
+        """First clear local route with the full robot and payload, or None."""
+        actual = self.model.base.copy()
+        world_poses = self.ctx.poses() if world_poses is None else world_poses
+        q = self.model.q if q is None else q
         try:
-            return all(self.put_base(along, world_poses) or self.clear(self.model.q) for along in drive_path(start, goal))
+            for route in drive_routes(start, goal):
+                previous, clear = start, True
+                for waypoint in route:
+                    if not all(self.put_base(along, world_poses) or self.clear(q)
+                               for along in drive_path(previous, waypoint)):
+                        clear = False
+                        break
+                    previous = waypoint
+                if clear:
+                    return route
+            return None
         finally:
             self.model.base = actual
             for solver in self.solvers.values():
@@ -308,7 +379,7 @@ class Base:
                       turn=float(abs((after[2] - before[2] + np.pi) % (2 * np.pi) - np.pi)), pose=after.tolist())
 
     def stow(self, arms=None, why=None):
-        """The free ``arms`` (default all) that are out back at their start pose (see :meth:`ready`),
+        """The free ``arms`` (default all) that are out back at their ready pose (see :meth:`ready`),
         as a skill does before it moves the base when nothing is in reach as the arms are, or when a
         move runs into them; whether any was out."""
         out = [arm for arm in (self.arms if arms is None else arms) if arm not in self.held
@@ -330,7 +401,7 @@ class Base:
         return os.path.commonprefix(self.ctx.spec.arms[arm].joints).removesuffix('joint')
 
     def ready(self, arms=None):
-        """Back to the start pose with each of ``arms`` (default all) holding nothing (a planned
+        """Back to the ready pose with each of ``arms`` (default all) holding nothing (a planned
         move; skipped where it does not plan), the fingers open."""
         for arm in arms or self.arms:
             if arm in self.held:

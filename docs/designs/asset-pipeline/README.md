@@ -81,6 +81,7 @@ data/scenes/000000/<后端>/        场景的数据：一批专家轨迹，run_e
   episodes/<seed>.json                           每条轨迹的报告
   calls/<seed>[-<r>].json.gz                      每次运行的专家调用帧树（gzip JSON），r 为后续 repeat 序号
   problems/<seed>[-<r>].json.gz                   决策候选、筛选关卡与完整数值求解问题（gzip JSON）；默认只保存失败或程序错误，--problems all/none 改为全部/不保存
+  attempts/<seed[-r]>/<尝试编号>/                 回滚丢弃的失败分支，保留同格式的完整批次；主报告 retry_archives 给出相对路径
   videos/<seed>/<相机>.mp4                       成功轨迹的录像，每个相机一条；--merge 时为 videos/<seed>/merge.mp4
   fails/                                         失败轨迹的录像，结构同 videos/
   checkpoints/step<k>.hdf5                       由步骤组成的专家：每个 seed 第 k 步结束时的场景状态，step0 为初态

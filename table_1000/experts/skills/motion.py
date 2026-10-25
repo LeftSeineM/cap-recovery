@@ -103,19 +103,25 @@ class Motion:
             raise failed
         straight = {'reason': failed.reason, 'collisions': failed.details.get('plan', {}).get('collisions')}
         rise = float(displacement[2])
+        goal = translated(start, displacement)
+        # A tracking failure can follow real motion. The torso only fills the
+        # remaining rise toward the original absolute goal.
+        remaining = float(goal[2, 3] - solver.tcp()[2, 3])
+        if remaining < .005:
+            return 1.
         lift = ctx.env.qpos(ctx.spec.lift)[0]
         upper = self.model.limits[self.model.lift_indices(), 1]
-        target = np.minimum(lift + rise, upper)
-        ctx.note('rise with the torso', **straight, lift=lift.tolist(), target=target.tolist())
+        target = np.minimum(lift + remaining, upper)
+        ctx.note('rise with the torso', **straight, remaining=remaining, lift=lift.tolist(), target=target.tolist())
         count = steps(float(np.max(target - lift)) / ctx.spec.lift_velocity_limit)
         for k in range(1, count + 1):
             ctx.step({'lift': (lift + (target - lift) * k / count)[None]})
         ctx.hold(.3)
         note_torso(ctx, [lift, target])
-        rest = rise - float(np.min(target - lift))
+        rest = float(goal[2, 3] - solver.tcp()[2, 3])
         if rest < .005:
             return 1.
-        up = translated(solver.tcp(), [0., 0., rest])
+        up = goal
         held = self.held.get(arm)
         if held:
             solver.allow(held['supports'], False)
@@ -126,7 +132,7 @@ class Motion:
             except PlanningFailed as error:
                 reason, collisions = error.reason, error.details.get('plan', {}).get('collisions')
         ctx.note('rise short', rest=rest, reason=reason, collisions=collisions)
-        return 1. - rest / rise
+        return float(np.clip((solver.tcp()[2, 3] - start[2, 3]) / rise, 0., 1.))
 
     @decision
     def push(self, target, direction, distance, arm=None):

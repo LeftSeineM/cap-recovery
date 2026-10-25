@@ -111,7 +111,7 @@ class Generator:
     DEVICES = {'isaac-cpu': 'cpu'}
 
     def __init__(self, scene_name, output, assets, root, physics='isaac-cpu', steps=None, source=None,
-                 problems='failed', **env_kwargs):
+                 problems='failed', skill_attempts=3, **env_kwargs):
         """``steps``: ``(first, last)`` of the expert's steps to run (all when None); ``source``: where
         the states come from (a checkpoint file), for the reports; ``problems`` saves numerical
         problems of failed/error runs, all runs, or none; ``env_kwargs`` (cameras, views) go to
@@ -124,6 +124,7 @@ class Generator:
         started = time.perf_counter()
         self.name, self.output, self.assets = scene_name, Path(output), Path(assets)
         self.steps, self.source, self.problems = steps, source, problems
+        self.skill_attempts = skill_attempts
         self.scene, self.expert = load(scene_name, 'scene', root), load(scene_name, 'expert', root)
         if steps and not 1 <= steps[0] <= steps[1] <= len(getattr(self.expert, 'STEPS', ())):
             raise ValueError(f'steps {steps[0]}-{steps[1]}: the expert of {scene_name} has '
@@ -138,6 +139,60 @@ class Generator:
                          'control_hz': CONTROL_HZ, 'physics_dt': PHYSICS_DT, 'joints': self.env.joints,
                          'action_layout': self.env.action_layout}
         self.load_s = time.perf_counter() - started
+
+    def archive_retry(self, ctx, control, retry, failure, repeat):
+        """Retain one failed branch as a complete batch before rolling back its state."""
+        from copy import deepcopy
+        import gzip
+        from table_1000.experts.retrying import copy_recorded
+        trace = ctx.trace
+        name = f'{trace.seed}-{repeat}' if repeat else str(trace.seed)
+        branch = Path('attempts') / name / f'{len(ctx.retry_archives):04d}-{control}-{retry}'
+        directory = self.output / branch
+        directory.mkdir(parents=True)
+        branch_trace = trace.failed_branch(failure, control)
+        calls = f'calls/{trace.seed}.json.gz'
+        (directory / 'calls').mkdir()
+        with gzip.open(directory / calls, 'wt') as file:
+            json.dump(branch_trace, file, separators=(',', ':'))
+        report = dict(scene=self.name, seed=trace.seed, attempt=trace.attempt, repeat=repeat, status='failed',
+                      steps_run=self.steps, from_retry=dict(control=control, retry=retry), step_names=ctx.step_names,
+                      failure=dict(subtask=failure.subtask, reason=failure.reason,
+                                   unreachable=isinstance(failure, Unreachable), details=failure.details),
+                      steps=[{key: e[key] for key in ('step','name','at','wall_s','cpu_s')} for e in ctx.checkpoints],
+                      call_trace=calls, failure_frame=branch_trace['failure_frame'], solve_trace=None,
+                      control_steps=ctx.steps, events=deepcopy(ctx.events))
+        if trace.problems:
+            report['solve_trace'] = f'problems/{trace.seed}.json.gz'
+            trace.problems.save(directory / report['solve_trace'])
+        episode = type(self.env.env.recorder_manager.get_episode(0))()
+        episode.data = copy_recorded(self.env.env.recorder_manager.get_episode(0).data)
+        episode.pre_export()
+        episode.success = False
+        episode.attrs = dict(scene=self.name, seed=trace.seed, status='failed', failure=report['failure'])
+        handler = self.recording.TrajectoryFile()
+        handler.create(str(directory / 'trajectories_failed'))
+        try:
+            handler.add_env_args(self.env_args)
+            handler.write_episode(episode, trace.seed)
+        finally:
+            handler.close()
+        first = (self.steps or (1,))[0]
+        checkpoints = [dict(step=first-1, name='retry episode entry', at=0, state=ctx.initial_state), *ctx.checkpoints]
+        checkpoint = directory / 'checkpoints' / f'{trace.seed}.hdf5'
+        checkpoint.parent.mkdir()
+        write_checkpoints(checkpoint, trace.seed, trace.attempt, ctx.start, checkpoints)
+        merge_checkpoints([checkpoint], directory, dict(scene=self.name, robot=self.spec.name,
+                                                       physics=self.env_args['physics']))
+        checkpoint.unlink()
+        (directory / 'episodes').mkdir()
+        (directory / 'episodes' / f'{trace.seed}.json').write_text(json.dumps(report, indent=1, default=float)+'\n')
+        summary = dict(scene=self.name, robot=self.spec.name, physics=self.env_args['physics'],
+                       steps_run=self.steps, retry_parent='../../..', **{'from':None}, seeds=[trace.seed], succeeded=0, success_rate=0.)
+        (directory / 'summary.json').write_text(json.dumps(summary, indent=1)+'\n')
+        archived = dict(batch=str(branch), control=control, retry=retry, frame=branch_trace['failure_frame'], reason=failure.reason)
+        ctx.retry_archives.append(archived)
+        return archived
 
     def run(self, seed, attempt, state, start=None, repeat=0):
         """Episode ``seed`` from its initial ``state`` (made by sub-seed ``attempt``), or from a
@@ -156,7 +211,7 @@ class Generator:
         started = time.perf_counter()
         first = self.steps[0] if self.steps else 1
         report = {'scene': self.name, 'seed': seed, 'attempt': attempt, 'steps_run': self.steps, 'from': self.source,
-                  'repeat': repeat}
+                  'repeat': repeat, 'skill_attempts': self.skill_attempts}
         snapshot = json.loads(state['_expert_frame']) if '_expert_frame' in state else None
         state = {key: value for key, value in state.items() if key != '_expert_frame'}
         self.env.reset_to_state(state)
@@ -172,6 +227,9 @@ class Generator:
                       only=self.steps)
         from table_1000.experts.trace import CallTrace, replay, restore, encode
         ctx.trace = CallTrace(ctx, seed, attempt, repeat)
+        ctx.initial_state = state
+        ctx.skill_attempts = self.skill_attempts
+        ctx.archive_retry = lambda control, retry, failure: self.archive_retry(ctx, control, retry, failure, repeat)
         from table_1000.experts.problems import Problems
         if self.problems != 'none' and not getattr(self.expert, 'human', False):
             ctx.trace.problems = Problems(ctx)
@@ -202,6 +260,7 @@ class Generator:
             for solver in ctx.solvers.values():
                 solver.world.clear()
         name = f'{seed}-{repeat}' if repeat else str(seed)
+        report['retry_archives'] = ctx.retry_archives
         report['call_trace'] = f'calls/{name}.json.gz'
         report['failure_frame'] = ctx.trace.failure_frame
         ctx.trace.save(self.output / report['call_trace'])

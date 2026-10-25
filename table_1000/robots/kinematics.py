@@ -218,7 +218,7 @@ class RobotModel:
         result['joints'] = list(self.spec.arms[arm].joints)
         return result
 
-    def plan_rrt(self, arm, target, q=None, *, world=False, time_step=.04, planning_time=3., goals=None, lift=False):
+    def plan_rrt(self, arm, target, q=None, *, world=False, time_step=.04, planning_time=3., goals=None, lift=False, check=None):
         """RRTConnect to an IK solution of ``target`` (or to ``goals``, full configurations). The
         torso lift is held unless ``lift`` frees it; its path is then ``result['lift']``."""
         planner = self.planners[arm]
@@ -230,8 +230,17 @@ class RobotModel:
                 return {'status': status, 'reason': status, 'ik_s': time.perf_counter() - started}
         ik_s = time.perf_counter() - started
         # The torso lift is the first joint of the move group.
-        result = planner.plan_qpos(list(goals), start, time_step=time_step, planning_time=planning_time,
-                                   fixed_joint_indices=[] if lift else list(range(len(self.spec.lift))))
+        from table_1000.planning.rrt import plan_rrt
+        def checked(rows):
+            if check is not None:
+                return check(rows)
+            count = len(self.spec.lift)
+            return self.check_path(arm, np.asarray(rows)[:, count:], lift=np.asarray(rows)[:, :count])[1]
+        try:
+            result = plan_rrt(planner, start, list(goals), time_step=time_step, planning_time=planning_time,
+                              fixed=[] if lift else list(range(len(self.spec.lift))), check=checked)
+        finally:
+            planner.robot.set_qpos(self.q, True)
         planner.robot.set_qpos(self.q, True)
         if result['status'] == 'Success' and not len(result['position']):
             # Already at the goal: a path of the start alone.

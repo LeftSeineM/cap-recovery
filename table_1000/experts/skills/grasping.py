@@ -6,7 +6,8 @@ import time
 import numpy as np
 
 from table_1000.experts.context import DT, Unreachable
-from table_1000.experts.grasps import SUPPORT_CLEARANCE, fitted, grasp_candidates, standoff, translated
+from table_1000.experts.grasps import (MIN_HOLD_AREA, SUPPORT_CLEARANCE, _held_area, fitted, grasp_candidates,
+                                       standoff, translated)
 from table_1000.experts.skills.common import (APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, ROOM_PLACES, SUPPORT_DISTANCE,
                                               Target, Unmet, collisions, normalized, planning_object)
 from table_1000.experts.solver import PlanningFailed
@@ -131,6 +132,8 @@ class Grasping:
         closest = min((grasp.info['closest_deg'] for _, candidates in found.values()
                        for grasp in itertools.islice(candidates, 1)), default=0.)
         for lift in (False, True):
+            if lift:
+                self.stow(why='shared torso lift')
             limit = np.degrees(max_angle) if max_angle is not None else np.inf
             if not lift:
                 limit = min(limit, closest + HELD_SLACK)
@@ -251,7 +254,7 @@ class Grasping:
                 if any(paths.values()):
                     # The fingers touch what options lets them: the target and its supports.
                     _, supports = self.obstacles(arms[0], target, ctx.poses()[target.body] @ target.offset)
-                    self.make_room(paths, need=1, touch=[*target.names, *supports])
+                    self.make_room(paths, need=1, touch=[*target.names, *supports], relocate=True)
                     skip = set()
                     reached = self.reach(target, arms, skip, point, approach, then, max_angle, need)
             if reached is None:
@@ -262,10 +265,13 @@ class Grasping:
             solver = self.solvers[arm]
             solver.close_gripper()
             gap = solver.finger_gap()
-            if gap >= grasp.info['contact_gap'] - HELD_TOLERANCE:
+            actual_held = _held_area(target.shape, ctx.poses()[target.body] @ target.offset,
+                                     solver.tcp(), self.hands[arm], gap)
+            if gap >= grasp.info['contact_gap'] - HELD_TOLERANCE and actual_held >= MIN_HOLD_AREA:
                 break
             # Missed: back out, re-observe the object and choose again.
-            ctx.note('missed grasp', arm=arm, finger_gap=gap, width=grasp.width, pose=grasp.pose.tolist(), **grasp.info)
+            ctx.note('missed grasp', arm=arm, finger_gap=gap, width=grasp.width, pose=grasp.pose.tolist(),
+                     actual_held_mm2=actual_held * 1e6, **grasp.info)
             solver.open_gripper(grasp.open_gap)
             solver.first_reachable([standoff(solver.tcp(), APPROACH), translated(solver.tcp(), [0., 0., APPROACH])])
             solver.allow([*target.names, *supports], False)
@@ -279,7 +285,8 @@ class Grasping:
                   'backoff': grasp.backoff, 'cost': grasp.cost, **grasp.info}
         self.held[arm] = {'target': target, 'supports': supports, 'grasp': chosen}
         ctx.note('grasped', arm=arm, target=target.names[0], approach=grasp.pose[:3, 0].tolist(),
-                 closing=grasp.pose[:3, 1].tolist(), finger_gap=solver.finger_gap(), **grasp.info)
+                 closing=grasp.pose[:3, 1].tolist(), finger_gap=solver.finger_gap(),
+                 actual_held_mm2=actual_held * 1e6, **grasp.info)
         result = {'arm': arm, 'grasp': chosen, 'supports': supports, 'finger_gap': solver.finger_gap(),
                   'regrasps': regrasps, 'choice_s': time.perf_counter() - started,
                   'tcp_object': (np.linalg.inv(solver.tcp()) @ poses[target.body]).tolist()}
@@ -312,7 +319,9 @@ class Grasping:
                 if need is not None and need.hands is not None:
                     if arm in need.arms:
                         body = self.ctx.poses()[target.body]
-                        paths[arm] += [path + hands for hands in need.hands(arm, np.linalg.inv(grasp.pose) @ body)]
+                        paths[arm] += [dict(poses=path + hands,
+                                               linear=[False] + [True] * (len(path) - 1) + [False] + [True] * (len(hands) - 1))
+                                      for hands in need.hands(arm, np.linalg.inv(grasp.pose) @ body)]
                     continue
                 paths[arm].append(path)
         return paths

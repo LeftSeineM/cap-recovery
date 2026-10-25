@@ -100,6 +100,8 @@ class Context:
         self.start = start or self.robot_state()
         self.only = only            # (first, last) steps to run (see run_steps)
         self.step_names = None      # the expert's steps, once run_steps runs
+        self.requirements = []    # live, reconstructible InHand requirements
+        self.retry_archives = []  # all discarded branches, including nested retries
         self.checkpoints = []       # {'step', 'name', 'at', 'wall_s', 'cpu_s', 'state'} after each checked step
         self.sync_model()
 

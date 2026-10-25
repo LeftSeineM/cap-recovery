@@ -183,6 +183,7 @@ def test_step_start_operates_first_ik_without_a_solver(tmp_path, monkeypatch):
     generator = object.__new__(Generator)
     generator.name, generator.output, generator.assets = 'fake', tmp_path, tmp_path
     generator.steps, generator.source, generator.problems = (2, 2), 'checkpoint', 'failed'
+    generator.skill_attempts = 3
     generator.env, generator.model, generator.spec = env, model, model.spec
     generator.env_args = {}
     generator.scene = types.SimpleNamespace(OBJECTS={}, ROBOT={'position': [0., 0., 0.]})

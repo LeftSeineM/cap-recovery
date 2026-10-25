@@ -121,21 +121,13 @@ class Placing:
         release = translated(placed, [0., 0., clearance]) @ np.linalg.inv(tcp_object)
         # Where it is let go (the hand and arm low by a wall), then above it at that torso height:
         # the way down moves the arm alone.
-        mark(self, 'release IK')
-        status, q_release = self.model.ik(arm, release, self.model.q, world=True, lift=lift, attempts=IK_ATTEMPTS)
-        if status != 'Success':
-            mark(self, 'IK', outcome='rejected', status=status)
-            return False
-        mark(self, 'above IK')
-        status, q_above = self.model.ik(arm, translated(release, [0., 0., above]), q_release, world=True,
-                                        attempts=IK_ATTEMPTS)
-        if status != 'Success':
-            mark(self, 'IK', outcome='rejected', status=status)
+        goals = self.down_goals(arm, release, above, lift, IK_ATTEMPTS)
+        if not goals:
             return False
         mark(self, 'plan')
         result['planned'] += 1
         try:
-            solver.move_to_pose_with_RRTConnect(None, lift=True, goals=[q_above], attempts=CANDIDATE_PLANS)
+            solver.move_to_pose_with_RRTConnect(None, lift=True, goals=goals, attempts=CANDIDATE_PLANS)
             solver.move_to_pose_with_screw(release)
             mark(self, 'plan', outcome='accepted')
             result.update(done=True, spot=spot)
@@ -207,23 +199,39 @@ class Placing:
             # Down to each of the first NEED_REACHED of those placements, one path each: release, then above.
             releases = [translated(placed, [0., 0., clearance]) @ np.linalg.inv(tcp_object) for placed, _ in options]
             return [[release, translated(release, [0., 0., above])] for release in releases[:NEED_REACHED]]
-        return InHand(obj, lambda arm, tcp_object: accepts(self, arm, tcp_object), recipe['arms'], hands, recipe)
+        need = InHand(obj, lambda arm, tcp_object: accepts(self, arm, tcp_object), recipe['arms'], hands, recipe)
+        if not hasattr(ctx, 'requirements'):
+            ctx.requirements = []
+        ctx.requirements.append(need)
+        return need
 
     @decision
     def in_reach_down(self, arm, placed, tcp_object, clearance, above):
         """Whether ``arm`` holding the object as ``tcp_object`` has IK at its release at ``placed``
         (the torso lift moving too) and above it."""
         release = translated(placed, [0., 0., clearance]) @ np.linalg.inv(tcp_object)
+        return bool(self.down_goals(arm, release, above, True, NEED_IK_ATTEMPTS, first=True))
+
+    @decision
+    def down_goals(self, arm, release, above, lift, attempts, first=False):
+        """Above configurations with a release branch at the same torso height."""
         mark(self, 'release IK')
-        status, q_release = self.model.ik(arm, release, self.model.q, world=True, lift=True, attempts=NEED_IK_ATTEMPTS)
+        status, releases = self.model.ik(arm, release, self.model.q, world=True, lift=lift,
+                                         attempts=attempts, closest=False)
         if status != 'Success':
-            mark(self, 'IK', outcome='rejected', status=status)
-            return False
-        mark(self, 'above IK')
-        status, _ = self.model.ik(arm, translated(release, [0., 0., above]), q_release, world=True,
-                                  attempts=NEED_IK_ATTEMPTS)
-        mark(self, 'above IK', outcome='accepted' if status == 'Success' else 'rejected', status=status)
-        return status == 'Success'
+            mark(self, 'release IK', outcome='rejected', status=status)
+            return []
+        goals = []
+        for branch, q_release in enumerate(sorted(releases, key=lambda q: np.linalg.norm(q - self.model.q))):
+            mark(self, 'above IK', str(branch))
+            status, q_above = self.model.ik(arm, translated(release, [0., 0., above]), q_release,
+                                           world=True, attempts=attempts)
+            mark(self, 'above IK', outcome='accepted' if status == 'Success' else 'rejected', status=status)
+            if status == 'Success':
+                goals.append(q_above)
+                if first:
+                    break
+        return goals
 
     def place(self, obj, region, arm=None, near=None, keep_out=(), clearance=PLACE_CLEARANCE, above=PLACE_ABOVE,
               step=PLACE_STEP, margin=PLACE_MARGIN):

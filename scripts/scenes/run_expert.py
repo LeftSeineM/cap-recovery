@@ -100,7 +100,7 @@ def worker(args):
             states = {seed: (attempt, state, None) for seed, (attempt, state) in read_states(args.states)[1].items()}
         generator = Generator(args.scene, work, args.assets.resolve(), args.root.resolve(), physics=args.physics,
                               steps=args.steps, source=str(args.states) if args.checkpoints else None,
-                              problems=args.problems)
+                              problems=args.problems, skill_attempts=args.skill_attempts)
         for seed, repeat in itertools.product(parse_seeds(args.seeds), range(args.repeats)):
             report = generator.run(seed, *states[seed], repeat=repeat)
             print(seed, *([f'repeat {repeat}'] if repeat else []), report['status'],
@@ -139,6 +139,8 @@ def main(argv=None):
     parser.add_argument('--problems', choices=('failed', 'all', 'none'), default='failed',
                         help='save numerical solve problems for failed/error runs (default), all runs, or none; '
                              'none also disables recording and extra IK diagnostics')
+    parser.add_argument('--skill-attempts', type=int, default=3,
+                        help='total tries per retry callback, restoring entry before later random tries (default 3)')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--seeds', nargs='+', help='only these seeds of the initial states or checkpoints: 12 27, 0:20')
     parser.add_argument('--states', type=Path, help=argparse.SUPPRESS)
@@ -154,6 +156,8 @@ def main(argv=None):
     jobs = job_count(parser, args)
     root = args.root.resolve()
     first = args.steps[0] if args.steps else 1
+    if args.skill_attempts < 1:
+        parser.error('--skill-attempts: at least 1')
     if args.repeats < 1:
         parser.error('--repeats: at least 1')
     if not args.dev and (args.steps or args.source or args.seeds or args.name or args.repeats > 1):
@@ -216,7 +220,7 @@ def main(argv=None):
         argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--physics', args.physics,
                 '--seeds', *seed_range(part).split(), '--states', str(states), '--work', str(staging / name),
                 '--root', str(root), '--assets', str(args.assets.resolve()), '--repeats', str(args.repeats),
-                '--problems', args.problems,
+                '--problems', args.problems, '--skill-attempts', str(args.skill_attempts),
                 *(['--steps', '-'.join(map(str, args.steps))] if args.steps else []),
                 *(['--checkpoints'] if args.source else [])]
         return argv, staging / f'{name}.log', f'{args.scene} {args.physics} {name} seeds {seed_range(part)}'
@@ -238,9 +242,13 @@ def main(argv=None):
     sources = [path for path in staging.glob('part*/checkpoints/*.hdf5')
                if (path.parent.parent / 'episodes' / f'{path.stem}.json').is_file()]
     merge_checkpoints(sources, directory, {'scene': args.scene, 'robot': robot, 'physics': args.physics,
-                                           'commit': checkout})
+                                           'commit': checkout or 'nocommit'})
     for path in staging.glob('part*/checkpoints/*.hdf5'):
         path.unlink()
+    for path in sorted(staging.glob('part*/attempts/*')):
+        target = directory / 'attempts' / path.name
+        target.parent.mkdir(exist_ok=True)
+        shutil.move(path, target)
     runs = []
     for kind in ('calls', 'problems'):
         (directory / kind).mkdir(exist_ok=True)
@@ -254,7 +262,7 @@ def main(argv=None):
     summary = {'run': run, 'command': shlex.join(sys.argv if argv is None else ['run_expert.py', *argv]),
                'scene': args.scene, 'robot': robot, 'physics': args.physics, 'commit': checkout,
                'steps_run': args.steps, 'from': str(args.source.resolve()) if args.source else None,
-               'problems': args.problems,
+               'problems': args.problems, 'skill_attempts': args.skill_attempts,
                **summarize(reports, seeds), 'steps': step_rates(reports, seeds, parent),
                'repeats': repeat_rates(runs, seeds, args.repeats) if args.repeats > 1 else None,
                'load': load_record(runs), 'total_s': time.perf_counter() - started, 'videos': {}, 'fails': {}}

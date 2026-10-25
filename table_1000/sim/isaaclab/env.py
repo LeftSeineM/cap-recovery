@@ -354,6 +354,26 @@ class RobotEnv:
         self.contacts.clear()
         return self.observe()
 
+    def capture_retry(self):
+        """Physical state, held commands and the continuous recorded prefix before a retry."""
+        from copy import deepcopy
+        from table_1000.sim.isaaclab.replay import numpy_state
+        from table_1000.experts.retrying import copy_recorded
+        return dict(state={**numpy_state(self), 'targets': deepcopy(self.targets())}, steps=self.steps,
+                    recording=copy_recorded(self.env.recorder_manager.get_episode(0).data),
+                    contacts={name: deepcopy(getattr(self.contacts, name))
+                              for name in ('time', 'phase', 'events', 'open', 'impulses')})
+
+    def restore_retry(self, saved):
+        """Restore an attempt's entry without recording a teleport in the main trajectory."""
+        from copy import deepcopy
+        from table_1000.experts.retrying import copy_recorded
+        self.reset_to_state(saved['state'])
+        self.steps = saved['steps']
+        self.env.recorder_manager.get_episode(0).data = copy_recorded(saved['recording'])
+        for name, value in saved['contacts'].items():
+            setattr(self.contacts, name, deepcopy(value))
+
     def place_kinematic(self, state):
         """Pose the kinematic shapes as in ``state`` (tensors on the device): ``InteractiveScene.reset_to``
         leaves their kinematic targets and USD transforms."""

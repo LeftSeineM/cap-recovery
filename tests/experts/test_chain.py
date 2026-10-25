@@ -12,6 +12,7 @@ from table_1000.experts.skills.common import Unmet
 class Context:
     def __init__(self):
         self.notes, self.subtasks = [], []
+        self.skill_attempts = 1
 
     def note(self, text, **values):
         self.notes.append(text)
