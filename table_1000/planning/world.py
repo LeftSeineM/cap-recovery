@@ -16,6 +16,9 @@ from scipy.spatial.transform import Rotation
 import trimesh
 
 
+from table_1000.common.timing import timed
+
+
 def pose(transform):
     """``mplib.Pose`` of a 4x4 transform."""
     from mplib import Pose
@@ -177,14 +180,17 @@ class PlanningScene:
 
     def __init__(self, planner, frame=np.eye(4)):
         self.planner, self.objects, self.frame = planner, {}, np.asarray(frame, dtype=float)
-        self.padding, self.poses, self.object_padding = 0., {}, {}
-        # Re-adding an object drops its matrix entries, so permissions are kept here.
+        self.padding, self.poses = 0., {}
+        self.object_padding = {}
+        # Explicit removals/detaches can drop matrix entries; retain scene-owned permissions.
         self.permissions = set()
 
     def add(self, obj, world_pose):
         self.objects[obj.name] = obj
+        self.object_padding.pop(obj.name, None)
         self.set_pose(obj.name, world_pose)
 
+    @timed('world_update')
     def set_padding(self, padding):
         if padding != self.padding:
             self.padding = padding
@@ -192,16 +198,30 @@ class PlanningScene:
                 if not self.planner.planning_world.is_object_attached(name):
                     self.set_pose(name, world_pose)
 
+    @timed('world_update')
     def set_pose(self, name, world_pose):
         world = self.planner.planning_world
-        if world.has_object(name):
+        obj = self.objects[name]
+        transform = self.frame @ world_pose
+        padding = self.padding if obj.padded else 0.
+        exists, attached = world.has_object(name), world.is_object_attached(name)
+        self.poses[name] = np.array(world_pose, dtype=float, copy=True)
+        # Consult the live object too: callers can detach objects directly from
+        # MPlib, which changes their pose without going through this scene.
+        if (exists and not attached and self.object_padding.get(name) == padding
+                and np.max(np.abs(world.get_object(name).pose.to_transformation_matrix() - transform)) <= 1e-12):
+            return
+        if attached:
             world.remove_object(name)
-        self.poses[name] = np.asarray(world_pose, dtype=float)
-        self.object_padding[name] = self.padding if self.objects[name].padded else 0.
-        world.add_object(self.objects[name].fcl(self.frame @ world_pose, self.padding))
-        others = sorted(other for pair in self.permissions if name in pair for other in pair if other != name)
-        if others:
-            world.get_allowed_collision_matrix().set_entry(name, others, True)
+        # add_object replaces an unattached object in place and retains its ACM
+        # entries. Removing it first would erase permissions and require a scan
+        # over every saved pair for every object on every synchronization.
+        world.add_object(obj.fcl(transform, self.padding))
+        self.object_padding[name] = padding
+        if not exists or attached:
+            others = sorted(other for pair in self.permissions if name in pair for other in pair if other != name)
+            if others:
+                world.get_allowed_collision_matrix().set_entry(name, others, True)
 
     def clear(self):
         """Detach and remove every object this scene added."""
@@ -213,13 +233,16 @@ class PlanningScene:
                 world.remove_object(name)
         self.objects, self.poses, self.permissions, self.object_padding = {}, {}, set(), {}
 
-    def set_frame(self, frame):
-        """The planner's frame from the world (the robot's base moved): objects re-placed in it."""
+    @timed('world_update')
+    def set_frame(self, frame, body_poses=None):
+        """Re-place objects in a new planner frame, optionally updating live body poses in one pass."""
         self.frame = np.asarray(frame, dtype=float)
+        body_poses = {} if body_poses is None else body_poses
         for name, world_pose in self.poses.items():
             if not self.planner.planning_world.is_object_attached(name):
-                self.set_pose(name, world_pose)
+                self.set_pose(name, body_poses.get(self.objects[name].body, world_pose))
 
+    @timed('world_update')
     def update(self, body_poses):
         """``body_poses`` maps a body key (``prefix + body``) to its world 4x4."""
         for name, obj in self.objects.items():

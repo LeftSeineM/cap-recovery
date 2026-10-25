@@ -16,6 +16,8 @@ arms, moves only with the giving arm, before the receiving one reaches.
 
 import itertools
 
+from table_1000.common.timing import timed
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -64,6 +66,7 @@ class Handing:
         return [pose for *_, pose in sorted(poses, key=lambda option: option[:2])]
 
     @decision
+    @timed('handover_search')
     def handoffs(self, target, giver, to, need):
         """Feasible handovers ``(pose, q_give, grasp)``, the first grasp of each pose, as they are found
         (see the module docstring)."""

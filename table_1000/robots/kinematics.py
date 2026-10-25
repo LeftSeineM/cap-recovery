@@ -21,10 +21,16 @@ from pathlib import Path
 
 import time
 
+from table_1000.common.timing import timed
+
 import numpy as np
 
 from table_1000.robots.planning_model import write_planning_urdf, write_srdf
 from table_1000.planning.screw import plan_screw
+from table_1000.planning.shortcut import BoundedPlanner
+from table_1000.planning.chain_ik import ChainKinematics
+from table_1000.planning.broadphase import BroadphaseWorld
+from table_1000.planning.query_pairs import QueryPairs
 from table_1000.planning.world import pose
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -94,6 +100,11 @@ class RobotModel:
         self.index = {name: i for i, name in enumerate(self.joints)}
         self.limits = np.asarray(first.joint_limits)
         for name, planner in self.planners.items():
+            planner.TOPP = timed('time_parameterization')(planner.TOPP)
+            planner.planning_world = BroadphaseWorld(planner.planning_world)
+            planner.planner = BoundedPlanner(planner.planner, planner.planning_world, QueryPairs(planner, urdf),
+                                            cost=lambda path, planner=planner: planner.TOPP(path, .04)[-1])
+            planner.pinocchio_model = ChainKinematics(planner.pinocchio_model, urdf, planner.move_group)
             group = [self.joints[i] for i in planner.move_group_joint_indices]
             if group != [*spec.lift, *spec.arms[name].joints]:
                 raise RuntimeError(f'unexpected move group for {name}: {group}')
@@ -141,6 +152,7 @@ class RobotModel:
     def tcp(self, arm, q=None, world=False):
         return self.fk(self.spec.arms[arm].tcp_link, q, world)
 
+    @timed('ik')
     def ik(self, arm, target, q=None, *, world=False, attempts=20, closest=True, check_collision=True, lift=False):
         """Joint configuration placing ``arm``'s TCP at ``target``; ``(status, q)``.
 
@@ -218,6 +230,7 @@ class RobotModel:
         result['joints'] = list(self.spec.arms[arm].joints)
         return result
 
+    @timed('rrt')
     def plan_rrt(self, arm, target, q=None, *, world=False, time_step=.04, planning_time=3., goals=None, lift=False, check=None):
         """RRTConnect to an IK solution of ``target`` (or to ``goals``, full configurations). The
         torso lift is held unless ``lift`` frees it; its path is then ``result['lift']``."""
@@ -253,6 +266,7 @@ class RobotModel:
         result.update(ik_s=ik_s, rrt_s=time.perf_counter() - started - ik_s)
         return self._arm_path(arm, result, lift)
 
+    @timed('collision')
     def collisions(self, arm, q):
         """``[(link, object, object link)]`` in collision in ``arm``'s planning world at full configuration ``q``."""
         world = self.planners[arm].planning_world
@@ -262,6 +276,7 @@ class RobotModel:
         finally:
             self.planners[arm].robot.set_qpos(self.q, True)
 
+    @timed('collision')
     def object_collisions(self, arm, q):
         """``[(link, object, object link)]`` between the robot at full configuration ``q`` (every
         joint, not only ``arm``'s) and the objects of ``arm``'s planning world, those it holds included."""
@@ -274,6 +289,7 @@ class RobotModel:
         finally:
             planner.robot.set_qpos(self.q, True)
 
+    @timed('path_validation')
     def check_path(self, arm, positions, step=.01, lift=None):
         """First collision along a path of ``arm`` joint rows (with ``lift`` rows of the torso
         lift, else the lift where it is), interpolated so that no joint moves more than ``step``
@@ -308,10 +324,12 @@ class RobotModel:
                     leaving = set()
                 elif not (leaving and pairs <= leaving):
                     return checks, sorted(pairs)
+                leaving &= pairs
             return checks, []
         finally:
             self.planners[arm].robot.set_qpos(self.q, True)
 
+    @timed('screw')
     def plan_screw(self, arm, target, q=None, *, world=False, time_step=.04, lift=False):
         """Straight screw motion of the TCP from its pose at ``q`` to ``target``; ``lift`` moves
         the torso lift as well (its path is then ``result['lift']``)."""

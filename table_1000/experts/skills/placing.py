@@ -2,6 +2,8 @@
 
 import itertools
 
+from table_1000.common.timing import timed
+
 import numpy as np
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
@@ -46,6 +48,7 @@ class Placing:
     """The place skill of :class:`~table_1000.experts.skills.Skills`."""
 
     @decision
+    @timed('placements')
     def placements(self, target, current, region, near, keep_out, step, margin):
         """``[(object pose at rest on the surface, spot)]`` in ``region`` (see :meth:`place`), the
         footprint at least ``margin`` inside it and out of ``keep_out``, nearest ``near`` first, then
@@ -168,6 +171,7 @@ class Placing:
         verdicts, obj_prefix = dict(recipe['verdicts']), f'{obj}:'
 
         @decision
+        @timed('placement_need')
         def accepts(self, arm, tcp_object):
             rotation = Rotation.from_matrix(tcp_object[:3, :3]).as_rotvec()
             # Per hold and per robot state (the base and joints, as a base move or a stow leaves them).

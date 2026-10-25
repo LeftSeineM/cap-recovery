@@ -174,6 +174,12 @@
 
 拼接结果不合并此前各段的调用树、求解记录或后续 repeats；需要分析这些记录时使用来源批次。最后一段没有保存求解记录时，拼接不会补采集。
 
+`run_expert.py --profile`（默认关闭）在报告里增加嵌套 wall 计时：`wall_profile` 是整条专家运行的分类统计，步骤的同名字段是累计快照，`subtask_profiles` 与 `subtasks` 一一对应。每类有 `calls`、包含已计时子调用的 `wall_s`、扣除这些子调用的 `self_s`；只有 `self_s` 能跨类别相加。抓取候选、IK、RRT、轨迹时间参数化、显式碰撞、路径验证、世界更新、底盘和交接搜索、控制步进分别计时；控制步进中的动作转换、物理与录制另记为 `physics_step`，因此步骤和子任务也有此项分解。MPlib 内部的碰撞检查仍包含在 IK/RRT 中；RRT 的自身时间还包含原生路径简化和 Python 包装。惰性候选生成器只计每次恢复执行，`calls` 包括最终耗尽的一次，不是候选数。`timings.physics_step_s` 是控制步进中动作转换、物理与录制的耗时，不含观察与模型同步，不能再与分类的 `self_s` 之和或 `control_step.wall_s` 相加。`step_times.py` 输出每条的平均自身/嵌套耗时及未覆盖的专家时间，仍兼容未开启计时的旧报告。`eval_pick.py --profile` 同样记录每个 trial 的 `wall_profile` 和 `physics_step_s`。
+
+开启 profile 时，各项同时记录调用线程的 `thread_cpu_s`、`self_thread_cpu_s`，与 wall 的包含/扣除子调用规则一致。Linux 上还尝试用 `perf_event_open` 记录当前线程用户态的 retired instructions（`instructions`、`self_instructions`，不继承到工作线程）；计数器固定在硬件上，无法调度或读取时直接报错，权限不允许打开时在 `profile_counters.instructions` 记录原因并省略指令字段。未开启 profile 时不打开或读取这些计数器。多线程的 `physics_step` 只公开 wall 与区间内整个进程的 `process_cpu_s`，包括动作、物理和录制，也可能包含同时运行的后台线程；它不能与其他类别的线程 CPU 相加。父项仍扣除该区间的调用线程 CPU/指令，避免计入控制其余工作。`profile_totals` 给出录制区间的 wall、线程 CPU、可用的指令数，以及进程口径区间内被排除的线程量（`process_spans_*`），用于计算未包裹的工作。步骤和子任务沿用同一套字段；`step_times.py` 展示各口径，缺失测量显示 `-`，不会作为零参与新口径的均值。线程 CPU 不包含库的工作线程；需结合具体库的执行方式和线程配置解释，不能视为整进程 CPU 或消除 RRT 墙钟时限导致的工作量变化。
+
+当前 MPlib 0.2.1 的 IK、FCL、RRT 搜索与 TOPP 在调用线程同步执行；使用单线程 BLAS 时这些计算由线程 CPU 覆盖。其 OMPL 1.6 在规划预算不少于 1 s 时另开检查终止期限的辅助线程：该线程不执行搜索，但其 CPU/指令不进入调用线程的分类，CPU 仍计入 episode 的进程 `cpu_s` 与负载采样。Isaac 后台线程在规划期间运行的 CPU 同样只进入进程总量，不应归到 RRT/IK 的线程 self 时间。
+
 ## 轨迹数据
 
 **无图片、可重放**：直接使用 Isaac Lab 录制器的 HDF5（`trajectories.hdf5` 存成功的，`trajectories_failed.hdf5` 存失败的）。每条轨迹 `data/demo_<seed>`：

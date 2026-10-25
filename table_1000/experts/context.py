@@ -27,6 +27,8 @@ from pathlib import Path
 import time
 from typing import Callable
 
+from table_1000.common.timing import WallProfile, timed
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -94,6 +96,8 @@ class Context:
         self.origin = env.steps  # the episode starts here, after settling
         self.started, self.cpu_started = time.perf_counter(), time.process_time()
         self.subtask_wall_s = []     # wall seconds each subtask took, in the order of subtasks
+        self.profile = WallProfile()
+        self.subtask_profiles = []
         self.observers = []      # called after every step (e.g. video capture)
         # The robot where the seed's episode began ({'qpos', 'base_pose'}): its arms' home and its
         # base's start, also when this run resumes from a checkpoint.
@@ -127,6 +131,7 @@ class Context:
         """The planning model follows the measured joints, as on the real robot."""
         self.model.set_state(dict(zip(self.env.joints, self.env.obs['agent']['qpos'][0])), self.base_transform())
 
+    @timed('control_step')
     def step(self, action=None):
         obs = self.env.step(action or {})
         self.sync_model()
@@ -158,6 +163,7 @@ class Context:
         """Steps taken inside belong to ``instruction``; contacts are labelled with it."""
         entry = {'instruction': instruction, 'start': self.steps, 'end': None}
         self.subtasks.append(entry)
+        before = self.profile.snapshot()
         started = time.perf_counter()
         self.current = instruction
         self.env.contacts.phase = instruction
@@ -167,6 +173,7 @@ class Context:
         finally:
             entry['end'] = self.steps
             self.subtask_wall_s.append(time.perf_counter() - started)
+            self.subtask_profiles.append(self.profile.since(before))
             self.current = None
             self.env.contacts.phase = None
 
@@ -179,6 +186,7 @@ class Context:
         self.checkpoints.append({'step': index, 'name': name, 'at': self.steps,
                                  'wall_s': time.perf_counter() - self.started,
                                  'cpu_s': time.process_time() - self.cpu_started, 'state': state})
+        self.checkpoints[-1]['wall_profile'] = self.profile.snapshot()
 
     def note(self, text, **values):
         self.events.append({'step': self.steps, 'subtask': self.current, 'note': text, **values})

@@ -23,7 +23,7 @@ class RetryState:
         self.worlds = {arm: (dict(s.world.objects), s.world.object_padding.copy()) for arm,s in ctx.solvers.items()}
         self.logs = {arm: len(s.log) for arm,s in ctx.solvers.items()}
         self.skill_log = len(ctx.skills().log)
-        self.lengths = {name:len(getattr(ctx,name)) for name in ('events','subtasks','subtask_wall_s','checkpoints')}
+        self.lengths = {name:len(getattr(ctx,name)) for name in ('events','subtasks','subtask_wall_s','subtask_profiles','checkpoints')}
         self.frames = len(ctx.trace.frames)
         self.record = ctx.trace.problems
         if self.record:

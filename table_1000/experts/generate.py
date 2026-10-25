@@ -111,7 +111,7 @@ class Generator:
     DEVICES = {'isaac-cpu': 'cpu'}
 
     def __init__(self, scene_name, output, assets, root, physics='isaac-cpu', steps=None, source=None,
-                 problems='failed', skill_attempts=3, **env_kwargs):
+                 problems='failed', skill_attempts=3, profile=False, **env_kwargs):
         """``steps``: ``(first, last)`` of the expert's steps to run (all when None); ``source``: where
         the states come from (a checkpoint file), for the reports; ``problems`` saves numerical
         problems of failed/error runs, all runs, or none; ``env_kwargs`` (cameras, views) go to
@@ -125,6 +125,7 @@ class Generator:
         self.name, self.output, self.assets = scene_name, Path(output), Path(assets)
         self.steps, self.source, self.problems = steps, source, problems
         self.skill_attempts = skill_attempts
+        self.profile_enabled = profile
         self.scene, self.expert = load(scene_name, 'scene', root), load(scene_name, 'expert', root)
         if steps and not 1 <= steps[0] <= steps[1] <= len(getattr(self.expert, 'STEPS', ())):
             raise ValueError(f'steps {steps[0]}-{steps[1]}: the expert of {scene_name} has '
@@ -234,18 +235,20 @@ class Generator:
         if self.problems != 'none' and not getattr(self.expert, 'human', False):
             ctx.trace.problems = Problems(ctx)
             ctx.trace.problems.install()
+        physics_before = self.env.timings['step_s'] if self.profile_enabled else None
         try:
-            if snapshot:
-                if getattr(self.expert, 'human', False):
-                    restore(ctx, snapshot['frame'])
-                    self.expert.solve(ctx)
+            with ctx.profile.record(self.profile_enabled):
+                if snapshot:
+                    if getattr(self.expert, 'human', False):
+                        restore(ctx, snapshot['frame'])
+                        self.expert.solve(ctx)
+                    else:
+                        ctx.step_names = [step.name for step in self.expert.STEPS]
+                        report['result'] = encode(replay(ctx, snapshot, self.expert))
                 else:
-                    ctx.step_names = [step.name for step in self.expert.STEPS]
-                    report['result'] = encode(replay(ctx, snapshot, self.expert))
-            else:
-                if start is not None:
-                    ctx.hold(RESUME_S)
-                self.expert.solve(ctx)
+                    if start is not None:
+                        ctx.hold(RESUME_S)
+                    self.expert.solve(ctx)
             report['status'] = 'success'
         except ExpertFailed as error:
             report.update(status='failed', failure={'subtask': error.subtask, 'reason': error.reason,
@@ -290,6 +293,14 @@ class Generator:
                               for name, joints in self.env.privileged()['joints'].items()}},
             timings={'init_s': init_s, **{key: sum(s.timings[key] for s in ctx.solvers.values())
                                           for key in ('planning_s', 'executing_s')}})
+        if self.profile_enabled:
+            report['wall_profile'] = ctx.profile.snapshot()
+            report['profile_totals'] = ctx.profile.elapsed
+            report['profile_counters'] = ctx.profile.counters
+            report['subtask_profiles'] = ctx.subtask_profiles
+            report['timings']['physics_step_s'] = self.env.timings['step_s'] - physics_before
+            for entry, checkpoint in zip(report['steps'], ctx.checkpoints):
+                entry['wall_profile'] = checkpoint['wall_profile']
         if repeat:
             return report, started
         checkpoints = ctx.checkpoints

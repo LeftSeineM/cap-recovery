@@ -35,6 +35,7 @@ from isaaclab.managers import EventTermCfg, ObservationGroupCfg, ObservationTerm
 from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
 
+from table_1000.common.timing import measure
 from table_1000.robots import ROOT
 from table_1000.robots.cameras import mount_on_body
 from table_1000.sim.isaaclab import scene as lab_scene
@@ -430,7 +431,8 @@ class RobotEnv:
         """Apply ``action`` for one control step; returns the observation."""
         import time
         started = time.perf_counter()
-        self.env.step(self.action(action or {}))
+        with measure('physics_step'):
+            self.env.step(self.action(action or {}))
         self.steps += 1
         self.timings['step_s'] += time.perf_counter() - started
         return self.observe()

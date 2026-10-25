@@ -90,7 +90,7 @@ def worker(args):
         from table_1000.sim.isaaclab.video import encode
         views = {'wide': WIDE, 'close': CLOSE} if args.video else {}
         evaluator = Evaluator(scene(args.gap, args.lift, robot=args.robot, scenario=args.scenario), args.assets, work, ROOT,
-                              views, args.random_pushes)
+                              views, args.random_pushes, profile=args.profile)
         units = [tuple(map(int, unit.split(':'))) for unit in args.units]
         for seed in sorted({seed for seed, _ in units}):
             directory = group_dir(args.output, args.robot, args.scenario, seed, bool(args.case))
@@ -185,6 +185,7 @@ def main(argv=None):
     add_arguments(parser)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--profile', action='store_true', help='record nested wall/CPU times and available instructions')
     parser.add_argument('--robot', help=argparse.SUPPRESS)
     parser.add_argument('--scenario', help=argparse.SUPPRESS)
     parser.add_argument('--units', nargs='+', help=argparse.SUPPRESS)
@@ -212,6 +213,8 @@ def main(argv=None):
         passthrough += ['--objects', *args.objects]
     for case in args.case or ():
         passthrough += ['--case', *case]
+    if args.profile:
+        passthrough.append('--profile')
     if args.video:
         passthrough.append('--video')
 

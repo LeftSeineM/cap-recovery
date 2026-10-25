@@ -12,6 +12,8 @@ import heapq
 
 import numpy as np
 
+from table_1000.common.timing import timed
+
 
 def normalized(vector):
     vector = np.asarray(vector, dtype=float)
@@ -236,6 +238,11 @@ class Hand:
         self.shapes = {link: [_urdf_shape(collision, urdf.parent) for collision in links[link].findall('collision')]
                        for link in (self.side.tcp[0], *self.side.finger_links)}
         self.geometry = {}
+        # Collision meshes are independent of finger opening.  Keep one FCL
+        # geometry per URDF shape and only rebuild the cheap pose wrappers for
+        # each opening.  This avoids repeating convex-hull construction while
+        # preserving the original shape order and collision tests.
+        self.collision_geometry = {}
         reference = self.frames(min(.04, self.max_gap))
         self.fingers = []   # (opening sign, inner surface points in the finger link's frame, pad mask)
         for link in self.side.finger_links:
@@ -290,8 +297,11 @@ class Hand:
             for link, frame in self.frames(gap).items():
                 if link in self.side.finger_links and not fingers:
                     continue
-                for transform, kind, data, _ in self.shapes[link]:
-                    parts.append((fcl.CollisionObject(geometry(kind, data)), pose(frame @ transform)))
+                for index, (transform, kind, data, _) in enumerate(self.shapes[link]):
+                    key_shape = (link, index)
+                    if key_shape not in self.collision_geometry:
+                        self.collision_geometry[key_shape] = geometry(kind, data)
+                    parts.append((fcl.CollisionObject(self.collision_geometry[key_shape]), pose(frame @ transform)))
             self.geometry[key] = [part for part, _ in parts], [part_pose for _, part_pose in parts]
         objects, poses = self.geometry[key]
         return fcl.FCLObject('hand', pose(tcp), objects, poses)
@@ -377,6 +387,7 @@ def lengthwise(closings):
     return widths[-1] if long else None
 
 
+@timed('grasp_candidates')
 def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mass=None, approach_distance=.05,
                      step=np.radians(15), max_up=.05, cost_offset=40., cost_backoff=10., cost_hold=.5 / 30e-6):
     """Grasps of ``shape`` (:class:`Box` or :class:`Cylinder`) at world ``transform`` by ``hand``

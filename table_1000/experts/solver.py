@@ -16,6 +16,8 @@ made raises :class:`PlanningFailed` with the reason (``IK Failed``,
 from contextlib import nullcontext
 import time
 
+from table_1000.common.timing import timed
+
 import numpy as np
 
 from table_1000.experts.context import DT, ExpertFailed, steps
@@ -92,12 +94,15 @@ class MotionSolver:
             self.world.add(obj, poses[obj.body])
         return objects
 
+    @timed('world_update')
     def sync(self):
         """Move planning objects to their live poses (and all of them where the base moved)."""
         frame = np.linalg.inv(self.model.base)
+        poses = self.ctx.poses()
         if not np.allclose(frame, self.world.frame, atol=1e-6):
-            self.world.set_frame(frame)
-        self.world.update(self.ctx.poses())
+            self.world.set_frame(frame, poses)
+        else:
+            self.world.update(poses)
 
     def allow(self, names, allowed=True):
         """Permit (or revoke) planned contact between the fingers and planning objects ``names``."""
@@ -146,6 +151,7 @@ class MotionSolver:
         return self.arm.gap(self.ctx.env.qpos(self.arm.fingers)[0])
 
     # -- planning ------------------------------------------------------------------------
+    @timed('motion_plan')
     def _plan(self, kind, function, goals=(), problem=None):
         self.world.set_padding(PADDING if kind == 'rrt' else 0.)
         self.sync()
@@ -173,6 +179,17 @@ class MotionSolver:
         self.overlaps = overlaps
         for link, other in overlaps:
             self.world.allow([link], [other])
+        adapter = self.planner.planner
+        before = adapter.before_simplify
+        if kind == 'rrt':
+            def prepare_simplify():
+                # Native search needs temporary padding contacts; new shortcuts
+                # must use the bare geometry and the permanent permissions only.
+                for link, other in self.overlaps:
+                    self.world.allow([link], [other], False)
+                self.overlaps = []
+                self.world.set_padding(0.)
+            adapter.before_simplify = prepare_simplify
         started = time.perf_counter()
         record = getattr(getattr(self.ctx, 'trace', None), 'problems', None)
         capture = (record.operation('motion', self.arm.name, dict(kind=kind, start_allowed=overlaps, **problem))
@@ -184,6 +201,7 @@ class MotionSolver:
                     from table_1000.experts.problems import summary
                     problem_entry['result'] = summary(result)
         finally:
+            adapter.before_simplify = before
             for link, other in self.overlaps:
                 self.world.allow([link], [other], False)
             self.overlaps = []
@@ -202,6 +220,7 @@ class MotionSolver:
                           if key not in ('position', 'velocity', 'acceleration', 'time')})
             raise PlanningFailed(self.ctx.current, result.get('reason', result['status']), plan=entry)
         entry['duration_s'] = float(result['duration'])
+        entry['joint_length_rad'] = float(np.linalg.norm(np.diff(result['position'], axis=0), axis=1).sum())
         return result
 
     def check_geometry(self, rows, step=VALIDATION_STEP):
@@ -254,6 +273,7 @@ class MotionSolver:
                     raise
         self._rrt(target, planning_time, attempts, free[-1], goals)
 
+    @timed('departure_check')
     def touching(self):
         """``[(finger or TCP link, object)]`` within the free-space padding of each other now, not allowed."""
         self.world.set_padding(PADDING)

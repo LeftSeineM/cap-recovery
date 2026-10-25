@@ -15,7 +15,7 @@ def context(limit):
     env=SimpleNamespace(targets=lambda:{'commands':state['commands']},contacts=SimpleNamespace(phase='pick'))
     skill=SimpleNamespace(held={},reaches={},log=[])
     ctx=SimpleNamespace(env=env,steps=0,current='pick',_skills=skill,solvers={},rng=np.random.default_rng(7),
-        skills=lambda:skill,events=[],subtasks=[],subtask_wall_s=[],checkpoints=[],skill_attempts=limit,scene=SimpleNamespace(OBJECTS={}))
+        skills=lambda:skill,events=[],subtasks=[],subtask_wall_s=[],subtask_profiles=[],checkpoints=[],skill_attempts=limit,scene=SimpleNamespace(OBJECTS={}))
     ctx.trace=CallTrace(ctx,7,0)
     def capture():return deepcopy(state)
     def restore(saved):
@@ -32,6 +32,7 @@ def context(limit):
 
 @traced()
 def move(ctx,state,fail):
+    ctx.subtask_profiles.append({'move': {'wall_s': 1.}})
     seed=ctx.trace.frames[-1]['mplib_seed'];random=ctx.rng.random()
     assert state['position']==0 and state['commands']==0
     state.update(position=1,commands=2,steps=3);state['record'].append(1);ctx.steps=3;ctx.events.append({'note':'moved'});ctx._skills.log.append('move')
@@ -50,6 +51,7 @@ def test_rollback_has_continuous_main_prefix_and_new_streams():
     assert count==2 and len(archives)==1
     assert state['record']==[0,1] and ctx.steps==3
     assert ctx._skills.log==['move']
+    assert ctx.subtask_profiles==[{'move': {'wall_s': 1.}}]
     assert [f['name']for f in ctx.trace.frames]==['retry','move']
     assert ctx.trace.frames[1]['parent']==0 and ctx.trace.failure_frame is None
     assert archives[0]['frames'][1]['exception']['unreachable']

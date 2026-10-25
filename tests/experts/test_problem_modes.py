@@ -14,12 +14,13 @@ from table_1000.robots import load_spec
 from table_1000.robots.kinematics import RobotModel
 
 
+@pytest.mark.parametrize('profile', [False, True])
 @pytest.mark.parametrize('status', ['success', 'failed', 'error'])
-def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeypatch, status):
+def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeypatch, status, profile):
     model = RobotModel(load_spec('x1pro_rm001'), tmp_path / 'planning')
     model.set_state(model.spec.keyframe('ready'))
     ready = model.q.copy()
-    env = SimpleNamespace(spec=model.spec, joints=model.joints, steps=0,
+    env = SimpleNamespace(spec=model.spec, joints=model.joints, steps=0, timings={'step_s': 0.},
                           contacts=SimpleNamespace(phase=None, intervals=lambda: []), targets=lambda: {},
                           privileged=lambda: {'joints': {}, 'poses': {}})
     def reset(state):
@@ -73,6 +74,7 @@ def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeyp
         generator = object.__new__(Generator)
         generator.name, generator.output, generator.assets = 'fake', tmp_path / mode, tmp_path
         generator.steps, generator.source, generator.problems = None, None, mode
+        generator.profile_enabled = profile
         generator.skill_attempts = 1
         generator.env, generator.model, generator.spec = env, model, model.spec
         generator.env_args = {}

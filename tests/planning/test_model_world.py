@@ -77,6 +77,68 @@ for node in MODEL['nodes']:
 
 
 class PlanningWorldTest(unittest.TestCase):
+    def test_incremental_poses_padding_and_external_permissions(self):
+        import mplib
+        from unittest.mock import patch
+        from table_1000.planning.world import box_object
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / 'source').mkdir()
+            urdf = robot(directory / 'source')
+            write_srdf(urdf, directory / 'robot.srdf')
+            planner = mplib.Planner(str(urdf), 'l3', srdf=str(directory / 'robot.srdf'))
+            scene = PlanningScene(planner)
+            transform = np.eye(4)
+            transform[:3, 3] = [.4, 0., .4]
+            obj, _ = box_object('obstacle', (.04, .04, .04), transform)
+            scene.add(obj, transform)
+            acm = planner.planning_world.get_allowed_collision_matrix()
+            acm.set_entry('obstacle', 'l3', True)
+            with patch.object(obj, 'fcl', wraps=obj.fcl) as make:
+                scene.set_pose('obstacle', transform.copy())
+                self.assertEqual(make.call_count, 0)
+                moved = transform.copy()
+                moved[0, 3] += .001
+                scene.set_pose('obstacle', moved)
+                self.assertEqual(make.call_count, 1)
+                # Replacement retains permissions even when another consumer owns them.
+                self.assertTrue(acm.get_entry('obstacle', 'l3'))
+                scene.set_padding(.01)
+                self.assertEqual(make.call_count, 2)
+                scene.set_padding(.01)
+                self.assertEqual(make.call_count, 2)
+                frame = np.eye(4)
+                frame[0, 3] = .1
+                scene.set_frame(frame)
+                self.assertEqual(make.call_count, 3)
+                np.testing.assert_allclose(planner.planning_world.get_object('obstacle').pose.to_transformation_matrix(),
+                                           frame @ moved)
+            scene.clear()
+
+    def test_explicit_pose_update_detaches_and_refreshes_live_object(self):
+        import mplib
+        from table_1000.planning.world import box_object
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / 'source').mkdir()
+            urdf = robot(directory / 'source')
+            write_srdf(urdf, directory / 'robot.srdf')
+            planner = mplib.Planner(str(urdf), 'l3', srdf=str(directory / 'robot.srdf'))
+            scene = PlanningScene(planner)
+            transform = np.eye(4)
+            transform[:3, 3] = [5., 5., 5.]
+            obj, _ = box_object('held', (.04, .04, .04), transform)
+            scene.add(obj, transform)
+            scene.allow(['held'], ['l3'])
+            world = planner.planning_world
+            world.attach_object('held', planner.robot.get_name(), planner.link_name_2_idx['l3'], ['l3'])
+            self.assertTrue(world.is_object_attached('held'))
+            scene.set_pose('held', transform)
+            self.assertFalse(world.is_object_attached('held'))
+            np.testing.assert_allclose(world.get_object('held').pose.to_transformation_matrix(), transform)
+            self.assertTrue(world.get_allowed_collision_matrix().get_entry('held', 'l3'))
+            scene.clear()
+
     def test_shapes_are_placed_relative_to_their_body(self):
         shapes, rest = model_shapes(MODEL)
         self.assertEqual(sorted(rest), ['box', 'box.lid'])
@@ -121,6 +183,19 @@ class PlanningWorldTest(unittest.TestCase):
             self.assertTrue(planner.planning_world.check_collision())
             scene.allow(['a:box.lid.knob'], ['l2', 'l3'])
             scene.update({'a:box.lid': near})
+            self.assertFalse(planner.planning_world.check_collision())
+            # Simultaneous base/body motion must place each object from the new body pose,
+            # while also moving static objects and retaining permissions.
+            frame = np.eye(4)
+            frame[0, 3] = -1.
+            moved = near.copy()
+            moved[0, 3] += 1.
+            scene.set_frame(frame, {'a:box.lid': moved})
+            np.testing.assert_allclose(scene.poses['a:box.lid.knob'], moved)
+            self.assertFalse(planner.planning_world.check_collision())
+            scene.allow(['a:box.lid.knob'], ['l2', 'l3'], False)
+            self.assertTrue(planner.planning_world.check_collision())
+            scene.set_frame(np.eye(4), {'a:box.lid': far})
             self.assertFalse(planner.planning_world.check_collision())
 
 

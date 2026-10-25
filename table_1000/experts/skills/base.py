@@ -3,6 +3,8 @@
 import os
 import time
 
+from table_1000.common.timing import timed
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -124,6 +126,7 @@ class Base:
         ctx.note('base moved', forward=forward, turn=turn, pose=self.base_pose().tolist())
 
     @decision
+    @timed('base_search')
     def base_for(self, poses, arms=None, need=None, path=False, touch=None, relocate=False):
         """World pose ``(x, y, yaw)`` of the base from where one of ``arms`` (default the free ones)
         reaches ``need`` (default all) of ``poses`` with each joint ``BASE_MARGIN`` inside its limits:

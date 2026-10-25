@@ -18,7 +18,7 @@ def time_path(planner, path, time_step):
     return result
 
 
-def parameterize(planner, path, time_step, check):
+def parameterize(planner, path, time_step, check, *, simplify=None):
     """Time a checked joint path; ``check(rows)`` returns its collision pairs."""
     path = np.asarray(path, dtype=float)
     limits = np.asarray(planner.joint_limits)[planner.move_group_joint_indices]
@@ -37,14 +37,17 @@ def parameterize(planner, path, time_step, check):
     pairs = check(path)
     if pairs:
         return {'status': 'path collision', 'reason': 'path collision', 'collisions': pairs, 'stage': 'raw'}
-    kept, index = [path[0]], 0
-    while index < len(path) - 1:
-        following = len(path) - 1
-        while following > index + 1 and check(path[[index, following]]):
-            following -= 1
-        kept.append(path[following])
-        index = following
-    path = np.asarray(kept)
+    if simplify is not None:
+        path = np.asarray(simplify(path), dtype=float)
+    else:
+        kept, index = [path[0]], 0
+        while index < len(path) - 1:
+            following = len(path) - 1
+            while following > index + 1 and check(path[[index, following]]):
+                following -= 1
+            kept.append(path[following])
+            index = following
+        path = np.asarray(kept)
     if len(path) == 1 or np.array_equal(path[0], path[-1]) and len(path) == 2:
         zero = np.zeros_like(path[:1])
         return dict(status='Success', time=np.array([0.]), position=path[:1], velocity=zero,
@@ -87,4 +90,4 @@ def plan_rrt(planner, start, goals, *, time_step, planning_time, fixed, check):
                                        time=planning_time, range=.1, fixed_joints=locked, simplify=False)
     if status != 'Exact solution':
         return {'status': f'RRTConnect Failed. {status}'}
-    return parameterize(planner, path, time_step, check)
+    return parameterize(planner, path, time_step, check, simplify=planner.planner.simplify_path)

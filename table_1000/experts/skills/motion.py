@@ -162,6 +162,11 @@ class Motion:
         while not pushed:
             for lift, (index, (candidate, tilt, contact)) in ((lift, option) for lift in (False, True)
                                                               for option in enumerate(options)):
+                # A rejected candidate may already have moved the part. Continue
+                # from its measured face and complete only the remaining travel.
+                shift = ctx.poses()[target.body][:3, 3] - before
+                contact = translated(contact, shift)
+                remaining = distance - float(shift @ direction)
                 mark(self, 'candidate', f'{index}/{lift}', arm=candidate, contact=contact, tilt=tilt, lift=lift)
                 if index in tried:
                     mark(self, 'already planned', outcome='not checked')
@@ -175,7 +180,7 @@ class Motion:
                     mark(self, 'pre-push IK', outcome='rejected', status=status)
                     continue
                 mark(self, 'end IK')
-                status, _ = self.model.ik(candidate, translated(contact, direction * distance), q_pre, world=True,
+                status, _ = self.model.ik(candidate, translated(contact, direction * remaining), q_pre, world=True,
                                           lift=lift, attempts=IK_ATTEMPTS, check_collision=False)
                 if status != 'Success':
                     mark(self, 'end IK', outcome='rejected', status=status)
@@ -189,13 +194,16 @@ class Motion:
                     solver.move_to_pose_with_RRTConnect(None, lift=True, goals=[q_pre], attempts=CANDIDATE_PLANS)
                     solver.allow(touched)
                     solver.move_to_pose_with_screw(contact)
+                    self.move_by_displacement(candidate, direction * remaining,
+                                              drag=(target.obj, target.body.split(':', 1)[1]))
                     mark(self, 'plan', outcome='accepted')
                     pushed = True
                     break
                 except PlanningFailed as error:
-                    solver.allow(touched, False)
                     mark(self, 'plan', outcome='rejected', reason=error.reason)
                     ctx.note('next push', arm=candidate, tilt=float(tilt), reason=error.reason, **collisions(error))
+                finally:
+                    solver.allow(touched, False)
             if not pushed:
                 if not stowed and self.stow():
                     tried, stowed = set(), True
@@ -214,10 +222,6 @@ class Motion:
                     tried, stowed = set(), True
                 else:
                     ctx.fail('no reachable push', Unreachable, target=target.names)
-        try:
-            self.move_by_displacement(candidate, direction * distance, drag=(target.obj, target.body.split(':', 1)[1]))
-        finally:
-            solver.allow(touched, False)
         moved = float((ctx.poses()[target.body][:3, 3] - before) @ direction)
         # Back off: straight back or up, else along a planned path. The push is done either way.
         tcp = solver.tcp()

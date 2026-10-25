@@ -237,7 +237,7 @@ def push_directions(rng, count=RANDOM_PUSHES):
 class Evaluator:
     """One environment (import after ``start_app``) running trials one after another."""
 
-    def __init__(self, source, assets, output, root, views=None, random_pushes=RANDOM_PUSHES):
+    def __init__(self, source, assets, output, root, views=None, random_pushes=RANDOM_PUSHES, profile=False):
         from table_1000.robots import load_spec
         from table_1000.robots.kinematics import RobotModel
         from table_1000.sim.isaaclab.env import RobotEnv
@@ -248,6 +248,7 @@ class Evaluator:
         self.model = RobotModel(self.spec, output / 'planning', root)
         self.views = dict(views or {})
         self.random_pushes = random_pushes
+        self.profile_enabled = profile
 
     def trial(self, name, placement, seed, video=None):
         """Pick object ``name`` placed by ``placement`` (see :func:`sample`); returns the report.
@@ -271,22 +272,29 @@ class Evaluator:
         if video is not None:
             ctx.observers.append(lambda c: video.capture(f'{name} {placement["pose"]}  {phase["text"]}  '
                                                          f't={c.steps / 25:5.2f}s'))
-        ctx.hold(.5)
-        placed = ctx.poses()[name]
-        report['settled_shift'] = float(np.linalg.norm(placed[:3, 3] - pose[:3, 3]))
-        try:
-            phase['text'] = 'pick'
-            result = skills.pick(ctx, name, shape=OBJECTS[name].shape)
-            report.update(status='picked', pick=result)
-        except ExpertFailed as error:
-            report.update(status='failed', failure={'reason': error.reason, 'details': error.details})
-        except Exception as error:   # an error in the skill is a result, reported with the trial
-            import traceback
-            report.update(status='error', failure={'reason': repr(error), 'traceback': traceback.format_exc()})
-        if report['status'] == 'picked':
-            phase['text'] = 'push 5 N'
-            report['hold'] = self.disturb(ctx, name, result['arm'], np.random.default_rng([seed, 2]), phase)
-            report['status'] = 'success' if report['hold']['held'] else 'slipped'
+        physics_before = self.env.timings['step_s']
+        with ctx.profile.record(self.profile_enabled):
+            ctx.hold(.5)
+            placed = ctx.poses()[name]
+            report['settled_shift'] = float(np.linalg.norm(placed[:3, 3] - pose[:3, 3]))
+            try:
+                phase['text'] = 'pick'
+                result = skills.pick(ctx, name, shape=OBJECTS[name].shape)
+                report.update(status='picked', pick=result)
+            except ExpertFailed as error:
+                report.update(status='failed', failure={'reason': error.reason, 'details': error.details})
+            except Exception as error:   # an error in the skill is a result, reported with the trial
+                import traceback
+                report.update(status='error', failure={'reason': repr(error), 'traceback': traceback.format_exc()})
+            if report['status'] == 'picked':
+                phase['text'] = 'push 5 N'
+                report['hold'] = self.disturb(ctx, name, result['arm'], np.random.default_rng([seed, 2]), phase)
+                report['status'] = 'success' if report['hold']['held'] else 'slipped'
+        if self.profile_enabled:
+            report['wall_profile'] = ctx.profile.snapshot()
+            report['profile_totals'] = ctx.profile.elapsed
+            report['profile_counters'] = ctx.profile.counters
+            report['physics_step_s'] = self.env.timings['step_s'] - physics_before
         report['events'] = ctx.events
         report['plans'] = [entry for solver in ctx.solvers.values() for entry in solver.log]
         report['max_penetration_m'] = max([entry['max_penetration_m'] for entry in self.env.contacts.intervals()],

@@ -41,6 +41,24 @@ def test_ik_round_trip(arm_model):
     assert solved / len(samples) >= .9
 
 
+def test_chain_ik_keeps_fingers_and_matches_full_model(arm_model):
+    """Removing unrelated branches keeps FK, masked joints and convergent solutions."""
+    from table_1000.planning.world import pose
+    solver = arm_model.planners['arm'].pinocchio_model
+    assert len(solver.indices) == len(arm_model.arm_indices('arm')) < len(arm_model.joints)
+    mask = np.ones(len(arm_model.joints), dtype=bool)
+    mask[arm_model.arm_indices('arm')] = False
+    for q in free_samples(arm_model, 'arm', 12, seed=19):
+        target = pose(arm_model.tcp('arm', q))
+        start = q.copy()
+        start[~mask] += .01
+        full, full_ok, _ = solver.full.compute_IK_CLIK(solver.full_link, target, start, mask)
+        chain, chain_ok, _ = solver.compute_IK_CLIK(solver.full_link, target, start, mask)
+        assert full_ok and chain_ok
+        np.testing.assert_array_equal(chain[mask], start[mask])
+        np.testing.assert_allclose(chain, full, atol=1e-7)
+
+
 def test_world_targets_follow_the_base_pose(arm_model):
     base = np.eye(4)
     base[:3, 3] = [1., 2., .7]
@@ -60,6 +78,39 @@ def test_rrt_moves_only_the_arm(arm_model):
     np.testing.assert_allclose(result['position'][-1], goal[arm_model.arm_indices('arm')], atol=1e-3)
     for row in result['position']:
         assert arm_model.self_collisions(arm_model.vector(dict(zip(result['joints'], row)))) == []
+
+
+def test_native_rrt_fixed_lift_returns_full_move_group_rows(arm_model, arm_root, tmp_path):
+    """Native OMPL restores fixed dimensions before the shortcut checks the world."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import xml.etree.ElementTree as ET
+    from table_1000.robots.kinematics import RobotModel
+    root = ET.parse(arm_root / 'robot.urdf').getroot()
+    root.find("joint[@name='joint1']/parent").set('link', 'lift_link')
+    ET.SubElement(root, 'link', name='lift_link')
+    joint = ET.SubElement(root, 'joint', name='lift', type='prismatic')
+    ET.SubElement(joint, 'parent', link='base_link')
+    ET.SubElement(joint, 'child', link='lift_link')
+    ET.SubElement(joint, 'axis', xyz='0 0 1')
+    ET.SubElement(joint, 'limit', lower='0', upper='.4', effort='50', velocity='.2')
+    ET.ElementTree(root).write(tmp_path / 'robot.urdf')
+    spec = replace(arm_model.spec, lift=('lift',))
+    model = RobotModel(spec, tmp_path / 'planning', root=tmp_path)
+    model.set_state({**spec.keyframe('ready'), 'lift': .12})
+    goal = free_samples(model, 'arm', 1, seed=3)[0]
+    adapter = model.planners['arm'].planner
+    world, checked = adapter.world, []
+
+    def set_qpos(q):
+        checked.append(np.array(q))
+        world.set_qpos_all(q)
+
+    adapter.world = SimpleNamespace(set_qpos_all=set_qpos, check_collision=world.check_collision)
+    result = model.plan_rrt('arm', None, goals=[goal])
+    assert result['status'] == 'Success' and checked
+    assert all(len(q) == 7 and q[0] == pytest.approx(.12) for q in checked)
+    assert result['position'].shape[1] == 6
 
 
 def test_screw_is_straight(arm_model):
@@ -98,3 +149,25 @@ def test_check_path_catches_a_collision_between_waypoints(arm_model):
         assert checks > 2 and any('obstacle' in pair for pair in pairs)
     finally:
         scene.clear()
+
+
+def test_path_contact_permission_expires_for_each_pair_separately():
+    from types import SimpleNamespace
+    from table_1000.robots.kinematics import RobotModel
+    state = {}
+    first = ('finger_left', 'drawer', 'front')
+    second = ('finger_right', 'drawer', 'front')
+
+    def collisions():
+        x = state['q'][0]
+        pairs = {second} if x < .7 else set()
+        if x < .1 or .3 < x < .5:
+            pairs.add(first)
+        return [SimpleNamespace(link_name1=a, object_name2=b, link_name2=c) for a, b, c in pairs]
+
+    world = SimpleNamespace(set_qpos_all=lambda q: state.update(q=q), check_collision=collisions)
+    model = SimpleNamespace(q=np.zeros(1), lift_indices=lambda: [],
+                            planners={'arm': SimpleNamespace(planning_world=world,
+                                       robot=SimpleNamespace(set_qpos=lambda *a: None))})
+    checks, pairs = RobotModel.check_path(model, 'arm', [[0.], [1.]])
+    assert checks > 2 and first in pairs
