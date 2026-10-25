@@ -19,7 +19,22 @@
 
 机器人描述（关节分组、TCP、夹爪、底盘、关键姿态、相机）在 `robot.py`，验收设置（检查场景、工作点、用例）在 `robot_test.py`。关键姿态：零位（全部关节为 0，真机最常用的起始姿态：躯干最低、两臂折叠、头平视）与 `ready`（躯干 0.40 m、头俯 0.30 rad、两臂 joint2 = 0.4、joint3 = −1.0）。
 
-相机按 robot-bridge 的视角命名：`face_view`（头部 RGB 1280×720，带畸变针孔）与 `face_depth`（头部深度 640×400）用头部相机 Orbbec DaBai DCW2 的出厂标定（2026-10-10 读取）；`left_wrist_view`、`right_wrist_view` 是 640×480 无深度的腕部鱼眼，标定未知，暂用水平视场约 130° 的理想等距鱼眼，拿到真机 `camera_info` 后替换。
+## 相机
+
+相机按 robot-bridge 的视角命名，内参和畸变定义在 [`robot.py`](robot.py)，由 `x1pro_rm001` 共用。内参单位为像素，适用于表中的原始分辨率：
+
+| 视角 | 分辨率 | 模型 | `(fx, fy, cx, cy)` |
+| --- | --- | --- | --- |
+| `face_view` | 1280×720 | 带畸变针孔 | `(718.6670, 718.6267, 641.6313, 361.9715)` |
+| `face_depth` | 640×400 | 无畸变针孔 | `(307.0269, 307.0269, 318.3767, 195.9783)` |
+| `left_wrist_view` | 640×480 | OpenCV 鱼眼 | `(280.0617, 280.0030, 318.7204, 238.8653)` |
+| `right_wrist_view` | 640×480 | OpenCV 鱼眼 | `(280.3320, 280.3914, 327.6090, 245.4415)` |
+
+头部 Orbbec DaBai DCW2 使用 2026-10-24 从真机 `/camera_head_front/color/camera_info` 和 `/camera_head_front/depth/camera_info` 读取的内参和畸变。这些是驱动上报值；设备存储或配置中的底层来源尚未核实。RGB 的 `rational_polynomial` 系数中 k3–k6 均为零，使用等价的针孔 `(k1, k2, p1, p2)` 表示；深度使用自身内参。
+
+左右腕无深度，使用 2026-10-24 分别求解的鱼眼内参和四项非零畸变 `(k1, k2, k3, k4)`；留出重投影 RMS 分别为 0.292、0.285 px。左腕另一次采集的独立验证 RMS 为 0.286 px。未观测或被夹爪遮挡的区域未验证，左右腕参数不能互相替代。
+
+相机安装位置仍由各自 URDF 的光学坐标系给出。这次更新内参和畸变；头部 RGB–深度外参来源、TF 一致性及精确配准仍待确认，见 [#23](https://github.com/xucj98/table-1000/issues/23)。
 
 指尖、相机等无质量坐标系在导入时并入所属刚体；需要时由 URDF 中对应固定关节的偏移计算，例如 `right_arm_gripper_left_tip_joint`。
 
@@ -57,5 +72,5 @@ uv run python scripts/robots/prepare_robot.py x1pro
 uv run python -m table_1000.robots.preview asset_sources/robots/x1pro --joints '{"lift_joint": 0.4, "head_pitch_joint": 0.3, "right_arm_joint2": 0.4, "right_arm_joint3": -1.0, "left_arm_joint2": 0.4, "left_arm_joint3": -1.0, "right_arm_gripper_left_joint": 0.03, "right_arm_gripper_right_joint": -0.03, "left_arm_gripper_left_joint": 0.03, "left_arm_gripper_right_joint": -0.03}'
 ```
 
-缩略图左侧为外观网格，右侧为碰撞凸块，每个刚体一种颜色。构建约 4 s。构建后为 22 个机器人刚体加 3 个虚拟底盘连杆，86 个碰撞形状。检查脚本的 11 个用例全部通过（含零位与 `ready` 无自碰撞、四路相机与描述一致）；检查场景中每物理步约 2.6 ms（静止）至 4.8 ms（手臂运动），关节跟踪误差小于 1 mrad。转换约 10 分钟，只检查用 `--check`，约 10 s。缩略图需要 Blender。
+缩略图左侧为外观网格，右侧为碰撞凸块，每个刚体一种颜色。构建约 4 s。构建后为 22 个机器人刚体加 3 个虚拟底盘连杆，86 个碰撞形状。零位与 `ready` 无自碰撞；检查场景中每物理步约 2.6 ms（静止）至 4.8 ms（手臂运动），关节跟踪误差小于 1 mrad。当前内参的真实图像验证见上文，更新参数后的 Isaac Sim `sensors` 渲染验收待重跑。转换约 10 分钟，只检查用 `--check`，约 10 s。缩略图需要 Blender。
 

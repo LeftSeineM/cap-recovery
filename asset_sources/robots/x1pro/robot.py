@@ -48,24 +48,25 @@ READY = {'lift_joint': .40, 'head_pitch_joint': .30,
          **{f'{side}_arm_joint{i}': value for side in ('left', 'right')
             for i, value in zip((2, 3), (.4, -1.))}}
 
-# Cameras, named as robot-bridge names the X1Pro views: sensors by camera model,
-# mounted on the robot's optical frames. The head camera (Orbbec
-# DaBai DCW2) uses its factory calibration as the robot reported it on
-# 2026-10-10 (camera_info of /camera_head_front/color and /depth): RGB with
-# OpenCV radial-tangential distortion (k3-k6 are zero), depth with none, both in
-# their own optical frames 12 mm apart. The wrist cameras are 640 x 480 RGB
-# fisheyes without depth whose calibration is not known yet: an ideal
-# equidistant fisheye with about 130 degrees horizontal field of view stands in
-# for it. Replace it with the measured camera_info when available.
-DCW2_COLOR = Sensor((1280, 720), (722.9255, 722.6870, 643.3176, 366.9483),
-                    distortion=(-.020391770, .003390382, .000575986, -.0000411227))
-DCW2_DEPTH = Sensor((640, 400), (306.3446, 306.3446, 316.8373, 196.2885), kind='depth')
-WRIST_FISHEYE = Sensor((640, 480), (280., 280., 320., 240.), 'fisheye', (0., 0., 0., 0.))
+# 视角名与 robot-bridge 一致，安装在 URDF 光学坐标系上。
+# 头部 DaBai DCW2 使用 2026-10-24 真机 color/depth camera_info 上报的参数；
+# RGB 的 k3-k6 为零，以等价的 OpenCV k1,k2,p1,p2 表示，深度无畸变。
+# 左右腕使用 2026-10-24 分别求解的原始 640×480 鱼眼内参，畸变顺序为 k1..k4。
+# 留出 RMS 分别为 0.292/0.285 px；夹爪遮挡的未观测区域未验证。
+DCW2_COLOR = Sensor((1280, 720), (718.66699219, 718.62670898, 641.63134766, 361.97146606),
+                    distortion=(-.015393835492, .002529939404, -.000318315142, -.000307868962))
+DCW2_DEPTH = Sensor((640, 400), (307.02694702, 307.02694702, 318.37670898, 195.97831726), kind='depth')
+WRIST_FISHEYE = {
+    'left': Sensor((640, 480), (280.06172223, 280.00303497, 318.72038243, 238.86527019), 'fisheye',
+                   (-.018129471395, .001963860728, -.006322339487, .001676164700)),
+    'right': Sensor((640, 480), (280.33196582, 280.39140119, 327.60904548, 245.44149876), 'fisheye',
+                    (-.015410935420, -.004549747692, -.000553713973, -.000043040731)),
+}
 CAMERAS = {
     'face_view': CameraSpec(DCW2_COLOR, 'camera_head_front_color_optical_frame'),
     'face_depth': CameraSpec(DCW2_DEPTH, 'camera_head_front_depth_optical_frame'),
-    **{f'{side}_wrist_view': CameraSpec(WRIST_FISHEYE, f'{side}_arm_gripper_camera_color_frame', self_view=.35)
-       for side in ('left', 'right')},
+    **{f'{side}_wrist_view': CameraSpec(sensor, f'{side}_arm_gripper_camera_color_frame', self_view=.35)
+       for side, sensor in WRIST_FISHEYE.items()},
 }
 
 SPEC = RobotSpec(
