@@ -145,7 +145,7 @@ physics_test/
 
 接触裕量、材料、阻尼和相机采用当前测试与资产的实际值并记录；灯光使用上述统一配置。同一实验的比较保持这些条件一致。保存实际渲染模式及采样/降噪设置，不能只报告“RTX”。指定条件无法满足时报告偏差，不标为同条件基准。
 
-GPU 对照使用场景最小位置/速度迭代 64/16，TGS 开启逐次施加外力；GPU PhysX 不支持 CCD，因此关闭并披露。笔的 GPU 跌落实验单独使用 PGS，关闭不受 PGS 支持的逐次施加外力：TGS 在钢珠的 maximal-coordinate 关节撞击时出现异常能量增长。该选择保持资产材料、关节参数、4 ms 步长和验收阈值不变，报告记录实际求解器；它不属于与 CPU 同求解设置的性能比较。
+GPU 对照使用场景最小位置/速度迭代 64/16，TGS 开启逐次施加外力；GPU 管线关闭了状态回读（suppress readback），PhysX 会提示 `Physics suppress readback and physicsScene enabled CCD does not work together, CCD will be disabled` 并禁用 CCD，推测式 CCD 也不起作用，因此关闭并披露。笔的 GPU 跌落实验单独使用 PGS，关闭不受 PGS 支持的逐次施加外力：TGS 在钢珠的 maximal-coordinate 关节撞击时出现异常能量增长。该选择保持资产材料、关节参数、4 ms 步长和验收阈值不变，报告记录实际求解器；它不属于与 CPU 同求解设置的性能比较。
 
 默认每项测试只运行一遍带视频的正式实验，报告两项 RTF，用于确认速度没有明显异常：
 

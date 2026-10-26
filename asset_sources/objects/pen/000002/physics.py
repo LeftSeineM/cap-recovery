@@ -33,7 +33,9 @@ def author(geometry_path, output_path):
             body = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
             body.CreateLinearDampingAttr(0); body.CreateAngularDampingAttr(0)
             body.CreateSolverPositionIterationCountAttr(32); body.CreateSolverVelocityIterationCountAttr(8)
-            body.CreateEnableCCDAttr(False)
+            # At 4 ms, a falling 0.8 mm detent ball can cross a thin shelf in
+            # one step and become trapped below it by its spring constraint.
+            body.CreateEnableCCDAttr(True)
             body.CreateSleepThresholdAttr(0); body.CreateStabilizationThresholdAttr(0)
             body.CreateMaxDepenetrationVelocityAttr(1)
         elif role == 'part':
