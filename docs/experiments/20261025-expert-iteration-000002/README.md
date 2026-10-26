@@ -2,7 +2,7 @@
 
 关联：#34–#39、#45、#49、#51、#52；PR #26、#39、#52、#60。研究方案见[专家迭代](../../research/expert-iteration.md)。
 
-全部轮次见 [rounds.csv](rounds.csv)：每轮的 commit 及其依据、初态、`--skill-attempts`、成功数、成功轨迹的平均 sim time、全部尝试的平均 wall time 和改动。
+全部轮次见 [rounds.csv](rounds.csv)：每轮的启动时间、commit 及其依据、初态、`--skill-attempts`、成功数、成功轨迹的平均 sim time、全部尝试的平均 wall time 和改动。
 
 `commit_basis` 为 `reported`、`frozen-copy-matches` 或 `frozen-copy-docstring-differs` 的行可以复现：代码就是那个 commit，commit 属于某个 PR。其余的行是历史观察，代码与 commit 的对应没有逐文件核实，只用来看迭代的走向，不作为复现依据。
 
@@ -61,6 +61,7 @@ K 为空的行没有 `--skill-attempts`，使用当时的重试策略。
 
 - commit 的依据（`commit_basis` 列）：`reported` 为批次报告记录；`inferred-from-session` 为按启动会话对应到的 commit，报告记录的 commit 有误（无 `.git` 的快照目录记成了外层 HEAD，#45 已修复）；`reported-unreliable` 为同一问题下报告记录且无法更正的 commit；`frozen-copy-matches` 为从冻结副本运行、逐文件核对与该 commit 一致；`frozen-copy-docstring-differs` 为 C6 的冻结副本与 `e40ea41` 只在 `table_1000/experts/skills/__init__.py` 的模块说明上不同，去掉 docstring 后语法树一致；`none` 为没有对应的 commit。
 - `1cfc3c8`、`ad1b578`、`6a527af` 不属于任何 PR，相应的行只作历史观察。
+- 启动时间（`start_time` 列，北京时间）取批次名或会话中启动命令的时间；没有记录的，用报告写出的时间减去报告的总耗时推算，比实际启动早几分钟。r23、r24、dev5-full 的报告来自后来的重跑，时间取重跑的时间。
 - 前期 r10–r24 的报告把外层 HEAD 记成了 commit；每轮运行的代码快照都保留着，逐文件核对与表中 commit 一致。r5 的报告带 `+dirty`，只作历史观察。r1–r3 只有日志（均为 0/20），没有报告和 commit，r9 中途取消，都不列入。
 - C4 的 K=3 低于 K=2，原因未确认。各批负载不同，wall time 的差异不全来自算法。
 - B–E 阶段（检查点、语义层、求解层、100 初态整合）与前后两段并行开发，初态分布有变化（柜子横向范围 ±0.22 m 与 ±0.35 m），只列在 rounds.csv 中。
