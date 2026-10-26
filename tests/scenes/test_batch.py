@@ -34,9 +34,9 @@ def test_jobs_share_the_listed_gpus(tmp_path, monkeypatch):
 
     def run(command, **kwargs):
         calls.append(command[-1])
-        return type('Done', (), {'returncode': int(command[0] == 'bad')})
+        return type('Done', (), {'wait': lambda self: int(command[0] == 'bad')})()
 
-    monkeypatch.setattr(scene_batch.subprocess, 'run', run)
+    monkeypatch.setattr(scene_batch.subprocess, 'Popen', run)
     jobs = [([name], tmp_path / name / 'run.log', name) for name in ('a', 'bad', 'c')]
     assert run_jobs(jobs, [4, 5]) == ['bad']
     assert len(calls) == 3 and set(calls) <= {'4', '5'}

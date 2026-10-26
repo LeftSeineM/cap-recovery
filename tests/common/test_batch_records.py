@@ -23,6 +23,11 @@ def test_commit_only_of_a_checkouts_top(tmp_path):
     git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'a', cwd=repo)
     head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=repo, capture_output=True, text=True).stdout.strip()
     assert batch.commit(repo) == head
+    (repo / 'new.py').write_text('new = 1\n')
+    index = (repo / '.git/index').read_bytes()
+    assert batch.commit(repo) == head + '+dirty'
+    assert (repo / '.git/index').read_bytes() == index
+    (repo / 'new.py').unlink()
     (repo / 'a.py').write_text('a = 2\n')
     assert batch.commit(repo) == head + '+dirty'
     # A copy of the sources inside the checkout (as under outputs/) is not that commit.

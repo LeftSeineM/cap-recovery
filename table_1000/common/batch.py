@@ -6,20 +6,70 @@ A batch script's work units (seeds, cases, asset backends) are packed into ``--j
 Units without a result (their process stopped first) run again (``--retries``); see
 :func:`run_batch`. Seeds are written as in ``--seeds``: ``a:b`` (``a`` to ``b - 1``) and single
 seeds, e.g. ``0:100`` or ``20 64``.
+
+Git batches use one private detached worktree for all rounds, with the current Python environment
+and shared assets/data/runs/outputs. Uncommitted files are frozen as a binary patch, including
+untracked files not ignored by Git. Non-Git sources run in place. The returned :class:`BatchResult`
+records the submitted commit and can save the patch alongside a batch's summary.
 """
 
 import argparse
+from contextlib import contextmanager
 import os
+from pathlib import Path
 import shlex
+import shutil
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 # Processes at once through a launcher, unless --jobs says otherwise.
 LAUNCHED_JOBS = 16
 LOAD_PERIOD = 30.   # s between samples of the load (see Load)
+SHARED = ('assets', 'data', 'runs', 'outputs')
+
+
+def _run_processes(jobs, count, run):
+    """Wait for jobs; on interruption stop running process groups before joining their threads."""
+    from concurrent.futures import ThreadPoolExecutor
+    processes, lock, stopping = [], threading.Lock(), threading.Event()
+
+    def start(argv, **kwargs):
+        with lock:
+            if stopping.is_set():
+                return 143
+            process = subprocess.Popen(argv, start_new_session=True, **kwargs)
+            processes.append(process)
+        return process.wait()
+
+    previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    pool = ThreadPoolExecutor(count)
+    try:
+        return list(pool.map(lambda job: run(job, start), jobs))
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        with lock:
+            stopping.set()
+            running = [process for process in processes if process.poll() is None]
+            for process in running:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:  # It finished between poll and killpg.
+                    pass
+        for process in running:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        raise
+    finally:
+        pool.shutdown(wait=True)
+        signal.signal(signal.SIGTERM, previous)
 
 
 def add_arguments(parser):
@@ -87,27 +137,25 @@ def split(values, count):
 def run_jobs(jobs, gpus):
     """Run ``(command, log, label)`` jobs, one at a time per entry of ``gpus`` (a GPU listed twice runs two),
     each command given ``--gpu``; returns the failed labels."""
-    from concurrent.futures import ThreadPoolExecutor
     import queue
     free = queue.Queue()
     for gpu in gpus:
         free.put(gpu)
 
-    def run(job):
+    def run(job, start):
         command, log, label = job
         gpu = free.get()
         try:
             print('START', label, 'GPU', gpu, flush=True)
             log.parent.mkdir(parents=True, exist_ok=True)
             with log.open('w') as stream:
-                code = subprocess.run([*command, '--gpu', str(gpu)], stdout=stream, stderr=subprocess.STDOUT).returncode
+                code = start([*command, '--gpu', str(gpu)], stdout=stream, stderr=subprocess.STDOUT)
             print('DONE' if code == 0 else 'FAILED', label, log, flush=True)
             return code
         finally:
             free.put(gpu)
 
-    with ThreadPoolExecutor(len(gpus)) as pool:
-        codes = list(pool.map(run, jobs))
+    codes = _run_processes(jobs, len(gpus), run)
     return [job[2] for job, code in zip(jobs, codes) if code]
 
 
@@ -115,39 +163,17 @@ def launch(jobs, launcher, limit):
     """Run ``(command, log, label)`` jobs, ``limit`` at a time, each as ``<launcher> bash -c '<command> > <log> 2>&1'``;
     returns the failed labels. The launcher waits for a free GPU, sets ``CUDA_VISIBLE_DEVICES`` to it and returns
     the command's status; the command gets no ``--gpu`` and reads its GPU with :func:`worker_gpu`."""
-    from concurrent.futures import ThreadPoolExecutor
-    import signal
-    import threading
-    processes, lock = [], threading.Lock()
-
-    def run(job):
+    def run(job, start):
         command, log, label = job
         log.parent.mkdir(parents=True, exist_ok=True)
         line = f'{launcher} bash -c {shlex.quote(f"{shlex.join(map(str, command))} > {shlex.quote(str(log))} 2>&1")}'
         print('SUBMIT', label, flush=True)
-        with lock:
-            process = subprocess.Popen(line, shell=True, start_new_session=True)
-            processes.append(process)
-        code = process.wait()
+        code = start(line, shell=True)
         print('DONE' if code == 0 else 'FAILED', label, log, flush=True)
         return code
 
-    # Stopping the batch (Ctrl-C, SIGTERM) stops the launcher clients too, which cancel what they started;
-    # the pool is shut down only after that, as its threads wait for the clients.
-    previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    pool = ThreadPoolExecutor(min(limit, len(jobs)))
-    try:
-        codes = list(pool.map(run, jobs))
-    except BaseException:
-        pool.shutdown(wait=False, cancel_futures=True)
-        with lock:
-            for process in processes:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGTERM)
-        raise
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-        pool.shutdown(wait=True)
+    # Launcher clients cancel their remote jobs when stopped (e.g. srun, gq submit --wait).
+    codes = _run_processes(jobs, min(limit, len(jobs)), run)
     return [job[2] for job, code in zip(jobs, codes) if code]
 
 
@@ -188,26 +214,137 @@ def plan(items, key, cost, count):
             for group in (pack(values, cost, counts[k]) if cost else split(values, counts[k]))]
 
 
-def run_batch(items, *, command, missing, count, gpus, launcher=None, retries=1, key=lambda item: None, cost=None):
+class BatchResult(list):
+    """Missing items, the submitted ``commit`` and its optional binary ``patch`` (bytes)."""
+
+    def __init__(self, missing, checkout, patch=None):
+        super().__init__(missing)
+        self.commit = checkout
+        self.patch = patch
+
+    def record(self, directory, *, patch_name='dirty.patch'):
+        """Save the patch in a batch directory; return ``commit`` and optional relative ``dirty_patch``
+        fields for its summary. Applying the patch to HEAD restores the submitted working files."""
+        record = {'commit': self.commit}
+        if self.patch is not None:
+            directory = Path(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / patch_name).write_bytes(self.patch)
+            record['dirty_patch'] = patch_name
+        return record
+
+
+def _dirty_patch(root, revision, directory):
+    """Diff HEAD against working files, including untracked files, using a private Git index.
+
+    Git handles binary files, modes, deletions and symlinks. The source index, working files,
+    branches and stash stack are untouched; ignored files are excluded unless already tracked.
+    """
+    with tempfile.TemporaryDirectory(prefix='dirty-index-', dir=directory) as temporary:
+        env = {**os.environ, 'GIT_INDEX_FILE': str(Path(temporary) / 'index')}
+        git = ['git', '-C', str(root)]
+        subprocess.run([*git, 'read-tree', revision], env=env, check=True)
+        subprocess.run([*git, 'add', '--all', '--', '.'], env=env, check=True)
+        return subprocess.run([*git, 'diff', '--cached', '--binary', '--no-ext-diff', '--no-textconv', revision, '--'],
+                              env=env, check=True, capture_output=True).stdout
+
+
+@contextmanager
+def _checkout(root):
+    """Yield a unique frozen checkout, revision and patch; non-Git sources yield their own path."""
+    checkout = commit(root)
+    path = patch = None
+    previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        if checkout:
+            directory = root / '.local' / 'batch-checkouts'
+            directory.mkdir(parents=True, exist_ok=True)
+            revision = checkout.removesuffix('+dirty')
+            if checkout.endswith('+dirty'):
+                patch = _dirty_patch(root, revision, directory)
+            path = Path(tempfile.mkdtemp(prefix=f'{checkout}-', dir=directory))
+            print('CHECKOUT', checkout, path, flush=True)
+            subprocess.run(['git', '-C', str(root), 'worktree', 'add', '--detach', str(path), revision], check=True)
+            if patch:
+                subprocess.run(['git', '-C', str(path), 'apply', '--binary'], input=patch, check=True)
+            for name in SHARED:
+                (root / name).mkdir(exist_ok=True)
+                (path / name).symlink_to(root / name, target_is_directory=True)
+        yield path or root, checkout, patch
+    finally:
+        unwinding = sys.exc_info()[0] is not None
+        try:
+            if path is not None:
+                removed = subprocess.run(['git', '-C', str(root), 'worktree', 'remove', '--force', str(path)],
+                                         capture_output=True)
+                if removed.returncode:
+                    # A failed/interrupted add may leave only mkdtemp's unregistered directory.
+                    if (path / '.git').exists():
+                        removed.check_returncode()
+                    if path.exists():
+                        shutil.rmtree(path)
+        except BaseException as error:
+            if not unwinding:
+                raise
+            print('CHECKOUT cleanup failed:', error, file=sys.stderr, flush=True)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _pinned_command(argv, root, checkout):
+    """Redirect source paths, retaining the interpreter and shared paths; override editable imports."""
+    def redirect(value):
+        value = str(value)
+        path = Path(value)
+        if not path.is_absolute():
+            # Command arguments like seeds and labels are not paths. Existing relative file paths
+            # (e.g. scripts/scenes/run_expert.py) are interpreted from the submitting directory.
+            if not path.exists() or ('/' not in value and not path.is_file()):
+                return value
+            path = path.absolute()
+        if not path.is_relative_to(root):
+            return value
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] in (*SHARED, '.venv', '.local'):
+            return str(path)
+        return str(checkout / relative)
+
+    # Do not resolve/rewrite argv[0]: it is the original environment's Python, often in .venv/.
+    pythonpath = os.pathsep.join(filter(None, (str(checkout), os.environ.get('PYTHONPATH'))))
+    return ['env', '-C', str(checkout), f'PYTHONPATH={pythonpath}', str(argv[0]), *map(redirect, argv[1:])]
+
+
+def run_batch(items, *, command, missing, count, gpus, launcher=None, retries=1, key=lambda item: None, cost=None,
+              root=None):
     """Run ``items`` (work units) as processes (:func:`plan`), at most ``count`` at a time, on ``gpus``
     (spread evenly, see :func:`run_jobs`) or each through ``launcher`` (see :func:`launch`).
     ``command(group, index, attempt)`` gives a process's ``(argv, log, label)``. Items still ``missing(item)``
     after a round (their process died, was killed or failed to start before writing them, or a result that
     ``missing`` counts as not one, such as an error that may be the process's) run again, up to ``retries``
-    more rounds, in as many processes as before at most. Returns the items still missing."""
+    more rounds, in as many processes as before at most. Returns a :class:`BatchResult` of missing items.
+
+    A Git ``root`` (default: this package's repository) is checked out once before calling ``command``;
+    all rounds use its scripts, source paths and imports. Its ignored assets/data/runs/outputs remain
+    shared with ``root``. Dirty roots include working files and nonignored untracked files; non-Git
+    roots run in place. Reports use the result's ``record(directory)`` to save its patch and commit
+    rather than inspecting the mutable original checkout after the workers finish."""
     pending = list(items)
-    for attempt in range(retries + 1):
-        if not pending:
-            break
-        if attempt:
-            print(f'RETRY {len(pending)} without a result (attempt {attempt})', flush=True)
-        jobs = [command(group, index, attempt) for index, group in enumerate(plan(pending, key, cost, count))]
-        if launcher:
-            launch(jobs, launcher, count)
-        else:
-            run_jobs(jobs, [gpus[index % len(gpus)] for index in range(min(count, len(jobs)))])
-        pending = [item for item in pending if missing(item)]
-    return pending
+    root = Path(root or Path(__file__).resolve().parents[2]).resolve()
+    with _checkout(root) as (checkout, revision, patch):
+        for attempt in range(retries + 1):
+            if not pending:
+                break
+            if attempt:
+                print(f'RETRY {len(pending)} without a result (attempt {attempt})', flush=True)
+            jobs = [command(group, index, attempt) for index, group in enumerate(plan(pending, key, cost, count))]
+            if checkout != root:
+                jobs = [(_pinned_command(argv, root, checkout), log, label) for argv, log, label in jobs]
+            if launcher:
+                launch(jobs, launcher, count)
+            else:
+                run_jobs(jobs, [gpus[index % len(gpus)] for index in range(min(count, len(jobs)))])
+            pending = [item for item in pending if missing(item)]
+    return BatchResult(pending, revision, patch)
 
 
 def process_name(stem, attempt):
@@ -241,7 +378,8 @@ def commit(root):
             return None
         head = subprocess.run(['git', '-C', str(root), 'rev-parse', '--short', 'HEAD'],
                               capture_output=True, text=True, check=True).stdout.strip()
-        dirty = subprocess.run(['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=no'],
+        dirty = subprocess.run(['git', '--no-optional-locks', '-C', str(root), 'status', '--porcelain',
+                                '--untracked-files=normal'],
                                capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None

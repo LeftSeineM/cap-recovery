@@ -228,9 +228,11 @@ def main(argv=None):
 
     started = time.perf_counter()
     missing = run_batch(seeds, command=command, count=jobs, gpus=args.gpus, launcher=args.launcher, retries=args.retries,
+                        root=root,
                         # A seed's first run is its episode (trajectory, checkpoints); a process stopped in
                         # its later runs leaves it fewer of them (see repeat_rates), not to run again.
                         missing=lambda seed: not (works[seed] / 'episodes' / f'{seed}.json').is_file())
+    checkout = missing.commit
     parts = sorted(staging.glob('part*/'))
     (directory / 'episodes').mkdir(parents=True)
     for name in ('trajectories', 'trajectories_failed'):
@@ -261,7 +263,7 @@ def main(argv=None):
         shutil.move(path, directory / 'episodes' / path.name)
     reports = [report for report in runs if not report.get('repeat')]
     summary = {'run': run, 'command': shlex.join(sys.argv if argv is None else ['run_expert.py', *argv]),
-               'scene': args.scene, 'robot': robot, 'physics': args.physics, 'commit': checkout,
+               'scene': args.scene, 'robot': robot, 'physics': args.physics, **missing.record(directory),
                'steps_run': args.steps, 'from': str(args.source.resolve()) if args.source else None,
                'problems': args.problems, 'skill_attempts': args.skill_attempts,
                **summarize(reports, seeds), 'steps': step_rates(reports, seeds, parent),

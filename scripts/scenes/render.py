@@ -227,6 +227,7 @@ def main(argv=None):
     missing = run_batch(seeds, command=command, cost=lambda seed: lengths[seed], count=jobs, gpus=args.gpus,
                         launcher=args.launcher, retries=args.retries,
                         missing=lambda seed: not all(path.is_file() for path in targets[seed]))
+    summary['render'] = missing.record(directory, patch_name='render-dirty.patch')
     for key, kinds in videos(directory).items():
         summary[key] = {kind: seed_range(values) for kind, values in kinds.items()}
     (directory / 'summary.json').write_text(json.dumps(summary, indent=1, ensure_ascii=False, default=float) + '\n')

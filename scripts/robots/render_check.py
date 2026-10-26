@@ -11,6 +11,7 @@ simulated. Processes as in ``check_robot.py``: ``--jobs`` over ``--gpus`` or thr
 """
 
 import argparse
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -150,6 +151,12 @@ def main(argv=None):
     missing = run_batch(units, key=lambda unit: unit[:2], cost=lambda unit: lengths[unit], count=jobs,
                         command=command, missing=lambda unit: not video(unit).exists(), gpus=args.gpus,
                         launcher=args.launcher, retries=args.retries)
+    for robot in dict.fromkeys(unit[0] for unit in units):
+        directory = directories[robot]
+        path = directory / 'summary.json'
+        summary = json.loads(path.read_text())
+        summary['render'] = missing.record(directory, patch_name='render-dirty.patch')
+        path.write_text(json.dumps(summary, indent=1, default=float) + '\n')
     for unit in units:
         if unit not in missing:
             print(*unit[:3], *([] if unit[3] is None else [unit[3]]), video(unit).parent, flush=True)

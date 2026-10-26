@@ -20,7 +20,7 @@
 | `data/` | 生成的数据：专家轨迹及其录像 | 忽略 |
 | `runs/` | 开发和实验运行，按类型分子目录（`runs/expert/`、`runs/teleop/`、`runs/resolve/`），每次运行一个新目录，不覆盖 | 忽略 |
 | `outputs/` | 日志和临时结果，可随时清理 | 忽略 |
-| `.local/` | 本机说明与脚本 | 忽略 |
+| `.local/` | 本机说明与脚本；批量运行时代码的临时检出（`.local/batch-checkouts/`，批次结束后删除，见[批量运行](../tutorials/README.md#批量运行的通用参数)） | 忽略 |
 
 各类资产的文件在 `asset_sources/`、`assets/`、`data/`、`runs/` 中的具体位置见[资产布局](../specs/README.md#资产布局)。忽略目录体积大，多个检出可以用软链接指向同一份。
 

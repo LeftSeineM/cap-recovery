@@ -166,7 +166,7 @@ def thumbnail(image, path):
 
 
 def main(argv=None):
-    from table_1000.common.batch import add_arguments, commit, job_count, parse_seeds, process_name, run_batch, seed_range, seeds_record
+    from table_1000.common.batch import add_arguments, job_count, parse_seeds, process_name, run_batch, seed_range, seeds_record
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
     parser.add_argument('--seeds', nargs='+', required=True, help='a:b (a to b - 1) and single seeds')
@@ -217,7 +217,6 @@ def main(argv=None):
 
     shutil.rmtree(staging, ignore_errors=True)
     shutil.rmtree(logs, ignore_errors=True)
-    checkout = commit(root)
     first = args.grid[0] * args.grid[1] if args.grid else 0
     parts = {}
 
@@ -236,8 +235,9 @@ def main(argv=None):
 
     started = time.perf_counter()
     items = [(layout, seed) for layout in layouts for seed in seeds]
-    missing = set(run_batch(items, command=command, count=jobs, gpus=args.gpus, launcher=args.launcher,
-                            retries=args.retries, missing=rerun, key=lambda item: item[0]))
+    batch = run_batch(items, command=command, count=jobs, gpus=args.gpus, launcher=args.launcher,
+                      retries=args.retries, missing=rerun, key=lambda item: item[0], root=root)
+    missing, checkout = set(batch), batch.commit
     total_s = time.perf_counter() - started
 
     problems, overview = [], []
@@ -267,7 +267,7 @@ def main(argv=None):
                       'layout': layout})
         about = {key: defined[layout][key] for key in ('quality', 'description')} if layout else {}
         summary = {'scene': args.scene, 'layout': layout, **about, 'robot': robot, 'physics': 'isaac-cpu',
-                   'commit': checkout, 'seeds': seeds_record(seeds), **summarize(records), 'camera': camera,
+                   **batch.record(directory), 'seeds': seeds_record(seeds), **summarize(records), 'camera': camera,
                    'total_s': total_s}
         (directory / 'initial.json').write_text(json.dumps({**summary, 'records': dict(sorted(records.items()))},
                                                            indent=1, default=float) + '\n')

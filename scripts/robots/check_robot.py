@@ -140,12 +140,13 @@ def merge(results):
     return merged
 
 
-def collect(directory, robot, ran=()):
+def collect(directory, robot, ran=(), checkout=None, source=None):
     """Merge the case reports under ``directory`` (one robot) into ``<backend>/report.json`` and
     ``summary.json``; returns the summary. Results of units not in ``ran`` (``(backend, case, trial)``) are
     from earlier runs: listed under ``earlier`` per backend."""
-    from table_1000.common.batch import commit
-    summary = {'robot': robot, 'commit': commit(ROOT), 'backends': {}, 'cases': {}}
+    summary = {'robot': robot, 'commit': checkout, 'backends': {}, 'cases': {}}
+    if source is not None:
+        summary.update(source.record(directory))
     for backend in BACKENDS:
         cases = {}
         retried = {}
@@ -251,7 +252,7 @@ def main(argv=None):
                                         f'{directories[unit[0]] / unit[1] / "logs"}'}})
     failing = []
     for robot, robot_dir in directories.items():
-        summary = collect(robot_dir, robot, {unit[1:] for unit in units if unit[0] == robot})
+        summary = collect(robot_dir, robot, {unit[1:] for unit in units if unit[0] == robot}, source=missing)
         print(robot, {backend: f"{entry['passed']}/{entry['cases']}" for backend, entry in summary['backends'].items()},
               robot_dir / 'summary.json', flush=True)
         for backend, entry in summary['backends'].items():

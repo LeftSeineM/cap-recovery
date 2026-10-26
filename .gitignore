@@ -10,11 +10,11 @@ __pycache__/
 .pytest_cache/
 
 # Large or private research artifacts
-/assets/
+/assets
 /data
 /runs
 artifacts/
-outputs/
+outputs
 checkpoints/
 wandb/
 

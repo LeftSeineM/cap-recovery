@@ -286,10 +286,12 @@ def summary(directory,names,error=None):
     return {'asset':asset,'backends':backends,'tests':ordered}
 
 
-def write_summary(directory,names,error=None):
+def write_summary(directory,names,error=None,source=None):
     path=directory/'physics_test'/'summary.json'
     path.parent.mkdir(parents=True,exist_ok=True)
-    path.write_text(json.dumps(summary(directory,names,error),indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+    report=summary(directory,names,error)
+    if source is not None:report.update(source.record(path.parent))
+    path.write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
     return path
 
 
@@ -425,7 +427,7 @@ def main(argv=None):
         return command,log,f'{reference} {backend}'
 
     # One process per asset and backend: Kit's close ends it.
-    run_batch(list(selected),key=lambda unit:unit,command=command,
+    batch=run_batch(list(selected),key=lambda unit:unit,command=command,
               missing=lambda unit:not all(path.exists() for path in results(unit).values()),
               count=count,gpus=args.gpus,launcher=args.launcher,retries=args.retries)
     failed=[]
@@ -440,7 +442,7 @@ def main(argv=None):
         if any(json.loads(path.read_text())['execution_status']!='completed' for path in results((reference,backend)).values()):
             failed.append(f'{reference} {backend}')
     for reference in references:
-        print('SUMMARY',write_summary(source/reference,names.get(reference,[]),broken.get(reference)),flush=True)
+        print('SUMMARY',write_summary(source/reference,names.get(reference,[]),broken.get(reference),source=batch),flush=True)
     failed+=[f'{reference} (physics_test.py)' for reference in broken]
     if failed:
         raise SystemExit('failed: '+', '.join(failed))

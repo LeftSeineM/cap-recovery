@@ -167,7 +167,7 @@ def summarize(reports):
 
 
 def main(argv=None):
-    from table_1000.common.batch import add_arguments, commit, job_count, run_batch
+    from table_1000.common.batch import add_arguments, job_count, run_batch
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--robots', nargs='+', default=['x1pro'], help='robot names (asset_sources/robots/<name>)')
     parser.add_argument('--scenarios', nargs='+', default=['open'], choices=SCENARIOS, help='obstacles around the object')
@@ -236,7 +236,7 @@ def main(argv=None):
     groups = {}
     for unit in units:
         groups.setdefault(directory(unit), []).append(unit)
-    overall = {'commit': commit(ROOT), 'gap': args.gap, 'lift': args.lift, 'random_pushes': args.random_pushes,
+    overall = {**missing.record(args.output), 'gap': args.gap, 'lift': args.lift, 'random_pushes': args.random_pushes,
                'groups': {}}
     for path, members in groups.items():
         reports = [json.loads(trial_path(path, unit[3]).read_text()) for unit in members if unit not in missing]

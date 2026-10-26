@@ -9,7 +9,7 @@
 - **场景的数据** `data/scenes/<场景>/<后端>/`：所有 seed 从初态跑完所有步骤（或由各步拼接而成），每次生成整体替换。
 - **开发运行** `runs/expert/<场景>/<运行>/`（`--dev`）：`<运行>` 为 `<日期>-<时间>-<提交>[-<标签>]`，以后的运行不会替换它。只跑部分步骤或 seed 的运行都是开发运行。
 
-后端命名与物理测试一致（`isaac-cpu`；场景生成尚未在 GPU 上验证）。批量运行从固定提交的独立检出进行；`summary.json` 记下所用的提交，有未提交的改动时带 `+dirty`，源码根目录不是一个检出时为 `null`。
+后端命名与物理测试一致（`isaac-cpu`；场景生成尚未在 GPU 上验证）。`summary.json` 的 `commit` 是工作进程实际运行的提交，有未提交的改动时带 `+dirty`，这时 `dirty_patch` 为批次目录中保存这些改动的文件名，在该提交上应用即可还原代码；源码根目录不是一个检出时 `commit` 为 `null`（见[批量运行](../tutorials/README.md#批量运行的通用参数)）。
 
 ## 轨迹
 
@@ -45,7 +45,7 @@
 
 | 字段 | 内容 |
 | --- | --- |
-| `commit`、`run`、`command`、`from` | 提交、运行名、命令行、来源批次 |
+| `commit`、`dirty_patch`、`run`、`command`、`from` | 提交、未提交改动的 patch（只在 `+dirty` 时有）、运行名、命令行、来源批次 |
 | `seeds` | 这一批的 seed 区间与个数 |
 | `success_rate` | 成功的 seed 占全部 seed 的比例 |
 | `failures` | `{"子任务: 原因": [seed, ...]}`；原因来自专家的检查（`ctx.fail`）、规划失败或专家代码出错（`error`）；进程中途退出而没有结果的 seed 记为 `-: process exited` |
