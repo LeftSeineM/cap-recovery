@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from table_1000.planning.broadphase import BroadphaseWorld
-from table_1000.planning.world import box_object, pose
+from table_1000.planning.world import PlanningScene, box_object, pose
 
 
 @pytest.fixture
@@ -86,6 +86,109 @@ def test_explicit_requests_are_delegated():
     request = object()
     assert fast.check_collision(request) == ['native']
     assert calls == [(request,)]
+
+
+def test_incremental_geometry_and_pair_caches(arm_model, monkeypatch):
+    from unittest.mock import Mock
+    planner = arm_model.planners['arm']
+    fast = planner.planning_world
+    native = fast.world
+    scene = PlanningScene(planner)
+    frame = np.eye(4)
+    frame[:3, 3] = [.3, 0., .3]
+    scene.add(*box_object('moving', (.15, .15, .15), frame))
+    scene.add(*box_object('fixed', (.2, .2, .2), frame))
+    build_bounds = Mock(wraps=fast._shape_bounds)
+    build_pairs = Mock(wraps=fast._prepare_pairs)
+    monkeypatch.setattr(fast, '_shape_bounds', build_bounds)
+    monkeypatch.setattr(fast, '_prepare_pairs', build_pairs)
+
+    def check():
+        assert pairs(fast.check_collision()) == pairs(native.check_collision())
+
+    check()
+    initial_bounds = build_bounds.call_count
+    initial_indices = fast.base_indices
+    assert build_pairs.call_count == 1
+    fixed_bounds = fast.bounds['object', 'fixed']
+    for distance in (4., 0., 1e-7):
+        moved = frame.copy()
+        moved[0, 3] = distance
+        scene.set_pose('moving', moved)
+        check()
+        assert fast.bounds['object', 'fixed'] is fixed_bounds
+        assert build_bounds.call_count == initial_bounds
+        assert build_pairs.call_count == 1
+
+    scene.set_padding(.01)
+    check()
+    assert build_bounds.call_count == initial_bounds + 2
+    assert build_pairs.call_count == 1
+    for padding in (0., .01, 0.):
+        scene.set_padding(padding)
+        check()
+    assert build_bounds.call_count == initial_bounds + 2
+    assert build_pairs.call_count == 1
+
+    for allowed in (True, False):
+        scene.allow(['moving'], ['l1', 'l2', 'l3'], allowed)
+        check()
+    assert build_bounds.call_count == initial_bounds + 2
+    assert build_pairs.call_count == 1
+
+    for name in ('moving', 'fixed'):
+        native.attach_object(name, planner.robot.get_name(), planner.move_group_link_id,
+                             pose(np.eye(4)), ['l3'])
+        check()
+        assert fast.base_indices is initial_indices
+    assert build_bounds.call_count == initial_bounds + 2
+    assert build_pairs.call_count == 3
+    native.detach_object('fixed', False)
+    check()
+    assert fast.base_indices is initial_indices
+    scene.set_pose('moving', frame)  # Scene update also handles direct attachment removal.
+    check()
+    assert build_bounds.call_count == initial_bounds + 2
+    assert build_pairs.call_count == 5
+
+    before_add = fast.base_indices
+    scene.add(*box_object('added', (.11, .12, .13), frame))
+    check()
+    assert build_bounds.call_count == initial_bounds + 3
+    assert build_pairs.call_count == 6
+    assert fast.base_indices is not before_add
+    native.remove_object('added')
+    check()
+    assert ('object', 'added') not in fast.bounds
+    assert build_bounds.call_count == initial_bounds + 3
+    assert build_pairs.call_count == 7
+    scene.clear()
+    check()
+    assert build_pairs.call_count == 8
+
+
+def test_replacement_reuses_only_identical_geometry_and_shape_poses(arm_model):
+    planner = arm_model.planners['arm']
+    fast = planner.planning_world
+    from mplib.collision_detection import fcl
+    shape = fcl.Box(.12, .12, .12)
+    frame = np.eye(4)
+    frame[:3, 3] = [0., 0., .2]
+    for offset, geom in ((0., shape), (3., shape), (0., shape), (0., fcl.Box(.9, .9, .9))):
+        relative = np.eye(4)
+        relative[0, 3] = offset
+        obj = fcl.FCLObject('replace', pose(frame), [fcl.CollisionObject(geom)], [pose(relative)])
+        fast.world.add_object(obj)
+        assert pairs(fast.check_collision()) == pairs(fast.world.check_collision())
+    fast.world.remove_object('replace')
+    scene = PlanningScene(planner)
+    frame[0, 3] = 3.
+    for width in (.1, 8., .1):
+        scene.add(*box_object('replace', (width, width, width), frame))
+        actual = fast.check_collision()
+        assert pairs(actual) == pairs(fast.world.check_collision())
+        assert any(r.object_name2 == 'replace' for r in actual) == (width == 8.)
+    scene.clear()
 
 
 @pytest.mark.parametrize('fixed_prismatic', [False, True])

@@ -17,6 +17,7 @@ import trimesh
 
 
 from table_1000.common.timing import timed
+from table_1000.planning.broadphase import BroadphaseWorld
 
 
 def pose(transform):
@@ -127,6 +128,8 @@ class PlanningObject:
     def __init__(self, name, body, shapes, padded=True):
         self.name, self.body, self.raw, self.padded = name, body, shapes, padded
         self.cache = {}
+        # Pose replacements share a version; effective padding completes its key.
+        self.geometry_key = object()
 
     def fcl(self, world_pose, padding=0.):
         from mplib.collision_detection import fcl
@@ -216,7 +219,10 @@ class PlanningScene:
         # add_object replaces an unattached object in place and retains its ACM
         # entries. Removing it first would erase permissions and require a scan
         # over every saved pair for every object on every synchronization.
-        world.add_object(obj.fcl(transform, self.padding))
+        collision = obj.fcl(transform, self.padding)
+        world.add_object(collision)
+        if isinstance(world, BroadphaseWorld):
+            world.cache_object(collision, (obj.geometry_key, padding))
         self.object_padding[name] = padding
         if not exists or attached:
             others = sorted(other for pair in self.permissions if name in pair for other in pair if other != name)
