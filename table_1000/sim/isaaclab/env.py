@@ -493,6 +493,24 @@ class RobotEnv:
             position = self.env.scene[lab_scene.body_entity(name, body)].data.root_com_pos_w
         return (position - self.env.scene.env_origins).cpu().numpy()
 
+    def body_mass(self, key):
+        """Actual PhysX mass (kg) of an object body; read without changing the asset."""
+        name, body = key.split(':', 1)
+        structure = self.objects[name]
+        if structure.articulated:
+            entity = self.env.scene[name]
+            index = entity.body_names.index(structure.paths[body].rsplit('/', 1)[-1])
+        else:
+            entity = self.env.scene[lab_scene.body_entity(name, body)]
+            index = 0
+        return entity.root_physx_view.get_masses().reshape(self.num_envs, -1)[:, index].cpu().numpy()
+
+    def gripper_drive(self, arm):
+        """Existing stiffness and effort limits of the two closing joints."""
+        indices = [self.robot.joint_names.index(name) for name in self.spec.arms[arm].fingers]
+        return tuple(value[0, indices].cpu().numpy().copy() for value in
+                     (self.robot.data.joint_stiffness, self.robot.data.joint_effort_limits))
+
     def set_shape_pose(self, name, transform):
         """Teleport a shape to world ``transform`` (every environment) and stop it."""
         pose = pose_tensor(transform, self.device).repeat(self.num_envs, 1)

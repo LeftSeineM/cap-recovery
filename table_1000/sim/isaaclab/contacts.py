@@ -27,6 +27,7 @@ class Contacts:
         self.events = []
         self.open = {}
         self.impulses = {}
+        self.surface_contacts = {}
         self.tensor_view = None
         self.subscription = None
         if device == 'cpu':
@@ -62,12 +63,14 @@ class Contacts:
 
     def on_tensor_step(self):
         import numpy as np
-        forces, _, _, distances, counts, starts = self.tensor_view.get_contact_data(self.dt)
+        forces, positions, _, distances, counts, starts = self.tensor_view.get_contact_data(self.dt)
         distances = distances.detach().cpu().numpy().ravel()
         forces = forces.detach().cpu().numpy().ravel()
         counts = counts.detach().cpu().numpy()
         starts = starts.detach().cpu().numpy()
+        positions = positions.detach().cpu().numpy().reshape(-1, 3)
         touching = {}
+        self.surface_contacts.clear()
         for i, j in np.argwhere(counts > 0):
             start, count = int(starts[i, j]), int(counts[i, j])
             separation = float(distances[start:start+count].min())
@@ -75,6 +78,10 @@ class Contacts:
             self.impulses[pair] = self.impulses.get(pair, 0.) + float(np.abs(forces[start:start+count]).sum()) * self.dt
             if separation < self.TOUCH:
                 touching[pair] = min(touching.get(pair, float('inf')), separation)
+                paths = [self.tensor_view.sensor_paths[i], self.filters[j]]
+                self.surface_contacts[tuple(paths)] = {'bodies': list(map(self.label, paths)),
+                    'colliders': paths, 'source': 'tensor', 'separation_m': separation,
+                    'points': positions[start:start+count].tolist()}
         for pair, separation in touching.items():
             entry = self.open.setdefault(pair, {'pair': pair, 'start': self.time, 'phase': self.phase,
                                                 'max_penetration_m': 0.})
@@ -102,8 +109,9 @@ class Contacts:
         """
         from pxr import PhysicsSchemaTools
         for header in headers:
-            a = self.label(str(PhysicsSchemaTools.intToSdfPath(header.collider0)))
-            b = self.label(str(PhysicsSchemaTools.intToSdfPath(header.collider1)))
+            colliders = [str(PhysicsSchemaTools.intToSdfPath(header.collider0)),
+                         str(PhysicsSchemaTools.intToSdfPath(header.collider1))]
+            a, b = map(self.label, colliders)
             if not (a.startswith(self.watched) or b.startswith(self.watched)):
                 continue
             pair = tuple(sorted((a, b)))
@@ -112,6 +120,16 @@ class Contacts:
             self.impulses[pair] = self.impulses.get(pair, 0.) + sum(
                 abs(sum(point.impulse[k] * point.normal[k] for k in range(3))) for point in points)
             touching = 'LOST' not in str(header.type) and separation < self.TOUCH
+            key = tuple(colliders)
+            if touching:
+                self.surface_contacts[key] = {'bodies': [a, b], 'colliders': colliders,
+                    'separation_m': float(separation),
+                    'points': [[float(point.position[k]) for k in range(3)] for point in points],
+                    'normals': [[float(point.normal[k]) for k in range(3)] for point in points],
+                    'impulses_ns': [[float(point.impulse[k]) for k in range(3)] for point in points],
+                    'physics_dt_s': self.dt}
+            else:
+                self.surface_contacts.pop(key, None)
             if touching:
                 entry = self.open.setdefault(pair, {'pair': pair, 'start': self.time, 'phase': self.phase,
                                                     'max_penetration_m': 0.})
@@ -138,4 +156,5 @@ class Contacts:
         self.events.clear()
         self.open.clear()
         self.impulses.clear()
+        self.surface_contacts.clear()
         self.time = 0.

@@ -1,0 +1,6 @@
+id,commit,pr,command,input,raw_combinations,candidates,surface_queries,kernel_calls,queries_before_first_candidate_mean,query_thread_cpu_s,note
+r9,7823d31,#54,,笔 000002 本体 27 个凸块 × 5 个方向，交替 600 次查询,,,600,,,0.535,微基准
+r10,8d967ea,#54,,同上,,,600,,,0.150,区间端点逐值相同
+r11 之前,6962f60,#54,,10 个桌面拾笔检查点 × 左右手完整枚举,19200,3920,309580,309580,,,
+r11,ef7a7e6,#54,,同上,19200,3920,229952,161178,9523.7,,候选与全部判定逐项相同
+r12,2165524,#54,,同上,19200,3920,229952,,4374.7,,候选与全部判定逐项相同

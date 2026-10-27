@@ -250,17 +250,18 @@ def _dirty_patch(root, revision, directory):
 
 
 @contextmanager
-def _checkout(root):
+def _checkout(root, source=None):
     """Yield a unique frozen checkout, revision and patch; non-Git sources yield their own path."""
-    checkout = commit(root)
-    path = patch = None
+    checkout = source.commit if source is not None else commit(root)
+    path = None
+    patch = source.patch if source is not None else None
     previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         if checkout:
             directory = root / '.local' / 'batch-checkouts'
             directory.mkdir(parents=True, exist_ok=True)
             revision = checkout.removesuffix('+dirty')
-            if checkout.endswith('+dirty'):
+            if source is None and checkout.endswith('+dirty'):
                 patch = _dirty_patch(root, revision, directory)
             path = Path(tempfile.mkdtemp(prefix=f'{checkout}-', dir=directory))
             print('CHECKOUT', checkout, path, flush=True)
@@ -315,7 +316,7 @@ def _pinned_command(argv, root, checkout):
 
 
 def run_batch(items, *, command, missing, count, gpus, launcher=None, retries=1, key=lambda item: None, cost=None,
-              root=None):
+              root=None, source=None):
     """Run ``items`` (work units) as processes (:func:`plan`), at most ``count`` at a time, on ``gpus``
     (spread evenly, see :func:`run_jobs`) or each through ``launcher`` (see :func:`launch`).
     ``command(group, index, attempt)`` gives a process's ``(argv, log, label)``. Items still ``missing(item)``
@@ -327,10 +328,12 @@ def run_batch(items, *, command, missing, count, gpus, launcher=None, retries=1,
     all rounds use its scripts, source paths and imports. Its ignored assets/data/runs/outputs remain
     shared with ``root``. Dirty roots include working files and nonignored untracked files; non-Git
     roots run in place. Reports use the result's ``record(directory)`` to save its patch and commit
-    rather than inspecting the mutable original checkout after the workers finish."""
+    rather than inspecting the mutable original checkout after the workers finish.
+    Pass that result as source for a later phase to reuse its exact commit and patch,
+    independent of subsequent edits or commits in the original working tree."""
     pending = list(items)
     root = Path(root or Path(__file__).resolve().parents[2]).resolve()
-    with _checkout(root) as (checkout, revision, patch):
+    with _checkout(root, source) as (checkout, revision, patch):
         for attempt in range(retries + 1):
             if not pending:
                 break

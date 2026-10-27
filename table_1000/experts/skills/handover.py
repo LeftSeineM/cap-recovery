@@ -23,7 +23,6 @@ from scipy.spatial.transform import Rotation
 
 from table_1000.experts.grasps import grasp_candidates, standoff
 from table_1000.experts.skills.common import APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, Unmet, collisions, normalized
-from table_1000.experts.skills.grasping import HELD_TOLERANCE
 from table_1000.experts.solver import PlanningFailed
 from table_1000.experts.problems import decision, mark
 
@@ -73,6 +72,7 @@ class Handing:
         ctx = self.ctx
         giving, receiving = self.solvers[giver], self.solvers[to]
         body = ctx.poses()[target.body]
+        com_local = body[:3, :3].T @ (ctx.env.center_of_mass(target.body)[0] - body[:3, 3])
         tcp_object = np.linalg.inv(giving.tcp()) @ body
         gap = giving.finger_gap()
         side = ctx.spec.arms[to]
@@ -92,12 +92,14 @@ class Handing:
                 self.rejected['giving IK'] += 1
                 continue
             transform = pose @ target.offset
+            com = pose[:3, :3] @ com_local + pose[:3, 3]
             obstacles, _ = self.obstacles(to, target, transform)
             obstacles.append((self.hands[giver].fcl(give, gap), 0.))
             preferred = normalized(transform[:3, 3] - self.shoulder(to))
             if not asked:
                 asked = True
                 holds = itertools.islice(grasp_candidates(target.shape, transform, self.hands[to], obstacles, preferred,
+                                                          mass_center=com, weight=self.grasp_weight(target),
                                                           approach_distance=APPROACH), NEED_HOLDS)
                 if not any(need.accepts(to, np.linalg.inv(grasp.pose) @ pose) for grasp in holds):
                     mark(self, 'need', outcome='rejected')
@@ -108,7 +110,8 @@ class Handing:
             try:
                 found = None
                 for count, grasp in enumerate(grasp_candidates(target.shape, transform, self.hands[to], obstacles,
-                                                               preferred, approach_distance=APPROACH)):
+                                                               preferred, mass_center=com, weight=self.grasp_weight(target),
+                                                               approach_distance=APPROACH)):
                     if count >= MAX_RECEIVING_IK or checked >= MAX_HANDOVER_IK:
                         break
                     checked += 1
@@ -191,7 +194,9 @@ class Handing:
             ctx.fail('no handover', Unmet, giver=giver, arm=to, planned=planned, rejected=self.rejected)
         receiving.close_gripper()
         gap = receiving.finger_gap()
-        if gap < grasp.info['contact_gap'] - HELD_TOLERANCE:
+        checked = self.check_closure(target, to, grasp)
+        ctx.note('closure checked', arm=to, **checked)
+        if not checked['held']:
             ctx.fail('object not handed over', finger_gap=gap, width=grasp.width)
         poses = ctx.poses()
         for name in target.names:

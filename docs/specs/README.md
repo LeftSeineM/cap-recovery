@@ -9,6 +9,7 @@
 | [物理属性](physics.md) | `physics.py` 与单刚体资产的物理配置 |
 | [行为插件](behaviors.md) | `behavior.py`：原生物理表达不了的附加力或状态转换 |
 | [物理测试](physics-tests.md) | `physics_test.py`：测试接口、结果与 RTF 基准 |
+| [资产抓取测试](grasp-tests.md) | 首次抓稳、运输验收、握法偏好与结果格式 |
 | [机器人](robots.md) | 机器人源码、碰撞与物理、机器人层、验收用例 |
 | [场景](scenes.md) | `scene.py`：随机初始化、布局、初态检查 |
 | [专家](experts.md) | `expert.py`：分层、编写规则、步骤、重试与失败恢复 |
@@ -43,6 +44,11 @@ assets/objects/cabinet/000000/
   *.py、*.json、README.md、three_quarter.jpg    源码快照
   preview/            第一阶段验收：几何检查 acceptance.json、图片与视频
   physics_test/       第二阶段验收：summary.json，isaac-cpu/、isaac-gpu/ 各后端结果
+  grasp_test/<机器人>/<后端>/    当前一份抓取验收结果，正式运行整体替换，不保留运行历史
+    summary.json      首次抓稳验收、单列握法偏好数据、配置与协议、来源运行名及提交、选定录像 seed
+    trials/<seed>.json             每个 seed 的报告
+    trajectories/<seed>.hdf5       全部 seed 的场景状态，支持逐 seed 重渲染
+    videos/<选定 seed>.mp4         每资产一条录像：首个失败 seed，否则 seed 0
 ```
 
 ### 机器人
@@ -96,6 +102,14 @@ runs/resolve/000000/<运行>/       离线数值重解（scripts/experts/resolve
   <seed>[-<r>].json.gz             详细重解结果，planning-* 为临时规划模型
 runs/teleop/000000/<运行>/        人工遥操一个案例的一步（scripts/experts/teleop.py）：结构同上，只有一个 seed；
                                   <运行> = <日期>-<时间>-<提交>-step<k>-seed<s>
+```
+
+```text
+runs/grasp/<日期>-<时间>-<提交>[-<标签>]/   eval_asset_grasp.py --dev [--name 标签]
+  conditions.json、summary.json、summary.md  配置、协议、来源提交与批次汇总
+  source.patch                   仅工作区有未提交改动时保存；不复制源码目录
+  workers/                       工作进程日志
+  objects/<category>/<编号>/     summary.json、trials/、trajectories/；仅要求时有 videos/
 ```
 
 统一单位：m、kg、s、rad、N、N·m；四元数顺序为 `[w, qx, qy, qz]`。各文件另行注明坐标系。USD 原生属性遵循各 Schema 的单位，详见[物理属性](physics.md)。源码快照重建依赖同版本的 `table_1000` 包，共用模块不复制到资产目录。外部资源引用须注明版本、来源和许可，不使用私有绝对路径。

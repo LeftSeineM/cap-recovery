@@ -43,7 +43,7 @@
 
 ### 结果
 
-| 版本 | commit（PR） | 场景 | seed | 成功率 | 每条 wall time (s) | sim time (s) | CPU time / wall time | 负载 / 核数 p50 |
+| 版本 | commit（PR） | 场景 | seed | 成功率 | wall time 均值 (s) | CPU time 均值 (s) | 两版 CPU / wall 比 | 负载 / 核数均值 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 基线 | `<commit>`（main） | 000002 | 0:100 | … | … | … | … | … |
 | 改动后 | `<commit>`（#53） | 000002 | 0:100 | … | … | … | … | … |
@@ -62,11 +62,12 @@ CPU 型号与核数、GPU、并发进程数。
 负载不可比、异常 seed 等需要注意的地方。
 ```
 
-表中只列回答问题所需的指标。专家批次常用：成功率、`unreachable_rate`、每条轨迹的平均 sim time 与 wall time、CPU time / wall time 与负载分位数（均在批次的 `summary.json`）；物理测试常用：关键指标与 RTF（`physics_test/summary.json`）。
+表中只列回答问题所需的指标。专家性能对比使用全部 seed 的 CPU time 和原始 wall time 算术均值及两版之比，负载 / 核数按 episode 均值等权汇总；逐条原值从 `episodes/<seed>.json` 读取。另列成功率、`unreachable_rate` 和耗时最多的案例；物理测试常用关键指标与 RTF（`physics_test/summary.json`）。
 
 ## 条目列表
 
 - [20261027 专家 episode 单线程 BLAS](20261027-single-thread-blas.md)：Isaac 启动后 BLAS 按 32 线程运行，限制为 1 线程后进程 CPU time 降 48%–65%，wall time 不增加（#85）。
 - [20261026 笔 000002 开启 CCD](20261026-pen-ccd-regression.md)：笔帽钢珠穿过抽屉薄底板、夹住抽屉的修复（#74），CPU time 约增加 3%，GPU 上 CCD 不生效。
+- [20261026 资产抓取测试与专家耗时](20261026-asset-grasp/README.md)：一般尺寸资产首次抓稳 60.9% → 96.6%，专家 CPU time 比 main 增加 7%–17%；资产测试变慢主要来自水瓶和辅助夹具（#90），运输强度受关节上限限制（#89）。
 - [20261025 场景 000002 专家迭代](20261025-expert-iteration-000002/README.md)：从 0 到 98% 的迭代历史，失败复现工具前后的对比。
 - [20261024 专家 wall time 优化](20261024-expert-wall-time/README.md)：有界路径简化、碰撞粗筛、运动链 IK 等改进与逐项消融，000002 非 PhysX wall time −45.5%。

@@ -2374,7 +2374,9 @@ dev = [
 ]
 robots = [
     { name = "mplib" },
+    { name = "numba" },
     { name = "rtree" },
+    { name = "threadpoolctl" },
     { name = "toppra" },
     { name = "trimesh" },
 ]
@@ -2393,9 +2395,11 @@ requires-dist = [
     { name = "isaaclab", extras = ["isaacsim"], marker = "extra == 'sim'", specifier = "==2.3.2.post1" },
     { name = "matplotlib", marker = "extra == 'sim'", specifier = "==3.10.3" },
     { name = "mplib", marker = "extra == 'robots'", specifier = "==0.2.1" },
+    { name = "numba", marker = "extra == 'robots'", specifier = "==0.59.1" },
     { name = "open3d", marker = "extra == 'dev'", specifier = "==0.20.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "rtree", marker = "extra == 'robots'", specifier = "==1.3.0" },
+    { name = "threadpoolctl", marker = "extra == 'robots'", specifier = "==3.7.0" },
     { name = "threadpoolctl", marker = "extra == 'sim'", specifier = "==3.7.0" },
     { name = "toppra", marker = "extra == 'robots'", specifier = "==0.6.10" },
     { name = "torch", marker = "extra == 'sim'", specifier = "==2.7.0", index = "https://download.pytorch.org/whl/cu128" },

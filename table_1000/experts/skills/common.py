@@ -52,3 +52,4 @@ class Target:
     shape: object
     offset: np.ndarray
     points: np.ndarray
+    fallback: bool = False  # a whole-object envelope used only when real parts are not legal

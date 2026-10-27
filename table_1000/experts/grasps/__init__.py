@@ -11,8 +11,15 @@ from dataclasses import dataclass
 import heapq
 
 import numpy as np
+from threadpoolctl import ThreadpoolController
 
 from table_1000.common.timing import timed
+
+# Contact rays have three coordinates. Kit can reset native BLAS pools to 32
+# threads despite startup environment settings; these small products lose to
+# dispatch and spinning workers. Scope this to contact geometry, then restore
+# the caller's pool sizes. PhysX and OpenMP thread counts are untouched.
+_CONTACT_MATH = ThreadpoolController()
 
 
 def normalized(vector):
@@ -227,10 +234,18 @@ class Hand:
     sampled every ``PAD_SPACING``; those of shapes named ``*pad*`` in the URDF are its pads (all
     of them when it has none)."""
 
-    def __init__(self, model, arm):
+    def __init__(self, model, arm, *, pad_spacing=None, min_pad_area=None,
+                 hold_margin=None, min_hold_area=None, opening_clearance=.01, cost_width=0., drive=None):
         import xml.etree.ElementTree as ET
         self.model, self.arm, self.side = model, arm, model.spec.arms[arm]
         self.max_gap = self.side.max_gap
+        self.pad_spacing = PAD_SPACING if pad_spacing is None else pad_spacing
+        self.min_pad_area = MIN_PAD_AREA if min_pad_area is None else min_pad_area
+        self.hold_margin = HOLD_MARGIN if hold_margin is None else hold_margin
+        self.min_hold_area = MIN_HOLD_AREA if min_hold_area is None else min_hold_area
+        self.opening_clearance = opening_clearance
+        self.cost_width = cost_width
+        self.drive = drive
         urdf = model.root / model.spec.urdf
         links = {link.get('name'): link for link in ET.parse(urdf).getroot().findall('link')}
         self.cache = {}
@@ -252,7 +267,7 @@ class Hand:
             vertices = np.vstack([_vertices(shape) @ frame[:3, :3].T + frame[:3, 3] for shape in shapes])
             sign = float(np.sign(vertices[:, 1].mean()))
             inward = frame[:3, :3].T @ [0., -sign, 0.]
-            points = [_facing(shape, inward) for shape in shapes]
+            points = [_facing(shape, inward, self.pad_spacing) for shape in shapes]
             pads = [np.full(len(p), shape[3] or not padded) for p, shape in zip(points, shapes)]
             self.fingers.append((sign, np.vstack(points), np.concatenate(pads)))
 
@@ -264,6 +279,49 @@ class Hand:
             tcp = np.linalg.inv(self.model.tcp(self.arm, q))
             self.cache[key] = {link: tcp @ self.model.fk(link, q) for link in self.shapes}
         return self.cache[key]
+
+    def pad_alignment(self, gap):
+        """Flat-pad contact band for a pivoted finger facing a flat object side.
+
+        Tilting a pad by theta leaves at most 2*CONTACT_TOLERANCE/sin(theta)
+        along its depth in the contact layer. A band narrower than the two
+        existing HOLD_MARGIN edge clearances cannot provide an interior grip.
+        """
+        pivot = self.side.finger_pivot
+        theta = 0. if pivot is None else abs(next(iter(self.side.finger_targets(gap).values())))
+        depth = min(float(np.ptp(points[pads, 0])) for _, points, pads in self.inner(gap))
+        band = depth if abs(np.sin(theta)) < 1e-12 else min(depth, 2 * CONTACT_TOLERANCE / abs(np.sin(theta)))
+        return {'pad_angle_rad': 2 * theta, 'contact_band_m': band,
+                'edge_only': band < 2 * self.hold_margin,
+                'pad_alignment_cost': 1 - band / depth if depth else 1.}
+
+    def moment_radius(self):
+        """Equivalent circular radius of the existing desired pad holding area."""
+        return float(np.sqrt(HOLD_AREA / np.pi))
+
+    def normal_force(self, gap):
+        """Steady closing force from the existing drives, summed over both fingers."""
+        if self.drive is None:
+            raise ValueError('grasp gravity scoring requires measured drive stiffness and effort limits')
+        return pinch_normal_force(self.side, gap, *self.drive)
+
+    def on_pad(self, link, points):
+        """GPU reports expose body names and points, not collider names: test URDF pad solids."""
+        from scipy.spatial import ConvexHull
+        shapes = self.shapes[link]
+        explicit = any(shape[3] for shape in shapes)
+        for transform, kind, data, pad in shapes:
+            if explicit and not pad:
+                continue
+            local = (np.asarray(points) - transform[:3, 3]) @ transform[:3, :3]
+            if kind == 'box':
+                inside = (np.abs(local) <= np.asarray(data) / 2 + CONTACT_TOLERANCE).all(axis=1)
+            else:
+                equations = ConvexHull(data).equations
+                inside = (local @ equations[:, :3].T + equations[:, 3] <= CONTACT_TOLERANCE).all(axis=1)
+            if inside.any():
+                return True
+        return False
 
     def tip(self, gap=0.):
         """How far ahead of the TCP (along +X) the fingers reach at ``gap``."""
@@ -282,8 +340,13 @@ class Hand:
     def inner(self, gap):
         """``[(opening sign, [N, 3] inner surface points in the TCP frame, pad mask)]`` per finger at ``gap``."""
         frames = self.frames(gap)
-        return [(sign, points @ frames[link][:3, :3].T + frames[link][:3, 3], pads)
+        if not hasattr(self, '_inner_cache'):
+            self._inner_cache = {}
+        key = id(frames)
+        if key not in self._inner_cache:
+            self._inner_cache[key] = [(sign, points @ frames[link][:3, :3].T + frames[link][:3, 3], pads)
                 for link, (sign, points, pads) in zip(self.side.finger_links, self.fingers)]
+        return self._inner_cache[key]
 
     def fcl(self, tcp, gap, fingers=True):
         """FCL object of the hand at world TCP pose ``tcp`` with the fingers at ``gap`` (only the
@@ -358,6 +421,32 @@ class Grasp:
     backoff: float
     cost: float
     info: dict
+    target: object = None  # assigned by the skill when merging alternative parts
+    choice: int | None = None  # geometry enumeration, before angle/cost ordering
+
+
+def merge_part_heads(streams, key):
+    """Select among each part's current head without reordering within a part.
+
+    Unlike a globally sorted merge, a part's next physical load may be lower
+    than its current head: expose it only after that head has been considered.
+    """
+    streams = [iter(stream) for stream in streams]
+    heap, indices, closest = [], [0] * len(streams), np.inf
+    def advance(number):
+        nonlocal closest
+        grasp = next(streams[number], None)
+        if grasp is not None:
+            closest = min(closest, grasp.info['closest_deg'])
+            heapq.heappush(heap, (key(number, grasp), number, grasp))
+    for number in range(len(streams)):
+        advance(number)
+    while heap:
+        _, number, grasp = heapq.heappop(heap)
+        grasp.info['closest_deg'] = closest
+        yield number, indices[number], grasp
+        indices[number] += 1
+        advance(number)
 
 
 # Opening beyond the object's width, total. Pad surfaces are sampled every PAD_SPACING; a pad
@@ -387,9 +476,29 @@ def lengthwise(closings):
     return widths[-1] if long else None
 
 
+def gravity_lever(contact, center_of_mass, closing):
+    """Gravity torque about the unit closing line, per unit weight (metres)."""
+    return float(abs(np.dot(np.cross(np.asarray(center_of_mass) - contact, [0., 0., -1.]), closing)))
+
+
+def pinch_normal_force(side, gap, stiffness, effort_limits):
+    """Virtual work: N=d(angular drive work)/d(finger opening), with unchanged drive gains."""
+    angles = np.array(list(side.finger_targets(gap).values()))
+    closed = np.array(list(side.finger_targets(0.).values()))
+    effort = np.minimum(np.asarray(stiffness) * np.abs(angles - closed), effort_limits)
+    lever = 1.
+    if side.finger_pivot is not None:
+        _, (x, y) = side.finger_pivot
+        angle = float(angles[0] / side.finger_signs[0])
+        lever = abs(x * np.cos(angle) - y * np.sin(angle))
+    return float(effort.sum() / lever)
+
+
 @timed('grasp_candidates')
 def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mass=None, approach_distance=.05,
-                     step=np.radians(15), max_up=.05, cost_offset=40., cost_backoff=10., cost_hold=.5 / 30e-6):
+                     step=np.radians(15), max_up=.05, cost_offset=40., cost_backoff=10., cost_hold=.5 / 30e-6,
+                     mass_center=None, weight=0., contact_surface=None, max_angle=None, _placement_cache=None,
+                     _first_angle=False, reference_rotation=None):
     """Grasps of ``shape`` (:class:`Box` or :class:`Cylinder`) at world ``transform`` by ``hand``
     (:class:`Hand`), cheapest first, generated as they are taken.
 
@@ -404,14 +513,33 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
     angle (rad) from the ``preferred`` approach direction, plus ``cost_offset`` per metre between
     the centre of the squeezing pad area and ``center_of_mass`` (default: the shape's centre),
     ``cost_backoff`` per metre of back-off and ``cost_hold`` per m^2 the held section falls short of
-    HOLD_AREA.
+    HOLD_AREA, plus ``hand.cost_width`` per metre of closing width (zero by default),
+    the original gravity moment about the gripping line normalized by predicted
+    closing force times the desired-area radius, and loss of parallel pad contact band.
+    Actual contact-patch load compares part heads in the skill, without changing
+    this within-part order. The
+    optional ``mass_center`` and ``weight`` (N) describe a freely suspended body;
+    their absence retains geometric centering for joint-constrained manipulation.
+    ``contact_surface``, when given, supplies the actual held-body collision
+    surfaces in the shape frame for closure and interior holding area; the
+    fitted shape still supplies candidate axes and conservative clearance.
+    ``max_angle`` (rad) excludes approaches outside the consumer's existing
+    limit before contact computation. The remaining cost order and closest
+    valid angle are the same as filtering the full stream afterwards.
+    With ``reference_rotation`` (the measured TCP rotation), the angular cost
+    also accounts for wrist roll: project its closing axis onto the preferred
+    approach plane and measure the full rotation to that frame. Approach
+    limits and physical contact tests retain their meanings.
     """
     from mplib.collision_detection import fcl
     from table_1000.planning.world import geometry, pose
     transform = np.asarray(transform, dtype=float)
     rotation, origin = transform[:3, :3], transform[:3, 3]
     com = origin if center_of_mass is None else np.asarray(center_of_mass, dtype=float)
-    target = fcl.FCLObject('target', pose(transform), [fcl.CollisionObject(geometry(*shape.fcl_shape()))], [pose(np.eye(4))])
+    mass_center = com if mass_center is None else np.asarray(mass_center, dtype=float)
+    extra, poses = contact_surface.collision_objects(shape) if contact_surface is not None else ([], [])
+    target = fcl.FCLObject('target', pose(transform), [fcl.CollisionObject(geometry(*shape.fcl_shape())), *extra],
+                          [pose(np.eye(4)), *poses])
     # Every hand checked has its TCP at a contact centre inside the shape, backed off by at most
     # MAX_BACKOFF and the approach: obstacles farther from the shape than that and the hand's
     # radius cannot touch it, and are left out of the checks.
@@ -419,6 +547,13 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
     obstacles = [(obstacle, clearance) for obstacle, clearance in obstacles
                  if fcl.distance(target, obstacle).min_distance < reach + max(clearance, 0.)]
     preferred = normalized(preferred)
+    preferred_frame = None
+    if reference_rotation is not None:
+        reference_rotation = np.asarray(reference_rotation)
+        closing = reference_rotation[:, 1] - (reference_rotation[:, 1] @ preferred) * preferred
+        if not np.any(closing):
+            closing = np.cross(reference_rotation[:, 2], preferred)
+        preferred_frame = build_grasp_pose(preferred, closing, origin)[:3, :3]
     # Every (closing, approach, slide, hand turn), by angle from the preferred approach: the angle is
     # a lower bound of the cost, so a placed grasp is yielded once no later one can be cheaper.
     choices = []
@@ -426,7 +561,7 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
     length = lengthwise(closings)
     for closing, width, basis, slides in closings:
         open_gap = min(width + OPEN_MARGIN, hand.max_gap)
-        if width > open_gap - .01 or length is not None and width >= length:
+        if width > open_gap - hand.opening_clearance or length is not None and width >= length:
             continue
         closing = rotation @ closing
         approaches = [rotation @ (np.cos(t) * basis[0] + np.sin(t) * basis[1]) for t in np.arange(0., 2 * np.pi, step)] \
@@ -439,28 +574,94 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
                 for flip in (1., -1.):
                     choices.append((angle, len(choices), approach, flip * closing, slide, width, open_gap))
     choices.sort(key=lambda choice: choice[:2])
-    placed_grasps, closest = [], None
-    for angle, order, approach, closing, slide, width, open_gap in choices:
-        while placed_grasps and placed_grasps[0][0] <= angle:
-            yield heapq.heappop(placed_grasps)[2]
+    if max_angle is not None:
+        choices = [choice for choice in choices
+                   if float(np.degrees(choice[0])) <= np.degrees(max_angle) + 1e-6]
+
+    def place(choice):
+        _, order, approach, closing, slide, _, open_gap = choice
+        if _placement_cache is not None and order in _placement_cache:
+            return _placement_cache[order]
         center = origin + rotation @ slide
         placed = _placed(shape, transform, target, build_grasp_pose(approach, closing, center), hand, open_gap,
-                         obstacles, approach_distance)
+                         obstacles, approach_distance, contact_surface)
+        if _placement_cache is not None:
+            _placement_cache[order] = placed
+        return placed
+
+    placed_grasps, closest = [], None
+    bounds = {}
+    if preferred_frame is not None and not _first_angle:
+        # The closest *approach* defines the torso phase, independently of
+        # wrist-roll preference. Probe it in approach order and reuse its
+        # placements when traversing by the tighter full-rotation bound.
+        _placement_cache = {} if _placement_cache is None else _placement_cache
+        for choice in choices:
+            placed = place(choice)
+            if placed is not None and not hand.pad_alignment(placed[2])['edge_only'] \
+                    and not (weight and hand.normal_force(placed[2]) <= 0.):
+                closest = choice[0]
+                break
+        if closest is None:
+            return
+        for angle, order, approach, closing, *_ in choices:
+            frame = build_grasp_pose(approach, closing, origin)[:3, :3]
+            bounds[order] = max(angle, float(np.arccos(np.clip(
+                (np.trace(preferred_frame.T @ frame) - 1.) / 2., -1., 1.))))
+        choices.sort(key=lambda choice: (bounds[choice[1]], choice[1]))
+
+    for choice in choices:
+        angle, order, approach, closing, slide, width, open_gap = choice
+        bound = bounds.get(order, angle)
+        while placed_grasps and placed_grasps[0][0] <= bound:
+            yield heapq.heappop(placed_grasps)[2]
+        # The angle probe and the replayed full stream share fixed geometry.
+        # Their raw choice ids are identical, so reuse both accepted and rejected
+        # placements without changing either stream's cost order or retry ids.
+        placed = place(choice)
         if placed is None:
             continue
         tcp, backoff, gap, contact, held = placed
-        cost = angle + cost_offset * float(np.linalg.norm(contact - com)) + cost_backoff * backoff \
+        alignment = hand.pad_alignment(gap)
+        if alignment['edge_only']:
+            continue
+        # Use the *existing* actuator's predicted steady normal force. Dividing
+        # by weight instead would assume clamping force scales with object mass
+        # and over-rank marginal small patches on very light objects.
+        lever = gravity_lever(contact, mass_center, closing)
+        force = hand.normal_force(gap) if weight else None
+        if weight and force <= 0.:
+            continue
+        moment_cost = weight * lever / (force * hand.moment_radius()) if weight else 0.
+        angular_cost = angle if preferred_frame is None else max(angle, float(np.arccos(np.clip(
+            (np.trace(preferred_frame.T @ tcp[:3, :3]) - 1.) / 2., -1., 1.))))
+        cost = angular_cost + cost_offset * float(np.linalg.norm(contact - com)) + moment_cost \
+            + alignment['pad_alignment_cost'] + cost_backoff * backoff + hand.cost_width * width \
             + cost_hold * max(0., HOLD_AREA - held)
-        # Choices are placed by angle: the first that places comes closest of all to the preferred approach.
+        # Approach-ordered placement, or the preceding probe for wrist costs,
+        # determines the closest valid approach independently of cost order.
         closest = angle if closest is None else closest
-        heapq.heappush(placed_grasps, (cost, order, Grasp(tcp, open_gap, float(width), backoff, cost, {
+        grasp = Grasp(tcp, open_gap, float(width), backoff, cost, {
             'approach_deg': float(np.degrees(angle)), 'slide': float(np.linalg.norm(slide)), 'contact_gap': gap,
-            'held_mm2': held * 1e6, 'closest_deg': float(np.degrees(closest))})))
+            'held_mm2': held * 1e6, 'closest_deg': float(np.degrees(closest)),
+            'com_distance_m': float(np.linalg.norm(contact - mass_center)), 'gravity_lever_m': lever,
+            'weight_N': weight, 'gravity_moment_Nm': weight * lever, 'predicted_normal_force_N': force,
+            'moment_radius_m': hand.moment_radius(),
+            'gravity_moment_cost': moment_cost, **alignment}, choice=order)
+        if preferred_frame is not None:
+            grasp.info['orientation_deg'] = float(np.degrees(angular_cost))
+        if _first_angle:
+            # Only the closest valid angle is needed to define the held-lift
+            # phase. Its cheapest grasp is found by the normal cost stream.
+            yield grasp
+            return
+        heapq.heappush(placed_grasps, (cost, order, grasp))
     while placed_grasps:
         yield heapq.heappop(placed_grasps)[2]
 
 
-def _placed(shape, transform, target, pose, hand, open_gap, obstacles, approach_distance):
+@_CONTACT_MATH.wrap(limits=1, user_api='blas')
+def _placed(shape, transform, target, pose, hand, open_gap, obstacles, approach_distance, contact_surface=None):
     """``(tcp, backoff, contact gap, contact centre, held area)`` of the first back-off from ``pose``
     (the TCP at the contact centre) at which the hand is clear (see :func:`grasp_candidates`), or
     None when the pads squeeze too little of the object, or hold too little of its widest section,
@@ -468,67 +669,202 @@ def _placed(shape, transform, target, pose, hand, open_gap, obstacles, approach_
     # Beyond this back-off the pads, open, no longer reach along the approach as far as the object.
     reach = max(points[pads, 0].max() for _, points, pads in hand.inner(open_gap))
     nearest = float(((shape.points() @ transform[:3, :3].T + transform[:3, 3] - pose[:3, 3]) @ pose[:3, 0]).min())
+    compound = contact_surface is not None and len(contact_surface.pieces) > 1
     for backoff in np.arange(0., min(MAX_BACKOFF, reach - nearest) + 1e-9, BACKOFF_STEP):
         tcp = standoff(pose, backoff)
         # The open hand there and at the pre-grasp, one after the other (see Hand.fcl).
         if any(_collides(body, target, 0.) or any(_collides(body, obstacle, clearance) for obstacle, clearance in obstacles)
                for body in (hand.fcl(at, open_gap) for at in (tcp, standoff(tcp, approach_distance)))):
             continue
-        closed = _close(shape, transform, tcp, hand, open_gap)
+        surface = shape if contact_surface is None else _closing_surface(contact_surface, transform, tcp, hand, open_gap)
+        closed = _close(surface, transform, tcp, hand, open_gap,
+                        contact_layer=contact_surface is not None)
         if closed is None:
-            return None     # backing off further only squeezes less of the object
+            if compound:
+                continue  # a different component can supply opposing faces later
+            return None     # a single convex section only gets smaller
         gap, contact = closed
         closed_hand = hand.fcl(tcp, gap)
         if _collides(hand.fcl(tcp, gap, fingers=False), target, 0.) or any(
                 _collides(closed_hand, obstacle, clearance) for obstacle, clearance in obstacles):
             continue
-        held = _held_area(shape, transform, tcp, hand, gap)
-        if held < MIN_HOLD_AREA:
-            return None     # backing off further only holds less
+        held = _held_area(shape, transform, tcp, hand, gap) if contact_surface is None \
+            else _contact_area(surface, transform, tcp, hand, gap,
+                               section=isinstance(shape, Cylinder))
+        if held < hand.min_hold_area:
+            if compound:
+                continue  # contact can move from an edge onto another component
+            return None     # a single convex section only gets smaller
         return tcp, float(backoff), gap, contact, held
     return None
 
 
-def _held_area(shape, transform, tcp, hand, gap):
+def _closing_surface(surface, transform, tcp, hand, open_gap):
+    """Keep actual surfaces that can enter the finite finger closing sweep.
+
+    A free object can centre after a finger touches it, but a remote component
+    outside the whole opening cannot translate itself into an empty hand.
+    Bound the inward surface samples at every existing 0.5 mm FK cache gap,
+    including intermediate pivot positions, then project their enclosing box
+    on the closing axis. The existing contact tolerance expands that span.
+    """
+    key = int(round(float(open_gap) / .0005))
+    if not hasattr(hand, '_closing_bounds'):
+        hand._closing_bounds = {}
+    if key not in hand._closing_bounds:
+        points = np.vstack([points for index in range(key + 1)
+                            for _, points, _ in hand.inner(index * .0005)])
+        low, high = points.min(0), points.max(0)
+        hand._closing_bounds[key] = np.array([[x, y, z] for x in (low[0], high[0])
+                                            for y in (low[1], high[1]) for z in (low[2], high[2])])
+    world = hand._closing_bounds[key] @ tcp[:3, :3].T + tcp[:3, 3]
+    points = (world - transform[:3, 3]) @ transform[:3, :3]
+    axis = transform[:3, :3].T @ tcp[:3, 1]
+    coordinate = points @ axis
+    return surface.closing_span(axis, float(coordinate.min() - CONTACT_TOLERANCE),
+                                float(coordinate.max() + CONTACT_TOLERANCE))
+
+
+@_CONTACT_MATH.wrap(limits=1, user_api='blas')
+def contact_resistance(shape, transform, tcp, hand, gap, *, open_gap=None):
+    """Finite contact-patch torsion radius and normal-to-closing force redirection.
+
+    Uniform pressure gives a torsional moment scale N*mean(radius). Each pad
+    sample represents a square cell, integrated with four-point quadrature.
+    A normal tilted by theta needs tan(theta) tangential force per unit normal
+    force to redirect its resultant along the closing line. This consumes
+    friction rather than providing torsional reserve. No material is changed
+    and this geometric scale is not a calibrated friction-capacity guarantee.
+    """
+    if open_gap is not None:
+        shape = _closing_surface(shape, transform, tcp, hand, open_gap)
+    rotation, origin = transform[:3, :3], transform[:3, 3]
+    direction = rotation.T @ tcp[:3, 1]
+    fingers = []
+    for sign, points, pads in hand.inner(gap):
+        world = points @ tcp[:3, :3].T + tcp[:3, 3]
+        low, high = shape.interval((world - origin) @ rotation, direction)
+        past = np.where(high >= low, high if sign > 0 else -low, -np.inf)
+        interior = pads & (points[:, 0] < points[pads, 0].max() - hand.hold_margin)
+        fingers.append((sign, world, past, interior))
+    reaches = {sign: float(past.max()) for sign, _, past, _ in fingers}
+    shift = (reaches[-1.] - reaches[1.]) / 2
+    radii, cosines = [], []
+    cell = np.array([[x, z] for x in (-1., 1.) for z in (-1., 1.)]) * hand.pad_spacing / np.sqrt(12.)
+    for sign, world, past, interior in fingers:
+        touching = interior & (past + sign * shift >= -CONTACT_TOLERANCE)
+        points = world[touching] + (sign * past[touching])[:, None] * tcp[:3, 1]
+        if not len(points):
+            return {'contact_radius_m': 0., 'contact_normal_cosine': 0., 'normal_redirection_cost': np.inf}
+        normals = shape.normals((points - origin) @ rotation)
+        cosines.append(float(np.mean(np.abs(normals @ direction))))
+        local = (points - tcp[:3, 3]) @ tcp[:3, :3]
+        patch = local[:, [0, 2]]
+        centered = patch - patch.mean(axis=0)
+        radii.append(float(np.linalg.norm(centered[:, None, :] + cell, axis=2).mean()))
+    cosine = float(np.clip(min(cosines), 0., 1.))
+    return {'contact_radius_m': min(radii), 'contact_normal_cosine': cosine,
+            'normal_redirection_cost': np.sqrt(1. - cosine ** 2) / cosine if cosine else np.inf}
+
+
+def _contact_area(shape, transform, tcp, hand, gap, *, section=True):
+    """Smaller opposing contact patch inside the existing pad-tip margin.
+
+    A curved/hollow part's globally widest section need not be the section
+    held by the fingers. Retain the insertion-depth check on the convex
+    pieces actually touched for a round candidate: a tangent patch near the
+    pad tip alone does not establish that its central section is behind the
+    tip margin. A box candidate retains the actual interior contact layer:
+    a supported flat face need not span its whole collision component.
+    """
+    rotation, origin = transform[:3, :3], transform[:3, 3]
+    direction = rotation.T @ tcp[:3, 1]
+    fingers = []
+    for sign, points, pads in hand.inner(gap):
+        world = points @ tcp[:3, :3].T + tcp[:3, 3]
+        low, high = shape.interval((world - origin) @ rotation, direction)
+        past = np.where(high >= low, high if sign > 0 else -low, -np.inf)
+        interior = pads & (points[:, 0] < points[pads, 0].max() - hand.hold_margin)
+        fingers.append((sign, world, past, pads, interior))
+    reaches = {sign: float(past.max()) for sign, _, past, _, _ in fingers}
+    shift = (reaches[-1.] - reaches[1.]) / 2
+    area = min(np.count_nonzero(interior & (past + sign * shift >= -CONTACT_TOLERANCE))
+               for sign, _, past, _, interior in fingers) * hand.pad_spacing ** 2
+    if not section:
+        return area
+    if not area:
+        return 0.
+    contacts = np.vstack([world[pads & (past + sign * shift >= -CONTACT_TOLERANCE)]
+                          for sign, world, past, pads, _ in fingers])
+    # _close lets the object centre itself along the closing direction.
+    local = (contacts - shift * tcp[:3, 1] - origin) @ rotation
+    patch = shape.at_contacts(local)
+    if not patch.pieces:
+        return 0.
+    shifted = np.array(transform, copy=True)
+    shifted[:3, 3] += shift * tcp[:3, 1]
+    return min(area, _held_area(patch, shifted, tcp, hand, gap, local=True))
+
+
+def _held_area(shape, transform, tcp, hand, gap, *, local=False):
     """Area (m^2, projected on the pads' plane) of the object's widest section across the closing
     that lies on the pads at least HOLD_MARGIN from their tip end, the hand at world ``tcp`` with
     the fingers at ``gap``."""
     rotation, origin = transform[:3, :3], transform[:3, 3]
     direction = rotation.T @ tcp[:3, 1]
-    widest = float(np.ptp(shape.points() @ direction))
     pads = np.vstack([points[mask] for _, points, mask in hand.inner(gap)])
-    xs = np.arange(pads[:, 0].min(), pads[:, 0].max() - HOLD_MARGIN, HOLD_SPACING)
+    xs = np.arange(pads[:, 0].min(), pads[:, 0].max() - hand.hold_margin, HOLD_SPACING)
     zs = np.arange(pads[:, 2].min(), pads[:, 2].max(), HOLD_SPACING)
     if not len(xs) or not len(zs):
         return 0.
     x, z = (grid.reshape(-1, 1) for grid in np.meshgrid(xs, zs, indexing='ij'))
-    low, high = shape.interval((tcp[:3, 3] + x * tcp[:3, 0] + z * tcp[:3, 2] - origin) @ rotation, direction)
-    return float(np.count_nonzero(high - low >= widest - HOLD_TOLERANCE)) * HOLD_SPACING ** 2
+    origins = (tcp[:3, 3] + x * tcp[:3, 0] + z * tcp[:3, 2] - origin) @ rotation
+    if local:
+        supported = shape.wide_sections(origins, direction, HOLD_TOLERANCE)
+    else:
+        widest = float(np.ptp(shape.points() @ direction))
+        low, high = shape.interval(origins, direction)
+        supported = high - low >= widest - HOLD_TOLERANCE
+    return float(np.count_nonzero(supported)) * HOLD_SPACING ** 2
 
 
-def _close(shape, transform, tcp, hand, open_gap, iterations=9):
+def _close(shape, transform, tcp, hand, open_gap, iterations=9, check_area=True, *, contact_layer=False):
     """Close the hand at world ``tcp`` on the object (free to slide along the closing to stay between the
     fingers): ``(gap, contact centre)`` where the fingers' inner surfaces first both touch it, or None
     when they touch it already open, never touch it, or touch it with less than MIN_PAD_AREA of pad
-    each."""
+    each. Candidate prediction may use ``contact_layer`` to establish pad
+    support within the existing CONTACT_TOLERANCE on each side after a small
+    edge first touches. The measured expert signal retains the default.
+    """
     rotation, origin = transform[:3, :3], transform[:3, 3]
     direction = rotation.T @ tcp[:3, 1]
+    reached = {}
 
     def reach(gap):
         """Per finger: inner surface points (world), pad mask and how far the object reaches past each
         point along the finger's opening."""
+        inner = hand.inner(gap)
+        key = id(inner)
+        if key in reached:
+            return reached[key][1]
         fingers = []
-        for sign, points, pads in hand.inner(gap):
+        for sign, points, pads in inner:
             world = points @ tcp[:3, :3].T + tcp[:3, 3]
             low, high = shape.interval((world - origin) @ rotation, direction)
             past = np.where(high >= low, high if sign > 0 else -low, -np.inf)
             fingers.append((sign, world, pads, past))
+        # Retain the source list too: mock or alternate hands may return a new
+        # list on every call, whose id must not be recycled within this search.
+        reached[key] = inner, fingers
         return fingers
 
     def overlap(fingers):
         return sum(float(past.max()) for _, _, _, past in fingers)
 
-    if overlap(reach(open_gap)) >= 0. or overlap(reach(0.)) < 0.:
+    # Compound objects often leave a back-off entirely outside every piece.
+    # Test the fully closed hand first: an empty closing needs no open-hand
+    # rays. Both endpoint predicates and the subsequent search stay identical.
+    if overlap(reach(0.)) < 0. or overlap(reach(open_gap)) >= 0.:
         return None
     low, high = 0., open_gap
     for _ in range(iterations):
@@ -539,9 +875,28 @@ def _close(shape, transform, tcp, hand, open_gap, iterations=9):
     reaches = {sign: float(past.max()) for sign, _, _, past in fingers}
     shift = (reaches[-1.] - reaches[1.]) / 2
     touching = [world[pads & (past + sign * shift >= -CONTACT_TOLERANCE)] for sign, world, pads, past in fingers]
-    if min(len(points) for points in touching) < MIN_PAD_AREA / PAD_SPACING ** 2:
-        return None
-    return float(low), np.vstack(touching).mean(axis=0)
+    enough = lambda points: min(len(side) for side in points) >= hand.min_pad_area / hand.pad_spacing ** 2
+    if check_area and not enough(touching):
+        if not contact_layer:
+            return None
+        # First contact can be a small edge ahead of a broad supporting face.
+        # Equal centring gives each side overlap/2 penetration. Search only
+        # that existing contact layer, on Hand.frames' existing 0.5 mm grid.
+        for candidate_gap in np.r_[np.arange(low - .0005, 0., -.0005), 0.]:
+            candidate_fingers = reach(float(candidate_gap))
+            if overlap(candidate_fingers) > 2 * CONTACT_TOLERANCE:
+                break
+            reaches = {sign: float(past.max()) for sign, _, _, past in candidate_fingers}
+            shift = (reaches[-1.] - reaches[1.]) / 2
+            candidate_touching = [world[pads & (past + sign * shift >= -CONTACT_TOLERANCE)]
+                                  for sign, world, pads, past in candidate_fingers]
+            if enough(candidate_touching):
+                low, touching = float(candidate_gap), candidate_touching
+                break
+        if not enough(touching):
+            return None
+    joined = np.vstack(touching)
+    return float(low), joined.mean(axis=0) if len(joined) else tcp[:3, 3].copy()
 
 
 def _collides(first, second, clearance):

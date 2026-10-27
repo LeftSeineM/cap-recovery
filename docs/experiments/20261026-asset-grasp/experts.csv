@@ -1,0 +1,15 @@
+id,scene,main_commit,commit,pr,command,blas_single_thread,episodes,main_success,branch_success,main_cpu_s,branch_cpu_s,cpu_ratio,main_wall_s,branch_wall_s,wall_ratio,main_load_per_core,branch_load_per_core
+r4,000002,3150aee,25525b2,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,445.875,641.505,1.439,356.732,583.069,1.634,1.74,1.849
+r5,000002,3150aee,663ee81,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,454.716,654.074,1.438,336.26,536.678,1.596,1.501,1.462
+r6,000002,3150aee,5c701a3,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,355.268,1872.939,5.272,219.421,331.775,1.512,1.029,1.045
+r7,000002,3150aee,9743629,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,324.193,403.497,1.245,201.277,281.347,1.398,1.129,1.167
+r8,000002,3150aee,35d2829,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,298.369,365.698,1.226,166.605,230.656,1.384,0.802,0.598
+r9,000000,f5c6be7,7823d31,#54,uv run python scripts/scenes/run_expert.py 000000 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,63.763,68.273,1.071,54.184,57.093,1.054,1.212,0.914
+r9,000002,f5c6be7,7823d31,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,否,20,20,20,352.903,441.383,1.251,206.802,263.99,1.277,1.018,0.823
+r9,000003,f5c6be7,7823d31,#54,uv run python scripts/scenes/run_expert.py 000003 --physics isaac-cpu --dev --seeds 0:20 --input <000003 初态目录>,否,20,20,20,501.606,669.047,1.334,213.819,345.14,1.614,0.866,0.903
+r10,000000,f5c6be7,8d967ea,#54,uv run python scripts/scenes/run_expert.py 000000 --physics isaac-cpu --dev --seeds 0:20,是,20,20,20,57.005,57.171,1.003,49.844,50.548,1.014,0.667,0.672
+r10,000002,f5c6be7,8d967ea,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,是,20,20,20,196.16,248.245,1.266,177.972,228.686,1.285,0.568,0.58
+r10,000003,f5c6be7,8d967ea,#54,uv run python scripts/scenes/run_expert.py 000003 --physics isaac-cpu --dev --seeds 0:20 --input <000003 初态目录>,是,20,20,20,204.456,281.413,1.376,188.716,262.744,1.392,0.541,0.545
+r13,000000,f5c6be7,1397a8b,#54,uv run python scripts/scenes/run_expert.py 000000 --physics isaac-cpu --dev --seeds 0:20,是,20,20,20,60.648,64.885,1.07,55.09,60.113,1.091,1.027,1.111
+r13,000002,f5c6be7,1397a8b,#54,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --seeds 0:20,是,20,20,20,224.094,262.922,1.173,215.493,258.567,1.2,1.02,1.05
+r13,000003,f5c6be7,1397a8b,#54,uv run python scripts/scenes/run_expert.py 000003 --physics isaac-cpu --dev --seeds 0:20 --input <000003 初态目录>,是,20,20,20,233.914,255.676,1.093,225.649,241.584,1.071,0.894,0.753

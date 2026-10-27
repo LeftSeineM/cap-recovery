@@ -82,7 +82,7 @@ def write_episode(path, states, attrs):
 def numpy_state(env):
     """The scene state of ``env`` (environment axis kept) as NumPy, for :func:`write_episode`."""
     def convert(tree):
-        return {key: convert(value) if isinstance(value, dict) else value.cpu().numpy() for key, value in tree.items()}
+        return {key: convert(value) if isinstance(value, dict) else value.cpu().numpy().copy() for key, value in tree.items()}
     return convert(env.env.scene.get_state(is_relative=True))
 
 

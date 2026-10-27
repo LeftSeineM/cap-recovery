@@ -349,3 +349,17 @@ run_batch([0, 1], command=command, key=lambda item: item, missing=lambda _: True
     assert not status.exists() or 'State:\tZ' in status.read_text()
     assert registered(repo) == [f'worktree {repo}']
     assert not list((repo / '.local/batch-checkouts').iterdir())
+
+
+def test_later_phase_reuses_frozen_dirty_source_after_original_changes(repo):
+    (repo / 'table_1000/value.py').write_text("VALUE = 'frozen dirty'\n")
+    result = batch.run_batch([], command=lambda *args: None, missing=lambda _: False,
+                             count=1, gpus=[0], root=repo)
+    assert result.patch
+    (repo / 'table_1000/value.py').write_text("VALUE = 'next task'\n")
+    (repo / 'new.py').write_text('NEXT = True\n')
+    with batch._checkout(repo, source=result) as (frozen, revision, patch):
+        assert revision == result.commit and patch == result.patch
+        assert (frozen / 'table_1000/value.py').read_text() == "VALUE = 'frozen dirty'\n"
+        assert not (frozen / 'new.py').exists()
+    assert (repo / 'new.py').exists()

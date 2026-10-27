@@ -247,11 +247,12 @@ class MotionSolver:
             return {'status': 'path collision', 'reason': 'path collision', 'collisions': pairs}
         return result
 
-    def move_to_pose_with_RRTConnect(self, target, planning_time=3., attempts=3, lift=False, goals=None):
+    def move_to_pose_with_RRTConnect(self, target, planning_time=3., attempts=3, lift=False, goals=None, retime=None):
         """Plan to an IK goal of world TCP pose ``target`` (or to ``goals``, full configurations of
         the planning model) with RRTConnect and follow it; an approximate or colliding path is
         re-planned up to ``attempts`` times, each with twice the time of the one before. ``lift``
-        lets the torso lift move as well: where the goal leaves it where it is (or ``target`` has
+        ``retime`` optionally transforms the validated trajectory before execution.
+        ``lift`` lets the torso lift move as well: where the goal leaves it where it is (or ``target`` has
         an IK solution that does), the plan holds it first, once, and frees it only if that fails."""
         skill = getattr(self.ctx, '_skills', None)
         if lift and skill is not None:
@@ -265,13 +266,14 @@ class MotionSolver:
             if goals is None or all(np.allclose(np.asarray(goal)[self.model.lift_indices()], here, atol=1e-4)
                                     for goal in goals):
                 free = [False, True]
+        timing = {'retime': retime} if retime is not None else {}
         for moving in free[:-1]:
             try:
-                return self._rrt(target, planning_time, 1, moving, goals)
+                return self._rrt(target, planning_time, 1, moving, goals, **timing)
             except PlanningFailed as error:
                 if not error.reason.startswith(('RRTConnect', 'path collision', 'IK Failed')):
                     raise
-        self._rrt(target, planning_time, attempts, free[-1], goals)
+        self._rrt(target, planning_time, attempts, free[-1], goals, **timing)
 
     @timed('departure_check')
     def touching(self):
@@ -301,7 +303,7 @@ class MotionSolver:
                 self.ctx.note('departed', arm=self.arm.name, touched=touched)
                 return
 
-    def _rrt(self, target, planning_time, attempts, lift, goals):
+    def _rrt(self, target, planning_time, attempts, lift, goals, retime=None):
         for attempt in range(attempts):
             try:
                 result = self._plan('rrt', lambda: self._validated(self.model.plan_rrt(
@@ -313,7 +315,7 @@ class MotionSolver:
             except PlanningFailed as error:
                 if not error.reason.startswith(('RRTConnect', 'path collision')) or attempt == attempts - 1:
                     raise
-        self.follow(result)
+        self.follow(retime(result) if retime is not None else result)
 
     def move_to_pose_with_screw(self, target, lift=False):
         """Move the TCP along a straight screw path to world pose ``target``; ``lift`` moves the

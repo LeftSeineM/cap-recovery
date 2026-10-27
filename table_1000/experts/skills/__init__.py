@@ -33,7 +33,8 @@ where its goal leaves it where it is.
 **grasp** -- candidates of the shape at its live pose
 (:func:`~table_1000.experts.grasps.grasp_candidates`, cheapest first: close to the
 ``approach`` direction, default reaching out and down from the arm's shoulder;
-centred on ``point``, default the shape's centre) are tried per arm, the arm whose
+centred on ``point``, default the chosen shape's centre, with the additional
+gravity moment of a free held body scored about its actual COM) are tried per arm, the arm whose
 shoulder is nearer first, in the order above (where none is in reach, the base first moves
 to reach the first ones). Every other planning object is an obstacle of the
 candidates' hand; the ones within ``SUPPORT_DISTANCE`` of the shape are its supports,
@@ -45,10 +46,9 @@ leave straight back ``APPROACH`` from its end, where it lets go (a drawer pulled
 leaves the arm no room to). The hand plans (RRTConnect) to the
 pre-grasp with the fingers open to the object's width plus a margin, moves straight
 in (the only move in which the fingers may touch the object), and closes; the finger
-gap must stop within ``HELD_TOLERANCE`` of the gap at which the pads touch the object,
-and the measured object and hand poses must still meet the candidate's minimum pad-area
-condition, else it backs out, re-observes the object and chooses again (at most
-``MAX_REGRASPS`` times). The grasped part then
+opposing pads must contact the held body and the gap must agree with its actual
+contact surfaces within the geometry error budget, else it backs out, re-observes the
+object and chooses again (at most ``MAX_REGRASPS`` times). The grasped part then
 moves with the hand in the planning world until :func:`release`.
 
 **move_by_displacement** -- the TCP straight by a world displacement, with the torso
@@ -135,7 +135,7 @@ class Skills(Grasping, Handing, Motion, Placing, Base):
         self.ctx, self.model = ctx, ctx.model
         self.arms = list(arms or ctx.spec.arms)
         self.solvers = {arm: ctx.solver(arm) for arm in self.arms}
-        self.hands = {arm: Hand(self.model, arm) for arm in self.arms}
+        self.hands = {arm: Hand(self.model, arm, drive=ctx.env.gripper_drive(arm)) for arm in self.arms}
         for solver in self.solvers.values():
             if 'table' not in solver.world.objects:
                 solver.add_table()

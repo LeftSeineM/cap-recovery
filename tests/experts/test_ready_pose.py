@@ -11,7 +11,7 @@ def test_ready_uses_declared_arm_joints_without_resetting_shared_lift():
     world=SimpleNamespace(objects={'table':object()})
     ctx=SimpleNamespace(model=model,spec=SimpleNamespace(arms={a:SimpleNamespace(joints=[a])for a in names[1:]},
         keyframes={'ready':{'lift':.8,'left':.4,'right':-.4}},base=None),
-        env=SimpleNamespace(joints=names),start={'qpos':initial},scene=SimpleNamespace(OBJECTS={}),
+        env=SimpleNamespace(joints=names, gripper_drive=lambda arm: None),start={'qpos':initial},scene=SimpleNamespace(OBJECTS={}),
         solver=lambda arm:SimpleNamespace(world=world))
     with patch('table_1000.experts.skills.Hand'):
         skills=Skills(ctx)
