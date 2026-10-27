@@ -24,6 +24,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from table_1000.experts.grasps import Box, Cylinder
+from table_1000.experts.runtime import single_threaded_blas
 
 TABLE = {'size': (1.4, .8), 'height': .75, 'top_thickness': .03, 'leg_size': .05, 'center': (0., 0.),
          'friction': (.5, .4)}
@@ -250,11 +251,13 @@ class Evaluator:
         self.random_pushes = random_pushes
         self.profile_enabled = profile
 
+    @single_threaded_blas()
     def trial(self, name, placement, seed, video=None):
         """Pick object ``name`` placed by ``placement`` (see :func:`sample`); returns the report.
         ``video``: an object whose ``capture(caption)`` is called after every step (a frame recorder)."""
         import mplib.pymp
         import torch
+        from threadpoolctl import threadpool_info
         from table_1000.experts.context import Context, ExpertFailed
         from table_1000.experts import skills
         started = time.perf_counter()
@@ -305,6 +308,7 @@ class Evaluator:
             solver.world.clear()
         self.push(name, np.zeros(3))
         report['sim_s'], report['wall_s'] = ctx.steps / 25, time.perf_counter() - started
+        report['native_math_threadpools'] = threadpool_info()
         return report
 
     def push(self, name, force):

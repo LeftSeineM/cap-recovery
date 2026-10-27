@@ -66,5 +66,7 @@ CPU 型号与核数、GPU、并发进程数。
 
 ## 条目列表
 
+- [20261027 专家 episode 单线程 BLAS](20261027-single-thread-blas.md)：Isaac 启动后 BLAS 按 32 线程运行，限制为 1 线程后进程 CPU time 降 48%–65%，wall time 不增加（#85）。
 - [20261026 笔 000002 开启 CCD](20261026-pen-ccd-regression.md)：笔帽钢珠穿过抽屉薄底板、夹住抽屉的修复（#74），CPU time 约增加 3%，GPU 上 CCD 不生效。
 - [20261025 场景 000002 专家迭代](20261025-expert-iteration-000002/README.md)：从 0 到 98% 的迭代历史，失败复现工具前后的对比。
+- [20261024 专家 wall time 优化](20261024-expert-wall-time/README.md)：有界路径简化、碰撞粗筛、运动链 IK 等改进与逐项消融，000002 非 PhysX wall time −45.5%。

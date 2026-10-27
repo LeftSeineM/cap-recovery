@@ -1,0 +1,4 @@
+version,scene,commit,pr,command,episodes,success,cpu_s,nonphysx_wall_s,wall_s,note
+原版,000002,38f3a5d,#78,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --profile --seeds 0:100,100,85,1149.851,584.677,819.454,加了未提交的计时补丁，历史观察
+优化后（MPlib）,000002,dfc697e,#78,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --profile --seeds 0:100 --planner mplib,100,89,532.741,318.912,580.374,
+优化后（VAMP）,000002,dfc697e,#78,uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --profile --seeds 0:100 --planner vamp-no-fallback,100,88,476.263,250.369,488.079,

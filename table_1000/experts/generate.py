@@ -24,6 +24,7 @@ import traceback
 import numpy as np
 
 from table_1000.experts.context import Context, ExpertFailed, Unreachable
+from table_1000.experts.runtime import single_threaded_blas
 from table_1000.scenes import INSTRUCTION, load
 from table_1000.scenes.initial import read_tree, write_tree
 from table_1000.sim import CONTROL_HZ, PHYSICS_DT
@@ -163,6 +164,8 @@ class Generator:
                       steps=[{key: e[key] for key in ('step','name','at','wall_s','cpu_s')} for e in ctx.checkpoints],
                       call_trace=calls, failure_frame=branch_trace['failure_frame'], solve_trace=None,
                       control_steps=ctx.steps, events=deepcopy(ctx.events))
+        from threadpoolctl import threadpool_info
+        report['native_math_threadpools'] = threadpool_info()
         if trace.problems:
             report['solve_trace'] = f'problems/{trace.seed}.json.gz'
             trace.problems.save(directory / report['solve_trace'])
@@ -195,6 +198,7 @@ class Generator:
         ctx.retry_archives.append(archived)
         return archived
 
+    @single_threaded_blas()
     def run(self, seed, attempt, state, start=None, repeat=0):
         """Episode ``seed`` from its initial ``state`` (made by sub-seed ``attempt``), or from a
         checkpoint's with ``start`` the robot where the seed's episode began; its report has the
@@ -203,9 +207,11 @@ class Generator:
         with other random streams, for how its outcome varies: report ``episodes/<seed>-<r>.json``,
         no trajectory and no checkpoints."""
         from table_1000.common.batch import Load
+        from threadpoolctl import threadpool_info
         with Load() as load:
             report, started = self.episode(seed, attempt, state, start, repeat)
-        report.update(load=load.record(), cpu_s=sum(sample['cpu_s'] for sample in load.samples))
+        report.update(load=load.record(), cpu_s=sum(sample['cpu_s'] for sample in load.samples),
+                      native_math_threadpools=threadpool_info())
         return self.save(report, started)
 
     def episode(self, seed, attempt, state, start, repeat):

@@ -34,6 +34,7 @@
 - 子任务起止、每次规划、手指碰过的部件、换用的候选（`ctx.note`）、失败原因（附调用栈）、物体终态；
 - 由步骤组成的专家：每步结束时的控制步、wall time 和进程的 CPU time（秒）（`steps` 的 `at`、`wall_s`、`cpu_s`），每个子任务的 wall time（`subtask_wall_s`）；
 - 负载 `load`（见下文），以及调用帧 `call_trace`、求解记录 `solve_trace` 的相对路径；
+- `native_math_threadpools`：episode 内生效的原生数学线程池快照（`threadpoolctl.threadpool_info()`），包含库路径、接口和 `num_threads`；专家 episode 与抓取评测 trial 的 BLAS 池统一限制为 1 线程；
 - 有限重试丢弃的失败分支 `retry_archives`：每个分支一个相对路径 `attempts/<seed[-r]>/<尝试编号>/`，包括被外层重试再次丢弃的嵌套分支。分支是格式相同的完整批次（轨迹、检查点、调用帧、求解记录、报告），可以直接交给失败快照、离线重解和渲染工具；
 - 开启 `--profile` 时的计时（见[计时](#计时)）。
 
