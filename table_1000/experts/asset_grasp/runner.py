@@ -177,7 +177,13 @@ def run(args, root, jobs, error):
                       'part_heads': 'original per-part full cost stream index; head blocking unchanged'},
                   'closure_gap_tolerance_m': GAP_TOLERANCE,
                   'closure_only_record': True,
-                  'transport_preflight': 'local continuation; transverse, reverse, +X, -X; complete path before execution',
+                  'transport_preflight': 'fixed lift; mixed TCP translation and rotation; single local IK continuation; strongest collision-free complete arm stroke',
+                  'transport_translation_axes': '24 horizontal directions; vertical or 45-degree upward diagonal preserving 50 mm height',
+                  'transport_acceptance': 'measured holding only; TCP strength is informational and never excludes a trial',
+                  'transport_joint_clearance': 'every sampled arm command keeps the existing 0.01 rad arrival tolerance from hard stops; otherwise choose another path or relocate',
+                  'transport_companion': 'joint-bounded instantaneous acceleration allocation; zero-companion alternative',
+                  'transport_time_law': 'TOPPRA outward stroke targeting 95% TCP envelope; stop then retrace',
+                  'transport_rotation_axes': '25 unoriented TCP axes, both signs; strongest complete path',
                   'transport_relocation': {
                       'reference': 'work centre at nominal pick height with measured orientation; declared test keyframe fallback',
                       'planning': 'existing collision-checked RRT; preflight reference and measured arrival',
@@ -230,7 +236,7 @@ def run(args, root, jobs, error):
             if len(reports) != len(seeds):
                 raise RuntimeError(f'{asset}: missing reports')
             for report in reports:
-                if report['status'] in ('error', 'invalid_motion'):
+                if report['status'] == 'error':
                     raise RuntimeError(f'{asset} seed {report["seed"]}: {report["failure"]}')
                 if not (output / asset / report['trajectory']).is_file():
                     raise FileNotFoundError(output / asset / report['trajectory'])
@@ -260,12 +266,12 @@ def run(args, root, jobs, error):
             destination = publish(output / asset, assets, asset, args.robot, args.physics)
             overall['assets'][asset]['results'] = str(destination.relative_to(assets))
     write_json(output / 'summary.json', overall)
-    lines = ['# Asset grasp results', '', '| Asset | Picked | First stable / assessed | Not evaluated | Invalid motion | Rate | Failures |',
-             '| --- | ---: | ---: | ---: | ---: | ---: | --- |']
+    lines = ['# Asset grasp results', '', '| Asset | Picked | First stable / assessed | Not evaluated | Rate | Failures |',
+             '| --- | ---: | ---: | ---: | ---: | --- |']
     for asset, entry in overall['assets'].items():
         reasons = ', '.join(f'{k}: {v}' for k, v in entry['failures'].items())
         rate = f"{entry['rate']:.0%}" if entry['rate'] is not None else 'unassessed'
-        lines.append(f"| {asset} | {entry['picked']}/{len(seeds)} | {entry['first_attempt_success']}/{entry['assessed']} | {entry['not_evaluated']} | {entry['invalid_motion']} | {rate} | {reasons} |")
+        lines.append(f"| {asset} | {entry['picked']}/{len(seeds)} | {entry['first_attempt_success']}/{entry['assessed']} | {entry['not_evaluated']} | {rate} | {reasons} |")
     (output / 'summary.md').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines), flush=True)
     if any(r['status'] != 'PASS' for r in overall['assets'].values()):

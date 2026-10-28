@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from table_1000.common.batch import load_record
-from table_1000.experts.asset_grasp import summarize
+from table_1000.experts.asset_grasp import acceptance_report, summarize
 
 THIN = {'paper_label', 'receipt', 'plastic_scrap', 'wire_scrap', 'zip_bag', 'lab_notebook'}
 
@@ -71,14 +71,14 @@ def compare(baseline, run):
     rows, preferences, loads, old_loads, peaks = [], [], [], [], {}
     for asset, summary in new['assets'].items():
         previous = old['assets'][asset]
-        old_reports = [json.loads(path.read_text()) for path in sorted((baseline / asset / 'trials').glob('*.json'))]
+        old_reports = [acceptance_report(json.loads(path.read_text())) for path in sorted((baseline / asset / 'trials').glob('*.json'))]
         if len(old_reports) != previous['expected']:
             raise ValueError(f'{asset}: incomplete baseline trials')
-        reports = [json.loads(path.read_text()) for path in sorted((run / asset / 'trials').glob('*.json'))]
+        reports = [acceptance_report(json.loads(path.read_text())) for path in sorted((run / asset / 'trials').glob('*.json'))]
         if len(reports) != summary['expected']:
             raise ValueError(f'{asset}: incomplete trials ({len(reports)}/{summary["expected"]})')
-        if sum(report['status'] == 'success' for report in reports) != summary['first_attempt_success']:
-            raise ValueError(f'{asset}: summary disagrees with first-attempt trials')
+        # Older summaries may exclude measured trials for their motion strength.
+        summary = {**summary, **summarize(reports, len(reports))}
         old_by_seed = {report['seed']: report for report in old_reports}
         seeds = {report['seed'] for report in reports}
         if not seeds <= old_by_seed.keys():
@@ -90,7 +90,7 @@ def compare(baseline, run):
         old_first = old_counts['first_attempt_success']
         old_failures = Counter(report.get('failure', {}).get('reason', report['status'])
                                for report in old_reports
-                               if report['status'] not in ('success', 'not_evaluated', 'invalid_motion'))
+                               if report['status'] not in ('success', 'not_evaluated'))
         changes = [{'seed': report['seed'],
             'old_status': old_by_seed[report['seed']]['status'], 'new_status': report['status'],
             'old_reason': old_by_seed[report['seed']].get('failure', {}).get('reason', 'success'),
@@ -127,12 +127,10 @@ def compare(baseline, run):
                      'old_first': old_first, 'old_expected': old_counts['expected'],
                      'old_assessed': old_counts['assessed'],
                      'old_not_evaluated': old_counts['not_evaluated'],
-                     'old_invalid_motion': old_counts['invalid_motion'],
                      'old_failures': dict(old_failures),
                      'new_first': summary['first_attempt_success'], 'new_expected': summary['expected'],
                      'new_assessed': new_counts['assessed'],
                      'not_evaluated': new_counts['not_evaluated'],
-                     'invalid_motion': new_counts['invalid_motion'],
                      'not_evaluated_reasons': summary.get('not_evaluated_reasons', {}),
                      'closure_check': summary.get('closure_check'),
                      'timing': {'baseline': timing(old_reports), 'current': timing(reports)},
@@ -146,8 +144,8 @@ def compare(baseline, run):
         group = [row for row in rows if row['thin'] == thin]
         totals[key] = {'assets': len(group), **{field: sum(row[field] for row in group)
                          for field in ('old_first', 'old_expected', 'old_assessed', 'old_not_evaluated',
-                                       'old_invalid_motion', 'new_first', 'new_expected',
-                                       'new_assessed', 'not_evaluated', 'invalid_motion')}}
+                                       'new_first', 'new_expected',
+                                       'new_assessed', 'not_evaluated')}}
         for field in ('old_failures', 'failures', 'not_evaluated_reasons'):
             counts = Counter()
             for row in group:
@@ -193,17 +191,17 @@ def main(argv=None):
         writer.writeheader()
         writer.writerows(result['preference_data'])
     lines = ['# 首次抓稳逐资产对照', '',
-             '对照两批 conditions.json 核查协议；两侧均扣除未评估与动作无效，并分别保留请求数量。', '',
+             '对照两批 conditions.json 核查协议；两侧均只扣除未执行持物测试的试次；强度仅作信息，分别保留请求数量。', '',
              '按相同 seed 的首次实际状态配对。', '']
     for title, thin in [('非薄物体', False), ('薄物体（#55，仅单列）', True)]:
-        lines.extend([f'## {title}', '', '| 资产 | 旧首次 / 已评估 | 新首次 / 已评估 | 请求数 旧/新 | 未评估 旧/新 | 动作无效 旧/新 | 抓起 | 失败原因 |',
-                      '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |'])
+        lines.extend([f'## {title}', '', '| 资产 | 旧首次 / 已评估 | 新首次 / 已评估 | 请求数 旧/新 | 未评估 旧/新 | 抓起 | 失败原因 |',
+                      '| --- | ---: | ---: | ---: | ---: | ---: | --- |'])
         for row in result['rows']:
             if row['thin'] != thin:
                 continue
             failures = ', '.join(f'{key}: {value}' for key, value in row['failures'].items())
             lines.append(f'| {row["asset"]} | {row["old_first"]}/{row["old_assessed"]} | '
-                         f'{row["new_first"]}/{row["new_assessed"]} | {row["old_expected"]}/{row["new_expected"]} | {row["old_not_evaluated"]}/{row["not_evaluated"]} | {row["old_invalid_motion"]}/{row["invalid_motion"]} | {row["picked"]}/{row["new_expected"]} | {failures} |')
+                         f'{row["new_first"]}/{row["new_assessed"]} | {row["old_expected"]}/{row["new_expected"]} | {row["old_not_evaluated"]}/{row["not_evaluated"]} | {row["picked"]}/{row["new_expected"]} | {failures} |')
         lines.append('')
     lines.extend(['握法偏好数据单列在 `preferences.csv`；它覆盖主尝试及换部位后的尝试，不是验收通过率。', ''])
     (args.output / 'comparison.md').write_text('\n'.join(lines))

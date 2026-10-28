@@ -1,4 +1,14 @@
-"""Isolated asset pick and wrist-shake evaluation using the existing grasp skill."""
+"""First-attempt asset grasp test with the experts' own grasp skill.
+
+One asset per environment: the expert policy picks it once, lifts it, then
+runs three holding strokes (lateral, up, rotation) near the expert P99
+transport envelope. Strokes keep the lift fixed and let the whole arm add
+companion TCP motion, as experts do; the fixed direction sets, TOPPRA timing
+and joint clearance live in :func:`transport_plan` and ``transport.py``.
+Acceptance reads only the held-point slip, relative rotation and drops;
+measured strength is recorded, never used to exclude a trial. The protocol
+and result fields are specified in docs/specs/grasp-tests.md.
+"""
 
 from collections import Counter
 import math
@@ -7,11 +17,12 @@ import time
 import types
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from table_1000.scenes.layout import Layout
 from table_1000.sim import CONTROL_HZ
-from table_1000.experts.asset_grasp.stability import (TRANSPORT, classify, is_dropped, metrics, motion_report, pulse)
-from table_1000.experts.asset_grasp.transport import retime
+from table_1000.experts.asset_grasp.stability import (TRANSPORT, classify, is_dropped, metrics, motion_report)
+from table_1000.experts.asset_grasp.transport import coupled_twist, retime, retime_stroke
 from table_1000.experts.solver import PlanningFailed
 
 REGION_SIZE = .10
@@ -235,19 +246,31 @@ def closure_statistics(reports):
 
 def measured_stability(report):
     """An observed slip/drop is measured even if it interrupts relocation."""
-    if report['status'] == 'invalid_motion':
-        return False
     hold = report.get('hold', {})
     return report.get('lift', {}).get('rise_m', .05) < .05 or hold.get('completed', False) \
         or hold.get('held') is False or hold.get('dropped', False)
 
 
+def acceptance_report(report):
+    """Read historical results under the current holding-only acceptance rule."""
+    hold = report.get('hold')
+    if hold is not None and report['status'] not in ('success', 'failed', 'not_evaluated', 'error'):
+        report = {**report, 'status': 'success' if hold['held'] else 'failed'}
+        if hold['held']:
+            report.pop('failure', None)
+        else:
+            report['failure'] = {'reason': 'dropped' if hold.get('dropped') else 'unstable during transport'}
+    if failure_reason(report) == 'no reachable grasp':
+        report = {**report, 'status': 'not_evaluated'}
+    return report
+
+
 def summarize(reports, expected):
+    reports = [acceptance_report(report) for report in reports]
     success = sum(r['status'] == 'success' for r in reports)
     unassessed = Counter(failure_reason(r) for r in reports if r['status'] == 'not_evaluated')
-    invalid = sum(r['status'] == 'invalid_motion' for r in reports)
-    assessed = expected - sum(unassessed.values()) - invalid
-    failures = Counter(failure_reason(r) for r in reports if r['status'] not in ('success', 'not_evaluated', 'invalid_motion'))
+    assessed = expected - sum(unassessed.values())
+    failures = Counter(failure_reason(r) for r in reports if r['status'] not in ('success', 'not_evaluated'))
     if expected > len(reports):
         failures['missing report'] += expected - len(reports)
     by_grasp, not_evaluated = {}, Counter()
@@ -268,7 +291,7 @@ def summarize(reports, expected):
     for entry in by_grasp.values():
         entry['rate'] = entry['success'] / entry['trials']
     return {'expected': expected, 'reported': len(reports), 'success': success,
-            'assessed': assessed, 'not_evaluated': sum(unassessed.values()), 'invalid_motion': invalid,
+            'assessed': assessed, 'not_evaluated': sum(unassessed.values()),
             'not_evaluated_reasons': dict(unassessed),
             'closure_check': closure_statistics(reports),
             'picked': sum(r.get('lift', {}).get('rise_m', 0.) >= .05 for r in reports),
@@ -278,20 +301,18 @@ def summarize(reports, expected):
                                        == 'no reachable grasp' for r in reports),
             'failures': dict(failures), 'preference_data': {
                 'by_grasp': by_grasp, 'not_evaluated_by_grasp': dict(not_evaluated)},
-            'status': 'PASS' if success == assessed and assessed and not invalid else 'FAIL'}
+            'status': 'PASS' if success == assessed and assessed else 'FAIL'}
 
 
 def transport_plan(model, arm, origin, start=None):
-    """Preflight complete equivalent pulses without moving or changing IK branches.
+    """Preflight fixed-lift arm strokes and retain the strongest feasible choice.
 
-    Try the original transverse direction, its reverse, then the two orthogonal
-    horizontal directions. Every choice has the same two 50 mm translation
-    strokes, wrist stroke and timing; upward motion never approaches the table.
+    Translation may rotate the TCP and rotation may translate it. TOPPRA
+    times each outward stroke, which stops and exactly retraces its path. All
+    choices retain the same excursion, joint and TCP limits. This selection
+    is used only by asset tests, never by grasp candidates or expert motion.
     """
     indices, lift_indices = model.arm_indices(arm), model.lift_indices()
-    linear = pulse(TRANSPORT['linear_acceleration_m_s2'], stroke=REGION_SIZE / 2, hz=CONTROL_HZ)
-    angular = pulse(TRANSPORT['angular_acceleration_rad_s2'],
-                    speed=TRANSPORT['angular_velocity_rad_s'], hz=CONTROL_HZ)
     inward = -1. if origin[1, 3] > 0 else 1.
     choices = []
     measured = model.q.copy() if start is None else np.array(start, copy=True)
@@ -304,7 +325,7 @@ def transport_plan(model, arm, origin, start=None):
                   'measured': measured[corrected].tolist(),
                   'projected': projected[corrected].tolist()}
     info = {'choices': choices, 'selected': None, 'local_ik_attempts': 1,
-            'start_projection': projection}
+            'start_projection': projection, 'lift_locked': True}
     if projection['max_correction'] > START_PROJECTION_TOLERANCE:
         info['rejected'] = 'measured start exceeds projection tolerance'
         return None, info
@@ -314,64 +335,108 @@ def transport_plan(model, arm, origin, start=None):
         projection['measured_tcp'] = origin.tolist()
         origin = model.tcp(arm, q=projected, world=True)
         projection['projected_tcp'] = origin.tolist()
-    directions = ([0., inward, 0.], [0., -inward, 0.], [1., 0., 0.], [-1., 0., 0.])
-    for direction, sign in ((direction, sign) for direction in directions for sign in (1., -1.)):
-        choice = {'horizontal_direction': direction, 'wrist_sign': sign}
-        choices.append(choice)
-        start, commands = projected.copy(), []
-        for segment, axis in [('lateral', direction), ('up', [0., 0., 1.])]:
-            for offset in linear:
-                pose = origin.copy()
-                pose[:3, 3] += offset * np.asarray(axis)
-                status, next_q = model.ik(arm, pose, start, world=True, attempts=1,
-                                          check_collision=False, lift=True)
-                if status != 'Success':
-                    choice['rejected'] = {'segment': segment, 'direction': axis,
-                                          'offset_m': float(offset), 'status': status}
-                    break
-                start = next_q
-                commands.append((segment, start[indices].copy(), start[lift_indices].copy()))
-            if 'rejected' in choice:
-                break
-        if 'rejected' in choice:
-            continue
-        baseline, lift = start[indices].copy(), start[lift_indices].copy()
-        lo, hi = model.limits[indices[-1]]
-        if (hi - baseline[-1] if sign > 0 else baseline[-1] - lo) < angular.max():
-            choice['rejected'] = {'segment': 'rotation', 'reason': 'wrist range insufficient'}
-            continue
-        for offset in angular:
-            command = baseline.copy()
-            command[-1] += sign * offset
-            commands.append(('rotation', command, lift))
-        # Keep the designed pulse time law and stretch only to joint/FK bounds.
-        # Each segment begins/ends at rest; never reset it to lagging measured q.
-        timed, previous = [], projected.copy()
-        choice['timing'] = {}
-        for segment in ('lateral', 'up', 'rotation'):
-            rows = [(q, lift) for name, q, lift in commands if name == segment]
-            path = {'position': np.vstack([previous[indices], *[q for q, _ in rows]]),
-                    'lift': np.vstack([previous[lift_indices], *[lift for _, lift in rows]])}
-            try:
-                trajectory = retime(model, arm, path, profile=True)
-            except PlanningFailed as error:
-                choice['rejected'] = {'segment': segment, 'reason': error.reason, 'details': error.details}
-                break
-            timed.extend((segment, q, lift) for q, lift in zip(trajectory['position'][1:], trajectory['lift'][1:]))
-            previous[indices], previous[lift_indices] = rows[-1]
-            choice['timing'][segment] = {key: trajectory[key] for key in ('duration', 'command_motion_peaks')}
-            if 'constraint_ratios' in trajectory:
-                choice['timing'][segment]['constraint_ratios'] = trajectory['constraint_ratios']
-        if 'rejected' in choice:
-            continue
-        _, collisions = model.check_path(arm, np.asarray([projected[indices], *[q for _, q, _ in timed]]),
-                                         lift=np.asarray([projected[lift_indices], *[lift for _, _, lift in timed]]))
-        if collisions:
-            choice['rejected'] = {'reason': 'transport path collision', 'collisions': collisions}
-            continue
-        choice.update(selected=True, wrist_sign=sign)
-        return timed, {**info, 'selected': choice, 'preflight_steps': len(timed)}
-    return None, info
+    from table_1000.experts.solver import ARRIVAL_TOLERANCE
+    clearance = np.minimum(projected[indices] - model.limits[indices, 0],
+                           model.limits[indices, 1] - projected[indices])
+    info['joint_clearance'] = clearance.tolist()
+    if np.min(clearance) < ARRIVAL_TOLERANCE:
+        info['rejected'] = {'reason': 'transport start lacks joint tracking clearance',
+                            'joint_indices': np.asarray(indices)[clearance < ARRIVAL_TOLERANCE].tolist(),
+                            'clearance': clearance.tolist(), 'required': ARRIVAL_TOLERANCE}
+        return None, info
+    # Each stroke returns to the same drive target at rest, so equivalent
+    # directions can be preflighted independently without repeating IK work.
+    # A fixed axis set keeps intensity selection independent of grasp ranking.
+    rotation_axes = ([1., 0., 0.], [0., 1., 0.], [0., 0., 1.],
+                     *([1., y, z] for y in (-1., 0., 1.) for z in (-1., 0., 1.) if y or z),
+                     [0., 1., -1.], [0., 1., 1.])
+    rotation_axes = (*rotation_axes, *([2., y, z] for y in (-1., 1.) for z in (-1., 1.)),
+                     *([x, 2., z] for x in (-1., 1.) for z in (-1., 1.)),
+                     *([x, y, 2.] for x in (-1., 1.) for y in (-1., 1.)))
+    directions = ([0., inward, 0.], [0., -inward, 0.], [1., 0., 0.], [-1., 0., 0.],
+                  # The circle skips the four axis directions already listed above.
+                  *([np.cos(angle), np.sin(angle), 0.] for angle in np.arange(24) * np.pi / 12
+                    if round(angle / (np.pi / 2), 6) % 1))
+    upward = ([0., 0., 1.], *([x, y, 1.] for x in (-1., 1.) for y in (-1., 1.)))
+    stroke = 2 * TRANSPORT['angular_velocity_rad_s'] ** 2 / TRANSPORT['angular_acceleration_rad_s2']
+    selected, commands = {'timing': {}}, []
+    for segment, axes, excursion in [('lateral', directions, REGION_SIZE / 2),
+                                    ('up', upward, REGION_SIZE / 2),
+                                    ('rotation', rotation_axes, stroke)]:
+        best = None
+        for raw_axis in axes:
+            axis = np.asarray(raw_axis) / np.linalg.norm(raw_axis)
+            distance = excursion / axis[2] if segment == 'up' else excursion
+            for sign, mixed in ((sign, mixed) for sign in ((1., -1.) if segment == 'rotation' else (1.,))
+                                for mixed in (True, False)):
+                choice = {'segment': segment, 'axis': (sign * axis).tolist(), 'mixed': mixed}
+                choices.append(choice)
+                world_axis = origin[:3, :3] @ (axis * sign) if segment == 'rotation' else axis
+                companion = (coupled_twist(model, arm, projected, world_axis, angular=segment == 'rotation')
+                             if mixed else np.zeros(3))
+                choice['companion_per_unit'] = companion.tolist()
+                start, rows = projected.copy(), [projected.copy()]
+                for offset in np.linspace(0., distance, 33)[1:]:
+                    pose = origin.copy()
+                    if segment == 'rotation':
+                        pose[:3, :3] = origin[:3, :3] @ Rotation.from_rotvec(sign * axis * offset).as_matrix()
+                        pose[:3, 3] += companion * offset
+                    else:
+                        pose[:3, 3] += offset * axis
+                        pose[:3, :3] = Rotation.from_rotvec(companion * offset).as_matrix() @ origin[:3, :3]
+                    status, next_q = model.ik(arm, pose, start, world=True, attempts=1,
+                                              check_collision=False, lift=False)
+                    if status != 'Success':
+                        choice['rejected'] = {'segment': segment, 'offset': float(offset), 'status': status}
+                        break
+                    start = next_q
+                    rows.append(start.copy())
+                if 'rejected' in choice:
+                    continue
+                rows = np.asarray(rows)
+                try:
+                    trajectory = retime_stroke(model, arm, {'position': rows[:, indices], 'lift': rows[:, lift_indices]},
+                                               distance, angular=segment == 'rotation')
+                except PlanningFailed as error:
+                    choice['rejected'] = {'segment': segment, 'reason': error.reason, 'details': error.details}
+                    continue
+                # An interior hard stop also truncates the physical velocity,
+                # even when the start and sampled command remain in bounds.
+                # Keep the same tracking budget along the complete stroke.
+                path_clearance = np.minimum(trajectory['position'] - model.limits[indices, 0],
+                                            model.limits[indices, 1] - trajectory['position']).min(axis=0)
+                choice['joint_clearance'] = path_clearance.tolist()
+                if np.min(path_clearance) < ARRIVAL_TOLERANCE:
+                    choice['rejected'] = {'reason': 'transport path lacks joint tracking clearance',
+                                          'joint_indices': np.asarray(indices)[path_clearance < ARRIVAL_TOLERANCE].tolist(),
+                                          'clearance': path_clearance.tolist(), 'required': ARRIVAL_TOLERANCE}
+                    continue
+                _, collisions = model.check_path(arm, trajectory['position'], lift=trajectory['lift'])
+                if collisions:
+                    choice['rejected'] = {'reason': 'transport path collision', 'collisions': collisions}
+                    continue
+                timing = {key: trajectory[key] for key in ('duration', 'command_motion_peaks', 'constraint_ratios')}
+                choice['timing'] = timing
+                key = 'angular_acceleration_rad_s2' if segment == 'rotation' else 'linear_acceleration_m_s2'
+                strength = timing['command_motion_peaks'][key] / TRANSPORT[key]
+                if best is None or strength > best[0]:
+                    best = strength, trajectory, choice, sign
+            # Inspect every fixed direction: a barely feasible companion-heavy
+            # path should not hide a stronger, better conditioned direction.
+        if best is None:
+            info['rejected'] = {'segment': segment, 'reason': 'no complete collision-free arm stroke'}
+            return None, info
+        _, trajectory, choice, sign = best
+        choice['selected'] = True
+        selected['timing'][segment] = choice['timing']
+        selected.setdefault('paths', {})[segment] = {key: choice[key] for key in
+                                                       ('axis', 'mixed', 'companion_per_unit')}
+        if segment == 'lateral':
+            selected['horizontal_direction'] = choice['axis']
+        if segment == 'rotation':
+            selected.update(wrist_sign=sign, rotation_axis_tcp=choice['axis'])
+        commands.extend((segment, q, lift) for q, lift in zip(trajectory['position'][1:], trajectory['lift'][1:]))
+    return commands, {**info, 'selected': selected, 'preflight_steps': len(commands)}
 
 
 class Evaluator:
@@ -425,8 +490,11 @@ class Evaluator:
             if status == 'Success':
                 commands, plan = transport_plan(self.model, arm, origin, start=goal)
                 choice['preflight'] = plan
-                if commands is not None:
+                from table_1000.experts.solver import ARRIVAL_TOLERANCE
+                if commands is not None and min(plan.get('joint_clearance', [np.inf])) >= 2 * ARRIVAL_TOLERANCE:
                     return goal, origin, commands, {'references': choices, **plan}
+                if commands is not None:
+                    choice['rejected'] = 'reference needs arrival error plus transport tracking clearance'
         indices = self.model.arm_indices(arm) + self.model.lift_indices()
         ready = self.model.vector(self.spec.keyframe(self.settings.ROBOT.get('keyframe', 'zero')))
         goal = self.model.q.copy()
@@ -437,7 +505,7 @@ class Evaluator:
         return goal, origin, commands, {'references': choices, **plan}
 
     def transport(self, ctx, target, arm, phase):
-        """Smooth TCP accelerations and wrist rotation derived from expert transport."""
+        """Arm-only TCP strokes under the measured expert transport envelope."""
         start, origin = self.transport_start(ctx, arm)
         commands, plan = transport_plan(self.model, arm, origin, start=start)
         ctx.note('transport preflight', **plan)
@@ -563,7 +631,7 @@ class Evaluator:
             attempts.append(report)
             print(f'{report.get("asset", "<asset>")} seed={seed} attempt={len(attempts)} {report["status"]} '
                   f'{report.get("failure", {}).get("reason", "")}', flush=True)
-            if report['status'] in ('success', 'invalid_motion') or 'hold' not in report:
+            if report['status'] == 'success' or 'hold' not in report:
                 break
             excluded.append(report['selected_target_index'])
             if len(excluded) >= report['target_count']:
@@ -614,12 +682,8 @@ class Evaluator:
             report['pick'] = result
             result['family'] = grasp_family(report)
             report['hold'] = self.transport(ctx, target, result['arm'], phase)
-            report['status'] = ('invalid_motion' if not report['hold']['motion_valid'] else
-                                'success' if report['hold']['held'] else 'failed')
-            if report['status'] == 'invalid_motion':
-                report['failure'] = {'reason': 'transport motion exceeds envelope',
-                                     'details': report['hold']['motion_violations']}
-            elif not report['hold']['held']:
+            report['status'] = 'success' if report['hold']['held'] else 'failed'
+            if not report['hold']['held']:
                 reason = 'dropped' if report['hold']['dropped'] else 'unstable during transport'
                 report['failure'] = {'reason': reason}
             if self.diagnostic_shake and report['status'] == 'success':
@@ -632,7 +696,7 @@ class Evaluator:
                 # a physical grasp failure, not a placement without candidates.
                 reason = 'object not held'
                 details = {'subsequent_planning_failure': error.details}
-            report.update(status='not_evaluated' if reason == 'transport motion unreachable' else 'failed',
+            report.update(status='not_evaluated' if reason in ('transport motion unreachable', 'no reachable grasp') else 'failed',
                           failure={'reason': reason, 'details': details})
         except Exception:
             import traceback

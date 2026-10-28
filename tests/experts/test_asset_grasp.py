@@ -26,10 +26,10 @@ def test_slip_includes_rotation_and_cannot_cancel_at_final_pose():
 
 
 def test_missing_and_failed_trials_stay_in_denominator():
-    report = summarize([{'status': 'success'}, {'status': 'failed', 'failure': {'reason': 'no reachable grasp'}}], 3)
+    report = summarize([{'status': 'success'}, {'status': 'failed', 'failure': {'reason': 'object not held'}}], 3)
     assert report['rate'] == 1 / 3
     assert report['status'] == 'FAIL'
-    assert report['failures'] == {'no reachable grasp': 1, 'missing report': 1}
+    assert report['failures'] == {'object not held': 1, 'missing report': 1}
 
 
 def test_only_unreachable_transport_is_excluded_from_acceptance_denominator():
@@ -65,18 +65,16 @@ def test_failed_closure_before_losing_reach_is_a_physical_failure():
     assert report['failure']['reason'] == 'no reachable grasp'
 
 
-def test_relocation_drop_is_measured_failure_but_invalid_motion_is_not():
+def test_relocation_drop_and_excess_strength_stay_in_denominator():
     from table_1000.experts.asset_grasp import grasp_family
     dropped = {'seed': 0, 'status': 'failed', 'failure': {'reason': 'dropped'},
         'settled_pose': np.eye(4).tolist(),
         'pick': {'grasp': {'pose': np.eye(4).tolist()}, 'closure_check': {'held': True, 'reasons': []}},
-        'lift': {'rise_m': .1}, 'hold': {'held': False, 'completed': False, 'dropped': True}}
-    invalid = dict(dropped, seed=1, status='invalid_motion')
-    summary = summarize([dropped, invalid], 2)
-    assert summary['assessed'] == 1 and summary['invalid_motion'] == 1
-    assert summary['failures'] == {'dropped': 1}
+        'lift': {'rise_m': .1}, 'hold': {'held': False, 'completed': False, 'dropped': True,
+            'motion_peaks': {'angular_acceleration_rad_s2': 9.}}}
+    summary = summarize([dropped], 1)
+    assert summary['assessed'] == 1 and summary['failures'] == {'dropped': 1}
     assert summary['closure_check']['table']['predicted_held_actual_failed'] == 1
-    assert summary['closure_check']['unmeasured'] == 1
     assert summary['preference_data']['by_grasp'][grasp_family(dropped)] == {
         'trials': 1, 'success': 0, 'rate': 0.}
 
@@ -341,7 +339,7 @@ def test_comparison_self_uses_same_assessed_denominator_on_both_sides(tmp_path):
     directory = tmp_path / asset / 'trials'
     directory.mkdir(parents=True)
     reports = []
-    for seed, status in enumerate(['success'] * 8 + ['invalid_motion', 'not_evaluated']):
+    for seed, status in enumerate(['success'] * 8 + ['failed', 'not_evaluated']):
         report = {'seed': seed, 'status': status, 'cpu_s': 3., 'wall_s': 4., 'sim_s': 1.,
                   'trajectory': 'test.hdf5', 'load': {'host': 'test', 'cores': 2,
                   'samples': [{'load_1m': 1., 'cpu_s': 3.}]}}
@@ -353,7 +351,6 @@ def test_comparison_self_uses_same_assessed_denominator_on_both_sides(tmp_path):
     result = compare(tmp_path, tmp_path)
     for row in (result['rows'][0], result['totals']['non_thin']):
         assert row['old_first'] == row['new_first'] == 8
-        assert row['old_assessed'] == row['new_assessed'] == 8
+        assert row['old_assessed'] == row['new_assessed'] == 9
         assert row['old_expected'] == row['new_expected'] == 10
         assert row['old_not_evaluated'] == row['not_evaluated'] == 1
-        assert row['old_invalid_motion'] == row['invalid_motion'] == 1

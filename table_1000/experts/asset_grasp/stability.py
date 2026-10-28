@@ -32,8 +32,7 @@ def motion_report(trace, dt):
     even when a segment is shorter than the three samples needed for acceleration.
     """
     if len(trace) < 3:
-        return {'motion_peaks': {}, 'segment_motion_peaks': {}, 'motion_valid': True,
-                'motion_violations': {}}
+        return {'motion_peaks': {}, 'segment_motion_peaks': {}}
     poses = np.asarray([row['tcp_pose'] for row in trace])
     def peaks(rows):
         return {key: float(np.max(value)) for key, value in motion(rows, dt).items() if key in MOTION_LIMITS}
@@ -41,10 +40,8 @@ def motion_report(trace, dt):
     for segment in dict.fromkeys(row['segment'] for row in trace):
         indices = [i for i, row in enumerate(trace) if row['segment'] == segment]
         segments[segment] = peaks(poses[max(0, indices[0] - 2):min(len(poses), indices[-1] + 3)])
-    violations = {key: value for key, value in overall.items()
-                  if value > MOTION_LIMITS[key] + MOTION_TOLERANCE[key]}
-    return {'motion_peaks': overall, 'segment_motion_peaks': segments,
-            'motion_valid': not violations, 'motion_violations': violations}
+    return {'motion_peaks': overall, 'segment_motion_peaks': segments}
+
 
 
 def is_dropped(translation, height_loss, finger_contact):
@@ -72,19 +69,6 @@ def classify(trace, completed=True):
         and maximum['rotation_rad'] <= ROTATION_LIMIT
     return {'held': bool(held), 'dropped': dropped, 'completed': completed,
             **{'max_' + key: value for key, value in maximum.items()}, 'trace': trace}
-
-
-def pulse(acceleration, *, speed=None, stroke=None, hz=25):
-    """Raised cosine, rest to rest. Round duration up so sampled limits never increase.
-
-    x=A(1-cos(w*t)); a_peak=A*w², v_peak=A*w. Specify a speed
-    envelope or a bounded stroke; the other follows without a tuned time.
-    """
-    amplitude = speed ** 2 / acceleration if speed is not None else stroke / 2
-    seconds = 2 * np.pi * np.sqrt(amplitude / acceleration)
-    count = int(np.ceil(seconds * hz))
-    time = np.arange(1, count + 1) / hz
-    return amplitude * (1 - np.cos(2 * np.pi * time / (count / hz)))
 
 
 def motion(poses, dt):

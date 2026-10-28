@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.asset_grasp.stability import TRANSPORT, classify, is_dropped, metrics, motion, pulse
+from table_1000.experts.asset_grasp.stability import TRANSPORT, classify, is_dropped, metrics, motion
 from table_1000.experts.grasps import Box
 
 
@@ -13,8 +13,16 @@ def geometric_preflight(monkeypatch):
     # These fake IK models test reachability and execution boundaries. The real
     # TOPPRA/FK constraints have their own regression below.
     import table_1000.experts.asset_grasp as evaluation
-    monkeypatch.setattr(evaluation, 'retime', lambda model, arm, result, **kwargs: {
-        **result, 'duration': (len(result['position']) - 1) / 25, 'command_motion_peaks': {}})
+    def stroke(model, arm, result, excursion, **kwargs):
+        rows = np.asarray(result['position'])
+        lift = np.asarray(result['lift'])
+        return {**result, 'position': np.vstack([rows, rows[-2::-1]]),
+                'lift': np.vstack([lift, lift[-2::-1]]),
+                'duration': 2 * (len(rows) - 1) / 25,
+                'command_motion_peaks': dict(linear_acceleration_m_s2=1.0, angular_acceleration_rad_s2=2.9),
+                'constraint_ratios': {}}
+    monkeypatch.setattr(evaluation, 'retime_stroke', stroke)
+    monkeypatch.setattr(evaluation, 'coupled_twist', lambda *a, **kw: np.zeros(3))
     original_plan = evaluation.transport_plan
     def plan(model, *args, **kwargs):
         if not hasattr(model, 'check_path'):
@@ -55,15 +63,7 @@ def test_dropped_requires_lost_finger_contact_and_large_separation():
     assert is_dropped(.001, .051, False)
 
 
-def test_profile_and_measured_derivatives_respect_expert_envelope():
-    for acceleration, speed, stroke in [
-        (TRANSPORT['linear_acceleration_m_s2'], None, .05),
-        (TRANSPORT['angular_acceleration_rad_s2'], TRANSPORT['angular_velocity_rad_s'], None)]:
-        positions = np.r_[0., pulse(acceleration, speed=speed, stroke=stroke)]
-        assert positions[-1] == pytest.approx(0.)
-        assert abs(np.diff(positions, n=2)).max() * 25 ** 2 <= acceleration
-        if speed:
-            assert abs(np.diff(positions)).max() * 25 <= speed
+def test_measured_derivatives():
     t = np.arange(10) / 25
     poses = np.tile(np.eye(4), (len(t), 1, 1))
     poses[:, 0, 3] = .5 * 2 * t ** 2
@@ -79,7 +79,8 @@ def test_transport_does_not_reset_command_to_lagging_measurement_at_segment_boun
     evaluator = Evaluator.__new__(Evaluator)
     model = types.SimpleNamespace(q=np.array([.1, .1]), limits=np.array([[-3., 3.], [-3., 3.]]),
              arm_indices=lambda arm: [0], lift_indices=lambda: [1])
-    model.ik = lambda arm, pose, start, **kw: ('Success', np.array([pose[1, 3] + .15, pose[2, 3]]))
+    model.ik = lambda arm, pose, start, **kw: ('Success', np.array([
+        pose[1, 3] + .25 + Rotation.from_matrix(pose[:3, :3]).as_rotvec()[0], start[1]]))
     evaluator.model = model
     evaluator.spec = types.SimpleNamespace(arms={'right': types.SimpleNamespace(finger_links=['l', 'r'])})
     tcp = np.eye(4)
@@ -100,7 +101,7 @@ def test_transport_does_not_reset_command_to_lagging_measurement_at_segment_boun
     ctx.hold = lambda seconds: [step() for _ in range(round(seconds * 25))]
     evaluator.transport(ctx, types.SimpleNamespace(body='object:body'), 'right', phase)
     i = next(i for i, (segment, _) in enumerate(commands) if segment == 'transport rotation')
-    expected = pulse(TRANSPORT['angular_acceleration_rad_s2'], speed=TRANSPORT['angular_velocity_rad_s'])[0]
+    expected = 2 * TRANSPORT['angular_velocity_rad_s'] ** 2 / TRANSPORT['angular_acceleration_rad_s2'] / 32
     assert commands[i][1] - commands[i - 1][1] == pytest.approx(expected)
     assert not ctx.observers
 
@@ -163,8 +164,8 @@ def test_preflight_discards_whole_choice_when_later_segment_fails():
     model.ik = ik
     commands, plan = transport_plan(model, 'right', np.eye(4))
     assert commands is None and plan['selected'] is None
-    assert len(plan['choices']) == 8
-    assert all(choice['rejected']['segment'] == 'up' for choice in plan['choices'])
+    assert len(plan['choices']) == 58
+    assert plan['choices'][-1]['rejected']['segment'] == 'up'
 
 
 def test_preflight_projects_small_start_overshoot_and_its_tcp_without_changing_limits():
@@ -187,7 +188,7 @@ def test_preflight_projects_small_start_overshoot_and_its_tcp_without_changing_l
         return ('Success', start.copy()) if pose[0, 3] <= 3. else ('IK Failed', None)
     model.ik = ik
     commands, plan = transport_plan(model, 'right', origin)
-    assert commands and plan['selected']['horizontal_direction'] == [0., 1., 0.]
+    assert commands is None and plan['rejected']['reason'] == 'transport start lacks joint tracking clearance'
     assert plan['start_projection']['max_correction'] == pytest.approx(.0002)
     np.testing.assert_array_equal(model.q, measured)
     np.testing.assert_array_equal(model.limits, limits)
@@ -202,6 +203,21 @@ def test_preflight_does_not_project_a_start_outside_the_tracking_budget():
     commands, plan = transport_plan(model, 'right', np.eye(4))
     assert commands is None and not plan['choices']
     assert plan['rejected'] == 'measured start exceeds projection tolerance'
+
+
+def test_preflight_rejects_interior_hard_stop_despite_safe_start():
+    from table_1000.experts.asset_grasp import transport_plan
+    model = types.SimpleNamespace(q=np.zeros(2), limits=np.array([[-1.01, 1.01], [-3., 3.]]),
+        arm_indices=lambda arm: [0], lift_indices=lambda: [1],
+        ik=lambda arm, pose, start, **kw: ('Success', np.array([
+            Rotation.from_matrix(pose[:3, :3]).magnitude(), 0.])))
+    commands, plan = transport_plan(model, 'right', np.eye(4))
+    assert commands is None and plan['rejected']['segment'] == 'rotation'
+    assert plan['joint_clearance'] == [1.01]
+    rotations = [c for c in plan['choices'] if c['segment'] == 'rotation']
+    assert rotations and all(c['rejected']['reason'] == 'transport path lacks joint tracking clearance'
+                             for c in rotations)
+    assert all(0. < min(c['rejected']['clearance']) < .01 for c in rotations)
 
 
 def test_transport_reference_preserves_other_arm_and_closed_fingers(monkeypatch):
@@ -333,7 +349,7 @@ def test_retimed_ik_jitter_respects_joint_and_tcp_envelopes():
     assert all(measured[key].max() <= limit for key, limit in MOTION_LIMITS.items())
 
 
-def test_motion_validation_catches_a_boundary_spike_and_records_each_segment():
+def test_motion_report_records_boundary_spike_without_acceptance_gate():
     from table_1000.experts.asset_grasp.stability import motion_report
     trace = []
     for x, segment in [(0., 'relocation'), (0., 'relocation'), (.02, 'lateral'), (.02, 'lateral')]:
@@ -341,8 +357,7 @@ def test_motion_validation_catches_a_boundary_spike_and_records_each_segment():
         pose[0, 3] = x
         trace.append({'tcp_pose': pose.tolist(), 'segment': segment})
     report = motion_report(trace, 1 / 25)
-    assert not report['motion_valid']
-    assert 'linear_acceleration_m_s2' in report['motion_violations']
+    assert report['motion_peaks']['linear_acceleration_m_s2'] > TRANSPORT['linear_acceleration_m_s2']
     assert set(report['segment_motion_peaks']) == {'relocation', 'lateral'}
 
 
@@ -357,58 +372,12 @@ def test_transport_entry_keeps_loaded_drive_targets():
     np.testing.assert_array_equal(evaluator.model.q, [.09, .19, .3])
 
 
-@pytest.mark.parametrize('angular', [False, True])
-def test_designed_tcp_pulse_reaches_envelope_without_second_time_law(angular):
-    from table_1000.experts.asset_grasp.transport import retime
-    from table_1000.experts.asset_grasp.stability import MOTION_LIMITS
-    planner = types.SimpleNamespace(joint_vel_limits=np.array([2.]), joint_acc_limits=np.array([5.]),
-        TOPP=lambda *args: pytest.fail('a designed time law must not be replaced by TOPPRA'))
-    key = 'angular_acceleration_rad_s2' if angular else 'linear_acceleration_m_s2'
-    positions = np.r_[0., pulse(MOTION_LIMITS[key], **(
-        {'speed': MOTION_LIMITS['angular_velocity_rad_s']} if angular else {'stroke': .05}))]
-    def tcp(arm, q, world):
-        pose = np.eye(4)
-        if angular:
-            pose[:3, :3] = Rotation.from_rotvec([0., 0., q[0]]).as_matrix()
-        else:
-            pose[0, 3] = q[0]
-        return pose
-    model = types.SimpleNamespace(q=np.zeros(1), limits=np.array([[-2., 2.]]),
-        arm_indices=lambda arm: [0], lift_indices=lambda: [], planners={'right': planner}, tcp=tcp)
-    result = retime(model, 'right', {'position': positions[:, None]}, profile=True)
-    ratio = result['command_motion_peaks'][key] / MOTION_LIMITS[key]
-    assert .9 <= ratio <= 1.
-    assert result['duration'] == pytest.approx((len(positions) - 1) / 25)
-    np.testing.assert_allclose(result['position'][:, 0], positions, atol=1e-15)
-
-
-def test_designed_profile_uses_first_feasible_control_step_for_joint_limit():
-    from table_1000.experts.asset_grasp.transport import retime
-    from table_1000.experts.asset_grasp.stability import MOTION_LIMITS
-    acceleration = MOTION_LIMITS['linear_acceleration_m_s2']
-    positions = np.r_[0., pulse(acceleration, stroke=.05)]
-    planner = types.SimpleNamespace(joint_vel_limits=np.array([.08]), joint_acc_limits=np.array([5.]))
-    def tcp(arm, q, world):
-        pose = np.eye(4)
-        pose[0, 3] = q[0]
-        return pose
-    model = types.SimpleNamespace(q=np.zeros(1), limits=np.array([[-2., 2.]]),
-        arm_indices=lambda arm: [0], lift_indices=lambda: [], planners={'right': planner}, tcp=tcp)
-    result = retime(model, 'right', {'position': positions[:, None]}, profile=True)
-    rows = result['position'][:, 0]
-    assert np.abs(np.diff(rows)).max() * 25 <= .08
-    from scipy.interpolate import CubicSpline
-    previous = CubicSpline(np.linspace(0., 1., len(positions)), positions, bc_type='clamped')(
-        np.linspace(0., 1., len(rows) - 1))
-    assert np.abs(np.diff(previous)).max() * 25 > .08
-    assert result['command_motion_peaks']['linear_acceleration_m_s2'] / acceleration < .9
-
-
 def test_transport_preflight_rejects_carried_object_collision_and_tries_other_wrist_side():
     from table_1000.experts.asset_grasp import transport_plan
     model = types.SimpleNamespace(q=np.zeros(2), limits=np.array([[-3., 3.], [-3., 3.]]),
         arm_indices=lambda arm: [0], lift_indices=lambda: [1],
-        ik=lambda arm, pose, start, **kw: ('Success', np.array([0., pose[2, 3]])))
+        ik=lambda arm, pose, start, **kw: ('Success', np.array([
+            Rotation.from_matrix(pose[:3, :3]).as_rotvec()[0], start[1]])))
     paths = []
     def check(arm, rows, lift):
         paths.append(rows)
@@ -416,5 +385,56 @@ def test_transport_preflight_rejects_carried_object_collision_and_tries_other_wr
     model.check_path = check
     commands, plan = transport_plan(model, 'right', np.eye(4))
     assert commands and plan['selected']['wrist_sign'] == -1.
-    assert plan['choices'][0]['rejected']['reason'] == 'transport path collision'
-    assert np.max(paths[0]) > .5 and np.min(paths[1]) < -.5
+    assert any(c.get('rejected', {}).get('reason') == 'transport path collision' for c in plan['choices'])
+    assert any(np.max(p) > .5 for p in paths) and any(np.min(p) < -.5 for p in paths)
+
+
+@pytest.mark.parametrize('angular', [False, True])
+def test_toppra_stroke_uses_whole_arm_and_keeps_lift_fixed(angular):
+    from table_1000.experts.asset_grasp.transport import retime_stroke
+    from table_1000.experts.asset_grasp.stability import MOTION_LIMITS
+    # Two joints contribute equally; neither alone reaches the TCP envelope.
+    scale = 1. if angular else .5
+    def tcp(arm, q, world):
+        pose = np.eye(4)
+        if angular:
+            pose[:3, :3] = Rotation.from_rotvec([0., 0., scale * (q[1] + q[2])]).as_matrix()
+        else:
+            pose[2, 3] = scale * (q[1] + q[2])
+        return pose
+    planner = types.SimpleNamespace(joint_vel_limits=np.array([.1, .8, .8]),
+                                    joint_acc_limits=np.array([.2, 1.5, 1.5]))
+    model = types.SimpleNamespace(q=np.array([.3, 0., 0.]), joints=['lift', 'shoulder', 'elbow'],
+        limits=np.array([[0., 1.], [-2., 2.], [-2., 2.]]),
+        arm_indices=lambda arm: [1, 2], lift_indices=lambda: [0], planners={'right': planner}, tcp=tcp)
+    excursion = 1. if angular else .05
+    coordinate = np.linspace(0., excursion, 33)
+    path = {'position': np.c_[coordinate, coordinate] / (2 * scale),
+            'lift': np.full((33, 1), .3)}
+    result = retime_stroke(model, 'right', path, excursion, angular=angular)
+    np.testing.assert_allclose(result['lift'], .3)
+    np.testing.assert_allclose(result['position'][[0, -1]], 0., atol=1e-12)
+    np.testing.assert_allclose(result['position'].max(axis=0), excursion / (2 * scale))
+    assert max(result['constraint_ratios']['joint_velocity']) <= 1.000001
+    assert max(result['constraint_ratios']['joint_acceleration']) <= 1.000001
+    assert max(result['constraint_ratios']['tcp'].values()) <= 1.000001
+    key = 'angular_acceleration_rad_s2' if angular else 'linear_acceleration_m_s2'
+    assert result['command_motion_peaks'][key] / MOTION_LIMITS[key] >= .9
+    np.testing.assert_array_equal(model.q, [.3, 0., 0.])
+
+
+def test_coupled_twist_uses_whole_arm_without_freeing_lift():
+    from table_1000.experts.asset_grasp.transport import coupled_twist
+    initial = np.array([.4, 0., 0.])
+    def tcp(arm, q, **kwargs):
+        pose = np.eye(4)
+        pose[0, 3] = .2 * (q[1] + q[2])
+        pose[:3, :3] = Rotation.from_rotvec([q[1], q[2], 0.]).as_matrix()
+        assert q[0] == initial[0]
+        return pose
+    model = types.SimpleNamespace(q=initial.copy(), arm_indices=lambda arm: [1, 2],
+             lift_indices=lambda: [0], tcp=tcp,
+             planners={'right': types.SimpleNamespace(joint_acc_limits=np.array([.2, 1.5, 1.5]))})
+    companion = coupled_twist(model, 'right', initial, np.array([1., 0., 0.]))
+    np.testing.assert_allclose(companion, [2.5, 2.5, 0.], atol=1e-4)
+    np.testing.assert_array_equal(model.q, initial)
