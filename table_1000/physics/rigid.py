@@ -83,3 +83,29 @@ def common_parent(prims):
     while not all(path.HasPrefix(parent) for path in paths):
         parent = parent.GetParentPath()
     return prims[0].GetStage().GetPrimAtPath(parent)
+
+
+def body_mapping(stage, paths, model):
+    """Map each model body to its surviving physics body and ``T_physics_model``.
+
+    Read the composed physics stage so custom physics authors and configured
+    merges share the same geometry contract. Matrices use column vectors, as
+    in ``model.json``; original part names are never changed.
+    """
+    import numpy as np
+    from pxr import UsdGeom, UsdPhysics
+    cache = UsdGeom.XformCache()
+    mapping = {}
+    for node in model['nodes']:
+        if not node['rigid']:
+            continue
+        original = stage.GetPrimAtPath(paths[node['name']])
+        body = original
+        while body and not body.HasAPI(UsdPhysics.RigidBodyAPI):
+            body = body.GetParent()
+        if not body:
+            raise ValueError(f"{node['name']}: no physics rigid body after composition")
+        relative = cache.GetLocalToWorldTransform(original) * cache.GetLocalToWorldTransform(body).GetInverse()
+        mapping[node['name']] = {'body': body.GetCustomDataByKey('table1000:name'),
+                                 'matrix': np.asarray(relative).T.tolist()}
+    return mapping

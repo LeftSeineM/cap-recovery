@@ -272,7 +272,9 @@ def support_region(shapes, obj, part=None, floor=False, headroom=np.inf, step=SU
     they share (``floor``: the lowest, a container's floor rather than its rims; the frame that of
     its body, raised to that height), None where there is none; ``keep_out`` the collision
     boxes, each in its body frame, of the bodies (of the support's own object: the parts) hit first
-    inside it instead. What is put down comes straight down from ``headroom`` above that height: what
+    inside it instead. Cells outside the actual support (such as a round floor's corners)
+    remain excluded at the ray-grid resolution. What is put down comes straight down from
+    ``headroom`` above that height: what
     is all higher (a handle over the edge of a drawer's floor) neither hides it nor is kept out; the
     hand above is checked against it when placing. See :meth:`~table_1000.experts.skills.Skills.place`."""
     support = [shape for shape in shapes if selects(shape, obj, part)]
@@ -311,14 +313,24 @@ def support_region(shapes, obj, part=None, floor=False, headroom=np.inf, step=SU
     keep_out = {}
     for index in set(first[inside & ~cells & (first >= 0)]):
         shape = shapes[index]
+        # Below the support plane never intersects the descent column. A table
+        # under a round container must not exclude its entire floor in XY.
+        if heights(shape).max() <= surface_z:
+            continue
         own = shape.obj == obj
         key = (shape.obj, shape.body, shape.part if own else None)
         if key not in keep_out:
-            members = [s for s in every if s.obj == shape.obj and s.body == shape.body and (not own or s.part == shape.part)]
+            members = [s for s in every if s.obj == shape.obj and s.body == shape.body
+                       and (not own or s.part == shape.part)
+                       and heights(s).max() > surface_z and heights(s).min() < surface_z + headroom]
             body = np.linalg.inv(shape.frame)
             box = np.vstack([s.points for s in members]) @ body[:3, :3].T + body[:3, 3]
             keep_out[key] = (shape.frame, box.min(0), box.max(0))
-    return (surface, low, high), list(keep_out.values())
+    # A rectangle bounds the sampled support; do not turn a circular floor or
+    # a gap into support simply because the first hit lies below its plane.
+    unsupported = inside & ~cells & (height < surface_z - LEVEL)
+    gaps = [(surface, xy - step / 2, xy + step / 2) for xy in grid[unsupported]]
+    return (surface, low, high), [*keep_out.values(), *gaps]
 
 
 def object_points(ctx, obj):

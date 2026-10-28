@@ -13,7 +13,9 @@ from table_1000.experts.grasps import Box, SUPPORT_CLEARANCE
 
 def box_extents(points):
     import trimesh
-    return np.sort(trimesh.bounds.oriented_bounds(np.asarray(points))[1])
+    # oriented_bounds(points) uses an unrepaired hull: inconsistent triangle
+    # winding can leave its silhouette empty even for a nondegenerate prism.
+    return np.sort(trimesh.bounds.oriented_bounds(trimesh.convex.convex_hull(np.asarray(points)))[1])
 
 
 def pad_height(hand, gap):

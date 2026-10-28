@@ -88,7 +88,7 @@ class MotionSolver:
         """Planning objects of asset object ``name`` from its collision geometry: ``group(body, part)``
         returns ``(planning name, frame body)`` (see :func:`~table_1000.planning.world.asset_objects`);
         planning names get the prefix ``<name>:``."""
-        objects = asset_objects(self.ctx.model_path(name), f'{name}:', group, padded, merged)
+        objects = asset_objects(self.ctx.geometry[name], f'{name}:', group, padded, merged)
         poses = self.ctx.poses()
         for obj in objects:
             self.world.add(obj, poses[obj.body])

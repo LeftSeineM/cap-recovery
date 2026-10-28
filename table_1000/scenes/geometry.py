@@ -1,7 +1,8 @@
 """Geometry of a built asset from its ``model.json``: rigid bodies, parts, collision shapes and joints.
 
-The physics layer of every asset is authored over the same export, so these are
-the shapes the simulator collides. Bodies and parts carry their
+The physics layer of every asset is authored over the same export. Its build
+report maps original bodies and their local frames to the surviving physics
+bodies, so these are the shapes the simulator collides. Bodies and parts carry their
 ``table1000:name`` (``cabinet.drawer3``, ``cabinet.drawer3.handle``); poses are
 in the asset frame at the built (rest) configuration unless a body frame is
 named. Used by scene initialization (resting heights, penetration) and by
@@ -27,10 +28,21 @@ def transform_points(transform, points):
 
 
 class AssetGeometry:
-    def __init__(self, model, centers_of_mass=None):
+    def __init__(self, model, centers_of_mass=None, body_mapping=None):
         model = json.loads(Path(model).read_text()) if not isinstance(model, dict) else model
         self.shapes, self.rest = model_shapes(model)
         self.joints = {joint['name']: joint for joint in model.get('joints', [])}
+        if body_mapping is not None:
+            rest = self.rest
+            self.rest = {entry['body']: rest[body] @ np.linalg.inv(entry['matrix'])
+                         for body, entry in body_mapping.items()}
+            self.shapes = [(body_mapping[body]['body'], part,
+                            np.asarray(body_mapping[body]['matrix']) @ transform, kind, data)
+                           for body, part, transform, kind, data in self.shapes]
+            self.joints = {name: {**joint, 'body1': body_mapping[joint['body1']]['body'],
+                                 'body2': body_mapping[joint['body2']]['body']}
+                           for name, joint in self.joints.items()
+                           if body_mapping[joint['body1']]['body'] != body_mapping[joint['body2']]['body']}
         self._hulls = None      # collision hulls in their shape frames, built once
         # A one-body asset's authored centre of mass (``{body: point in its frame}``), in the asset
         # frame; None: uniform density.
@@ -43,10 +55,17 @@ class AssetGeometry:
     @classmethod
     def of(cls, assets, asset):
         """Geometry of the built asset ``asset`` (path under ``assets``), with the centres of mass its
-        physics layer authors (``physics_build.json``)."""
+        physics layer authors (``physics_build.json``). Merged builds require its
+        ``body_mapping``; rebuild old products with ``scripts/assets/build_physics.py``.
+        Part names stay model names; body names and frames match live physics."""
         report = Path(assets) / asset / 'physics_build.json'
-        centers = json.loads(report.read_text()).get('centers_of_mass') if report.is_file() else None
-        return cls(Path(assets) / asset / 'model.json', centers)
+        report = json.loads(report.read_text()) if report.is_file() else {}
+        geometry = cls(Path(assets) / asset / 'model.json', report.get('centers_of_mass'), report.get('body_mapping'))
+        if 'body_mapping' not in report and report.get('rigid_bodies', len(geometry.bodies)) != len(geometry.bodies):
+            raise ValueError(f'{asset}: physics_build.json lacks body_mapping for merged rigid bodies; '
+                             'rebuild this asset with scripts/assets/build_physics.py --output <private objects root> '
+                             f'--assets {Path(asset).relative_to("objects")}')
+        return geometry
 
     @property
     def bodies(self):

@@ -142,7 +142,10 @@ class PlanningObject:
 
 
 def asset_objects(model, prefix, group, padded=lambda name: True, merged=lambda name: False):
-    """Planning objects of one asset instance.
+    """Planning objects of one asset instance from an ``AssetGeometry`` or model.
+
+    Live scene consumers pass their shared ``AssetGeometry`` so physics body
+    merges are applied identically to planning, skills and semantic checks.
 
     ``group(body, part)`` returns ``(object_name, frame_body)``; a shape on a
     body other than ``frame_body`` is placed by the bodies' rest transforms, so
@@ -152,7 +155,7 @@ def asset_objects(model, prefix, group, padded=lambda name: True, merged=lambda 
     shapes are replaced by their common convex hull (for a compact, convex
     assembly with many small parts).
     """
-    shapes, rest = model_shapes(model)
+    shapes, rest = (model.shapes, model.rest) if hasattr(model, 'shapes') else model_shapes(model)
     grouped = {}
     for body, part, transform, kind, data in shapes:
         name, frame = group(body, part)

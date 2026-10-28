@@ -69,6 +69,44 @@ class PhysicsBatchTest(unittest.TestCase):
 
 
 class RigidIterationsTest(unittest.TestCase):
+    def test_mapping_reads_composed_body_frames(self):
+        try:
+            from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+        except ImportError:
+            self.skipTest('requires the Isaac/OpenUSD Python environment')
+        import numpy as np
+        from table_1000.physics.rigid import author, body_mapping
+        from table_1000.scenes.layout import yaw_pose
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            for nested in (False, True):
+                geometry = directory / f'{nested}.usdc'
+                stage = Usd.Stage.CreateNew(str(geometry))
+                UsdGeom.Xform.Define(stage, '/Asset')
+                parent = '/Asset'
+                if nested:
+                    parent += '/assembly'
+                    prim = UsdGeom.Xform.Define(stage, parent).GetPrim()
+                    prim.SetCustomDataByKey('table1000:name', 'assembly')
+                    UsdGeom.Xformable(prim).AddTransformOp().Set(Gf.Matrix4d(yaw_pose(.2, -.1, .3, .6).T.tolist()))
+                matrices = {'a': yaw_pose(.03, .02, .08, -.4), 'b': yaw_pose(-.01, .04, .03, .2)}
+                paths = {}
+                for name, matrix in matrices.items():
+                    paths[name] = parent + '/' + name
+                    prim = UsdGeom.Xform.Define(stage, paths[name]).GetPrim()
+                    prim.SetCustomDataByKey('table1000:name', name)
+                    UsdGeom.Xformable(prim).AddTransformOp().Set(Gf.Matrix4d(matrix.T.tolist()))
+                    UsdPhysics.RigidBodyAPI.Apply(prim)
+                stage.GetRootLayer().Save()
+                layer = directory / f'{nested}.usda'
+                author(geometry, layer, .02, (.4, .3))
+                composed = Usd.Stage.CreateInMemory()
+                composed.GetRootLayer().subLayerPaths = [str(layer), str(geometry)]
+                mapping = body_mapping(composed, paths, {'nodes': [{'name': name, 'rigid': True} for name in matrices]})
+                for name, matrix in matrices.items():
+                    self.assertEqual(mapping[name]['body'], 'assembly' if nested else 'object')
+                    np.testing.assert_allclose(mapping[name]['matrix'], matrix, atol=1e-12)
+
     def test_default_and_configured_iterations_survive_layer_composition(self):
         try:
             from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics

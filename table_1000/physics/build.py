@@ -224,6 +224,8 @@ def build(asset, source, output, values=None):
         # Authored centres of mass (body frame), for what the colliders' uniform density would put wrong.
         centers = {prim.GetCustomDataByKey('table1000:name'): list(UsdPhysics.MassAPI(prim).GetCenterOfMassAttr().Get())
                    for prim in rigid if UsdPhysics.MassAPI(prim).GetCenterOfMassAttr().HasAuthoredValue()}
+        from table_1000.physics.rigid import body_mapping
+        mapping = body_mapping(packaged, paths, model)
         materials = {}
         for prim in packaged.Traverse():
             if prim.HasAPI(UsdPhysics.CollisionAPI):
@@ -239,7 +241,7 @@ def build(asset, source, output, values=None):
     (output / 'model.json').write_text(json.dumps(model) + '\n')
     report = {'rigid_bodies': len(rigid), 'parts': sum(node['part'] for node in model['nodes']),
               'colliders': len(materials), 'physics_materials': materials, 'paths': paths,
-              'centers_of_mass': centers,
+              'centers_of_mass': centers, 'body_mapping': mapping,
               'geometry_layer': 'geometry.usdc', 'physics_source': 'physics.py', 'physics_layer': 'physics.usda',
               'entry': 'object.usda' if scripts else 'object.usdz',
               'behavior_scripts': [path.path for path in scripts],
