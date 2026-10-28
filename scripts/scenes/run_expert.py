@@ -56,6 +56,7 @@ import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from table_1000.common.diagnostics import dump_stacks_every
 
 from table_1000.common.batch import run_name
 
@@ -115,6 +116,7 @@ def worker(args):
 
 
 def main(argv=None):
+    dump_stacks_every()
     from table_1000.common.batch import add_arguments, commit, job_count, load_record, parse_seeds, process_name, run_batch, seed_range
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')

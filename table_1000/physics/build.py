@@ -27,7 +27,8 @@ def author(geometry_path, output_path):
 def rigid_assets(config=RIGID_CONFIG):
     """``{asset path: values}`` of the assets built as one rigid body, from ``configs/rigid_physics.json``:
     ``mass_kg`` in total, ``friction`` ``[static, dynamic]``, optional ``angular_damping`` (1/s) and
-    ``center_of_mass`` (m, body frame); the keyword arguments of :func:`table_1000.physics.rigid.author`."""
+    ``center_of_mass`` (m, body frame) and ``position_iterations`` (default 16); the keyword arguments
+    of :func:`table_1000.physics.rigid.author`."""
     return json.loads(Path(config).read_text())
 
 
@@ -266,9 +267,17 @@ def main(argv=None):
     from isaacsim import SimulationApp
     app = SimulationApp({'headless': True, 'active_gpu': args.gpu, 'physics_gpu': 0 if os.getenv('CUDA_VISIBLE_DEVICES') == str(args.gpu) else args.gpu,
                          'multi_gpu': False, 'create_new_stage': False,
-                         'disable_viewport_updates': True, 'limit_cpu_threads': 4})
+                         'disable_viewport_updates': True, 'limit_cpu_threads': 4,
+                         'extra_args': ['--enable', 'omni.kit.material.library']})
     try:
         for reference in references:
             build(output / reference, source / reference, output / reference, rigid.get(Path(reference).as_posix()))
+    except BaseException:
+        # Kit closes the process before Python can propagate an exception.
+        import traceback
+        import omni.kit.app
+        traceback.print_exc()
+        omni.kit.app.get_app().post_quit(1)
+        raise
     finally:
         app.close(wait_for_replicator=False)

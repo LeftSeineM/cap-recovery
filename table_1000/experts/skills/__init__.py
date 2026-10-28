@@ -51,6 +51,22 @@ contact surfaces within the geometry error budget, else it backs out, re-observe
 object and chooses again (at most ``MAX_REGRASPS`` times). The grasped part then
 moves with the hand in the planning world until :func:`release`.
 
+**pick** -- grasp and lift, checking the body's actual rise. Thin free rigid
+bodies are recognized from collision geometry and the hand's contact patch:
+sheets are pressed and dragged to a reachable table edge before a horizontal
+approach and vertical pinch; filaments use a fingertip pinch first. Very small
+sheets whose COM cannot stay supported at a graspable edge landing also use
+the fingertip pinch. Thin closures wait for opposing surfaces to touch with the
+unchanged drive. See ``docs/specs/thin-grasp.md``.
+For thin targets, ``pick`` rejects non-default ``point``, ``approach`` and ``max_angle`` with
+``ValueError`` (remove them); ``grasp`` rejects an unprepared flat body on the table (use ``pick``
+or ``slide_to_edge`` then ``grasp``), while overhanging or already held thin bodies are allowed.
+
+**slide_to_edge** -- the sheet preparation alone: press its top collision
+surface with the closed fingertips, drag while its COM stays supported, then
+retract and measure the exposed depth. Only fingers may touch the target and
+table; the ordinary collision planners check the rest of the robot and scene.
+
 **move_by_displacement** -- the TCP straight by a world displacement, with the torso
 lift too where the arm alone runs into a joint limit, or (``least``) as far along as
 plans; straight up beyond the arm's reach, the torso lift rises and the arm does the rest. ``drag``
@@ -109,7 +125,8 @@ Each choice of another candidate is noted (``ctx.note``). A skill that finds not
 (no grasp, push or placement) fails with :class:`~table_1000.experts.context.Unreachable`.
 
 The skills are one :class:`Skills` per context (``ctx.skills()``), put together from
-``grasping`` (grasp, pick), ``handover``, ``motion`` (straight moves, push, release), ``placing`` and ``base``
+``grasping`` (grasp, pick), ``thin`` (thin-object preparation), ``handover``,
+``motion`` (straight moves, push, release), ``placing`` and ``base``
 (the base, ready); ``common`` holds what they share.
 """
 
@@ -124,11 +141,12 @@ from table_1000.experts.skills.grasping import LIFT, Grasping
 from table_1000.experts.skills.handover import Handing
 from table_1000.experts.skills.motion import Motion
 from table_1000.experts.skills.placing import PLACE_ABOVE, PLACE_CLEARANCE, PLACE_MARGIN, PLACE_STEP, Placing
+from table_1000.experts.skills.thin import ThinPicking
 
 ATTEMPTS = 3            # tries of a step under retry
 
 
-class Skills(Grasping, Handing, Motion, Placing, Base):
+class Skills(ThinPicking, Grasping, Handing, Motion, Placing, Base):
     """The skills of ``ctx``'s arms (``arms``: names, default all); see the module docstring."""
 
     def __init__(self, ctx, arms=None):
@@ -220,7 +238,10 @@ def relaxed(limits, attempt):
 def grasp(ctx, obj, part=None, *, arm=None, shape=None, offset=None, body=None, point=None, approach=None, then=None,
           max_angle=None):
     """Grasp scene object ``obj`` (or its ``part``); see the module docstring. ``max_angle`` (rad): only
-    grasps approaching within it of ``approach``; a list of them is tried in order while none is in reach."""
+    grasps approaching within it of ``approach``; a list of them is tried in order while none is in reach.
+    A flat, unprepared thin object on the table raises ``ValueError``: use :func:`pick`, or first
+    :func:`slide_to_edge` then :func:`grasp`; overhanging or already held thin objects are allowed.
+    """
     skills = _skills(ctx)
     target = skills.target(obj, part, shape, offset, body)
     return relaxed(max_angle, lambda angle: skills.grasp(target, arm, point, approach, then, angle))
@@ -230,7 +251,10 @@ def pick(ctx, obj, part=None, *, arm=None, shape=None, offset=None, body=None, p
          max_angle=None, need=None, base=True):
     """Grasp scene object ``obj`` (or its ``part``) and lift it by ``height``; ``max_angle`` as for
     :func:`grasp`; ``need``: held as that :class:`~table_1000.experts.skills.chain.InHand` asks, else
-    :class:`Unmet`; ``base``: whether the base may move."""
+    :class:`Unmet`; ``base``: whether the base may move.
+    The thin-object route raises ``ValueError`` for non-default ``point``, ``approach`` or
+    ``max_angle`` because preparation chooses its own grasp geometry; remove these arguments.
+    """
     skills = _skills(ctx)
     target = skills.target(obj, part, shape, offset, body)
     return relaxed(max_angle, lambda angle: skills.pick(target, arm, point, approach, height, angle, need, base))
@@ -246,6 +270,12 @@ def push(ctx, obj, part=None, *, direction, distance, arm=None, shape=None, offs
     """See :meth:`Skills.push`; the target as for :func:`grasp`."""
     skills = _skills(ctx)
     return skills.push(skills.target(obj, part, shape, offset, body), direction, distance, arm)
+
+
+def slide_to_edge(ctx, obj, part=None, *, arm=None, body=None):
+    """Pressure-drag a thin object to a graspable table edge; see :meth:`Skills.slide_to_edge`."""
+    skills = _skills(ctx)
+    return skills.slide_to_edge(skills.target(obj, part, body=body), arm)
 
 
 def release(ctx, arm):

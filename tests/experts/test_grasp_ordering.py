@@ -52,8 +52,10 @@ def test_cost_sorted_candidates_do_not_stop_at_an_out_of_angle_candidate(monkeyp
                   for i, (cost, angle) in enumerate(
                       [*[(float(i), 30.) for i in range(grasping.ROOM_PLACES + 1)],
                        (float(grasping.ROOM_PLACES + 2), 0.)])]
+    centres = []
     calls = []
     def generated(*args, **kw):
+        centres.append(kw['mass_center'])
         limit = kw.get('max_angle')
         calls.append(limit)
         return iter(candidates if limit is None else
@@ -77,6 +79,48 @@ def test_cost_sorted_candidates_do_not_stop_at_an_out_of_angle_candidate(monkeyp
     assert list(skill.options(target, ['right'], skip, max_angle=np.radians(15))) == []
     assert calls == [np.radians(15)] * 6  # angle probe, held lift, movable lift, twice
     assert len(skill.grasp_paths(target, ['right'], max_angle=np.radians(15))['right']) == 1
+    assert np.allclose(centres[-1], [0., 0., 0.])
+    # A pressure-drag preflight evaluates a future pose, whose measured COM
+    # has not moved yet. Its gravity score must use the predicted COM.
+    list(skill.options(target, ['right'], set(), mass_center=[.2, -.1, .4]))
+    assert np.allclose(centres[-1], [.2, -.1, .4])
+    # A preparation's allowance spans successive virtual-depth streams and
+    # stops before launching another IK; default retry ids above are intact.
+    charged, ik_calls = [], []
+    class Exhausted(Exception):
+        pass
+    def charge(arm, lift):
+        if len(charged) == 2:
+            raise Exhausted()
+        charged.append((arm, lift))
+    skill.model.ik = lambda *args, **kw: (ik_calls.append(args) or ('Success', np.zeros(1)))
+    for _ in range(2):
+        list(skill.options(target, ['right'], set(), max_angle=np.radians(15), candidate_budget=charge))
+    with pytest.raises(Exhausted):
+        list(skill.options(target, ['right'], set(), max_angle=np.radians(15), candidate_budget=charge))
+    assert len(ik_calls) == 4  # grasp and pre-grasp for each of the two charged candidates
+    # A nearby virtual grasp can reuse its arm branch, while the torso of a
+    # fixed-lift query and unrelated joints retain the observed configuration.
+    skill.model.vector = lambda values: np.array([.1, .2, .3, .4])
+    skill.model.arm_indices = lambda arm: [1, 2]
+    skill.model.lift_indices = lambda: [0]
+    skill.model.ik = lambda arm, pose, q, **kw: (ik_calls.append(q.copy()) or ('Success', q.copy()))
+    hint = np.array([1., 2., 3., 4.])
+    for lift in (False, True):
+        ik_calls.clear()
+        tried = {False: grasping.MAX_PLANS if lift else 0, True: 0}
+        list(skill.options(target, ['right'], set(), max_angle=np.radians(15), ik_seed=hint, tried=tried))
+        np.testing.assert_array_equal(ik_calls[0], [1. if lift else .1, 2., 3., .4])
+    # Reusing geometric previews retains angular filtering, both IK checks,
+    # supports and the original candidate ids without placing geometry again.
+    calls.clear()
+    ik_calls.clear()
+    skip = set()
+    choices = list(skill.options(target, ['right'], skip, max_angle=np.radians(15),
+        geometric={'right': (['table'], iter(candidates))}))
+    assert len(choices) == 1 and choices[0][2] == ['table']
+    assert skip == {('right', grasping.ROOM_PLACES + 1)}
+    assert calls == [] and len(ik_calls) == 2
     candidates.pop()  # no in-angle choice: avoid constructing the full stream
     calls.clear()
     assert list(skill.options(target, ['right'], set(), max_angle=np.radians(15))) == []

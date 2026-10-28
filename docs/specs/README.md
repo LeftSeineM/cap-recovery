@@ -10,6 +10,7 @@
 | [行为插件](behaviors.md) | `behavior.py`：原生物理表达不了的附加力或状态转换 |
 | [物理测试](physics-tests.md) | `physics_test.py`：测试接口、结果与 RTF 基准 |
 | [资产抓取测试](grasp-tests.md) | 首次抓稳、持物动作验收与结果格式 |
+| [薄物体抓取](thin-grasp.md) | 片状与细线物体的分流、移边准备与验收指标 |
 | [机器人](robots.md) | 机器人源码、碰撞与物理、机器人层、验收用例 |
 | [场景](scenes.md) | `scene.py`：随机初始化、布局、初态检查 |
 | [专家](experts.md) | `expert.py`：分层、编写规则、步骤、重试与失败恢复 |

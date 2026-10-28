@@ -68,6 +68,41 @@ class PhysicsBatchTest(unittest.TestCase):
                     app.close.assert_called_once_with(wait_for_replicator=False)
 
 
+class RigidIterationsTest(unittest.TestCase):
+    def test_default_and_configured_iterations_survive_layer_composition(self):
+        try:
+            from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
+        except ImportError:
+            self.skipTest('requires the Isaac/OpenUSD Python environment')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source'
+            source.mkdir()
+            for label, values in [('default', {}), ('thin', {'position_iterations': 64})]:
+                output = root / label
+                output.mkdir()
+                geometry = Usd.Stage.CreateNew(str(output / 'geometry.usdc'))
+                UsdGeom.Xform.Define(geometry, '/Asset')
+                body = UsdGeom.Xform.Define(geometry, '/Asset/body').GetPrim()
+                UsdPhysics.RigidBodyAPI.Apply(body)
+                collider = UsdGeom.Cube.Define(geometry, '/Asset/body/collider').GetPrim()
+                UsdPhysics.CollisionAPI.Apply(collider)
+                geometry.GetRootLayer().Save()
+                author_physics(source, output, {'mass_kg': .001, 'friction': [.3, .25], **values})
+                composed = Usd.Stage.CreateInMemory()
+                composed.GetRootLayer().subLayerPaths = [str(output / 'physics.usda'), str(output / 'geometry.usdc')]
+                # Reopen a flattened deliverable, as the packaged asset is consumed.
+                composed.Flatten().Export(str(output / 'composed.usdc'))
+                stage = Usd.Stage.Open(str(output / 'composed.usdc'))
+                prim = stage.GetPrimAtPath('/Asset/body')
+                api = PhysxSchema.PhysxRigidBodyAPI(prim)
+                self.assertEqual(api.GetSolverPositionIterationCountAttr().Get(), values.get('position_iterations', 16))
+                self.assertEqual(api.GetSolverVelocityIterationCountAttr().Get(), 4)
+                self.assertAlmostEqual(UsdPhysics.MassAPI(prim).GetMassAttr().Get(), .001)
+                self.assertEqual(api.GetLinearDampingAttr().Get(), 0)
+                self.assertEqual(api.GetAngularDampingAttr().Get(), 0)
+
+
 class VisualMaterialTest(unittest.TestCase):
     def test_transmission_is_independent_of_cutout_alpha(self):
         try:

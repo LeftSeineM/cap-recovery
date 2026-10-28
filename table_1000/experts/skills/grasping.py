@@ -77,6 +77,9 @@ class Grasping:
         return next((arm for arm, held in self.held.items() if held['target'].obj == obj), None)
 
     # -- choice ------------------------------------------------------------------------
+    def candidate_hand(self, target, arm):
+        return self.hands[arm]
+
     def centre(self, target):
         """World centre of ``target``'s shape."""
         return (self.ctx.poses()[target.body] @ target.offset)[:3, 3]
@@ -213,13 +216,18 @@ class Grasping:
 
     @decision
     def options(self, target, arms, skip, point=None, approach=None, then=None, max_angle=None, tried=None,
-                need=None):
+                need=None, mass_center=None, candidate_budget=None, ik_seed=None, geometric=None):
         """Feasible ``(arm, grasp, supports, q_grasp, q_pre)``, in the order tried: those of either
         arm (the nearer first) with the torso lift where it is (also through ``then``), then those
         moving it too; ``skip`` holds the ids of candidates already used, ``tried`` (``{lift: count}``)
         those whose motion was tried, up to ``MAX_PLANS`` each; ``need`` (an
         :class:`~table_1000.experts.skills.chain.InHand`) keeps those holding the object as it asks.
-        ``self.rejected`` counts the candidates dropped, by reason."""
+        ``self.rejected`` counts the candidates dropped, by reason.
+        ``candidate_budget(arm, lift)`` charges each preparation IK across calls.
+        ``ik_seed`` continues the selected arm branch, retaining other live joints.
+        ``geometric`` reuses per-arm supports and candidate streams; IK and
+        departure checks still run here.
+        """
         targets = list(target) if isinstance(target, (list, tuple)) else [target]
         tried = {False: 0, True: 0} if tried is None else tried
         self.rejected = {'grasp IK': 0, 'pre-grasp IK': 0, 'then': 0, 'need': 0, 'collisions': {}}
@@ -229,6 +237,12 @@ class Grasping:
         arms = sorted(arms, key=lambda arm: np.linalg.norm((self.shoulder(arm) - centre)[:2]))
         found, single = {}, {}
         for arm in arms:
+            if geometric is not None:
+                supports, candidates = geometric[arm]
+                stream = Replayed(candidates)
+                head = next(iter(stream), None)
+                found[arm] = [stream], [(targets[0], supports)], [head.info['closest_deg'] if head is not None else np.inf]
+                continue
             streams = []
             metadata = []
             for target in targets:
@@ -240,14 +254,14 @@ class Grasping:
                 # The measured wrist is a preference for a declared next hold
                 # at this stance. Unguided fallback keeps physical ordering;
                 # grasp_paths likewise describes a future, different stance.
-                arguments = dict(center_of_mass=point, mass_center=self.grasp_center_of_mass(target, None),
+                arguments = dict(center_of_mass=point, mass_center=self.grasp_center_of_mass(target, mass_center),
                                  weight=self.grasp_weight(target), approach_distance=APPROACH,
                                  contact_surface=surface,
                                  reference_rotation=self.model.tcp(arm, world=True)[:3, :3]
                                                     if surface is not None and need is not None else None)
                 if len(targets) == 1 or max_angle is not None and max_angle < np.pi:
                     arguments['_placement_cache'] = {}
-                inputs = target.shape, transform, self.hands[arm], obstacles, preferred
+                inputs = target.shape, transform, self.candidate_hand(target, arm), obstacles, preferred
                 if len(targets) == 1:
                     probe = next(grasp_candidates(*inputs, **arguments, max_angle=max_angle,
                                                    _first_angle=True), None)
@@ -279,7 +293,7 @@ class Grasping:
                 # A part whose closest valid approach is outside this phase
                 # cannot yield a usable candidate. Skip that whole empty phase,
                 # retaining its original stream for the movable-lift pass.
-                if len(targets) == 1:
+                if len(targets) == 1 and geometric is None:
                     inputs, arguments, probe = single[arm]
                     # A single stream can discard this phase's excluded
                     # angles before contact placement. Doing this to part
@@ -311,8 +325,13 @@ class Grasping:
                     if grasp.info['approach_deg'] > limit + 1e-6:
                         mark(self, 'approach', outcome='not checked', limit=limit)
                         continue  # total cost order is not monotonic in approach angle
+                    if candidate_budget is not None:
+                        candidate_budget(arm, lift)
                     checked += 1
                     start = self.model.vector(side.finger_targets(grasp.open_gap))
+                    if ik_seed is not None:
+                        moving = self.model.arm_indices(arm) + (self.model.lift_indices() if lift else [])
+                        start[moving] = ik_seed[moving]
                     solver.sync()
                     # The fingers touch the object and come closer to its supports than the padding.
                     solver.allow([*target.names, *supports])
@@ -385,14 +404,21 @@ class Grasping:
 
     # -- skills --------------------------------------------------------------------------
     def grasp(self, target, arm=None, point=None, approach=None, then=None, max_angle=None, need=None, base=True,
-              closure_only_record=False):
+              closure_only_record=False, close=None):
         """Grasp ``target`` (:class:`Target`, or a list ranked together) with ``arm`` (default either); see the module docstring.
         ``need``: only grasps holding it as that :class:`~table_1000.experts.skills.chain.InHand` asks
         (:class:`Unmet` where no other is in reach); ``base``: whether the base may move.
         ``closure_only_record`` records the check without retrying, for measured asset tests only.
+        A flat, unprepared thin body on the table raises ``ValueError``: use :meth:`pick`, or
+        :meth:`slide_to_edge` before :meth:`grasp`; overhanging and already held bodies are allowed.
         Returns ``{'arm', 'grasp', 'supports', 'finger_gap', 'regrasps', 'choice_s', 'tcp_object', 'closure_check'}``."""
         ctx = self.ctx
         alternatives = target
+        targets = target if isinstance(target, (list, tuple)) else [target]
+        unprepared_flat_thin = getattr(self, 'unprepared_flat_thin', None)
+        if close is None and unprepared_flat_thin and any(unprepared_flat_thin(item) for item in targets):
+            raise ValueError('grasp cannot prepare a flat thin object on the table; use pick, '
+                             'or call slide_to_edge before grasp')
         target = target[0] if isinstance(target, (list, tuple)) else target
         arms = [arm] if arm else [a for a in self.arms if a not in self.held]
         unmet = need is not None and not set(arms) <= set(need.arms)     # an arm it leaves out
@@ -433,7 +459,10 @@ class Grasping:
             arm, grasp, supports = reached
             target = grasp.target or target
             solver = self.solvers[arm]
-            solver.close_gripper()
+            if close is None:
+                solver.close_gripper()
+            else:
+                close(target, arm, grasp)
             gap = solver.finger_gap()
             checked = self.check_closure(target, arm, grasp)
             ctx.note('closure checked', arm=arm, only_record=closure_only_record, **checked)
@@ -540,11 +569,22 @@ class Grasping:
         return None
 
     def pick(self, target, arm=None, point=None, approach=None, height=LIFT, max_angle=None, need=None, base=True):
-        """:meth:`grasp` with the lift checked, then up by ``height``; the object must have risen."""
+        """:meth:`grasp` with the lift checked, then up by ``height``; the object must have risen.
+        The thin-object route raises ``ValueError`` for non-default ``point``, ``approach`` or
+        ``max_angle``: remove them so that preparation can choose its own grasp geometry.
+        """
         ctx = self.ctx
-        result = self.grasp(target, arm, point, approach, then=(0., 0., height), max_angle=max_angle, need=need,
-                            base=base)
+        if self.thin_geometry(target) is None:
+            result = self.grasp(target, arm, point, approach, then=(0., 0., height), max_angle=max_angle, need=need,
+                                base=base)
+        else:
+            if point is not None or approach is not None or max_angle is not None:
+                raise ValueError('the thin-object pick route does not support point, approach or max_angle '
+                                 'because preparation chooses its own grasp geometry; remove these arguments')
+            target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base)
         before = ctx.poses()[target.body]
+        if 'preparation' in result:
+            self.prepare_thin_lift(target, result)
         self.move_by_displacement(result['arm'], (0., 0., height))
         ctx.hold(.2)
         after = ctx.poses()[target.body]

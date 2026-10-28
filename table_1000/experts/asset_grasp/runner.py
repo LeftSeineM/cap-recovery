@@ -9,6 +9,7 @@ import sys
 import time
 
 from table_1000.common.batch import commit, run_batch
+from table_1000.common.diagnostics import dump_stacks_every
 from table_1000.experts.asset_grasp import (inventory, summarize, SHAKE_AMPLITUDE, SHAKE_SECONDS,
     SLIP_LIMIT, WORK_OFFSET, START_PROJECTION_TOLERANCE)
 from table_1000.experts.asset_grasp.results import prepare, require_mode, publish, video_seed
@@ -52,6 +53,7 @@ def worker(args, root):
                 evaluator = Evaluator(asset, args.robot, args.assets, args.work, root, device,
                                       VIEWS if cameras else {}, diagnostic_shake=args.diagnostic_shake)
                 for seed in args.seeds:
+                    dump_stacks_every()
                     result = args.result or args.output / asset
                     if args.render_worker:
                         frames = args.work / f'frames-{seed:04d}'
@@ -272,6 +274,7 @@ def run(args, root, jobs, error):
         reasons = ', '.join(f'{k}: {v}' for k, v in entry['failures'].items())
         rate = f"{entry['rate']:.0%}" if entry['rate'] is not None else 'unassessed'
         lines.append(f"| {asset} | {entry['picked']}/{len(seeds)} | {entry['first_attempt_success']}/{entry['assessed']} | {entry['not_evaluated']} | {rate} | {reasons} |")
+
     (output / 'summary.md').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines), flush=True)
     if any(r['status'] != 'PASS' for r in overall['assets'].values()):

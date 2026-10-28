@@ -246,6 +246,9 @@ class Hand:
         self.opening_clearance = opening_clearance
         self.cost_width = cost_width
         self.drive = drive
+        # Shallow copies used for fingertip permission share this immutable
+        # contact geometry, including its quantized finger kinematics.
+        self._contact_geometry_key = object()
         urdf = model.root / model.spec.urdf
         links = {link.get('name'): link for link in ET.parse(urdf).getroot().findall('link')}
         self.cache = {}
@@ -829,6 +832,15 @@ def _held_area(shape, transform, tcp, hand, gap, *, local=False):
 
 
 def _close(shape, transform, tcp, hand, open_gap, iterations=9, check_area=True, *, contact_layer=False):
+    """Close on the actual surface, reusing exact thin-section queries when available."""
+    cached = getattr(shape, '_close_cached', None)
+    if cached is not None and hasattr(hand, '_contact_geometry_key'):
+        return cached(transform, tcp, hand, open_gap, iterations, check_area, contact_layer=contact_layer)
+    return _close_uncached(shape, transform, tcp, hand, open_gap, iterations, check_area,
+                           contact_layer=contact_layer)
+
+
+def _close_uncached(shape, transform, tcp, hand, open_gap, iterations=9, check_area=True, *, contact_layer=False):
     """Close the hand at world ``tcp`` on the object (free to slide along the closing to stay between the
     fingers): ``(gap, contact centre)`` where the fingers' inner surfaces first both touch it, or None
     when they touch it already open, never touch it, or touch it with less than MIN_PAD_AREA of pad

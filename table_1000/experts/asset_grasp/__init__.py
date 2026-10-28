@@ -87,32 +87,39 @@ def target_groups(candidates):
             if (group := [target for target in candidates if getattr(target, 'fallback', False) == fallback])]
 
 
-def pick(skill, report, candidates=None):
-    """Choose among real part heads before the first physical grasp and lift."""
+def pick(skill, report, candidates=None, excluded=()):
+    """Choose real part heads, keeping full-list IDs when excluding prior attempts."""
     from table_1000.experts.context import ExpertFailed
     ctx = skill.ctx
     report['target_attempts'] = []
     candidates = list(targets(skill) if candidates is None else candidates)
-    if not candidates:
+    available = [target for index, target in enumerate(candidates) if index not in excluded]
+    if not available:
         ctx.fail('no reachable grasp', candidates_tried=0)
     attempt = None
     try:
-        groups = target_groups(candidates)
+        groups = target_groups(available)
         for number, group in enumerate(groups):
             target = group[0]
+            source_target = None
             attempt = {'shape': type(target.shape).__name__, 'parameters': vars(target.shape),
                        'parts': list(target.names), 'fallback': getattr(target, 'fallback', False)}
             report['target_attempts'].append(attempt)
             try:
-                result = skill.grasp(group, approach=(0., 0., -1.), then=(0., 0., .10), base=False,
-                                     closure_only_record=True)
+                if skill.thin_geometry(target) is None:
+                    result = skill.grasp(group, approach=(0., 0., -1.), then=(0., 0., .10), base=False,
+                                         closure_only_record=True)
+                else:
+                    source_target = target
+                    target, result = skill.grasp_thin(target, height=.10, base=False, closure_only_record=True)
                 break
             except ExpertFailed as error:
                 attempt['failure'] = {'reason': error.reason, 'details': error.details}
                 if error.reason != 'no reachable grasp' or number == len(groups) - 1:
                     raise
         target = skill.held[result['arm']]['target']
-        report['selected_target_index'] = next(i for i, item in enumerate(candidates) if item is target)
+        report['selected_target_index'] = next(i for i, item in enumerate(candidates)
+                                             if item is (source_target if source_target is not None else target))
         attempt.update(shape=type(target.shape).__name__, parameters=vars(target.shape), parts=list(target.names))
         report['target'] = attempt
         report['pick'] = result
@@ -140,6 +147,8 @@ def pick(skill, report, candidates=None):
                                     for pair, impulse in impulses.items()]})
         ctx.observers.append(observe)
         try:
+            if 'preparation' in result:
+                skill.prepare_thin_lift(target, result)
             skill.move_by_displacement(result['arm'], (0., 0., .10))
             ctx.hold(.2)
         finally:
@@ -152,7 +161,10 @@ def pick(skill, report, candidates=None):
         report['lift'] = attempt['lift']
         if rise < .05:
             solver.release(rest, target.names + result['supports'])
-            skill.release(result['arm'])
+            try:
+                skill.release(result['arm'])
+            except ExpertFailed as error:
+                attempt['release_failure'] = {'reason': error.reason, 'details': error.details}
             ctx.note('missed lift', rise=rise)
             ctx.fail('object not lifted', rise=rise, grasp=result['grasp'])
         result.update(rise=rise)
@@ -290,7 +302,14 @@ def summarize(reports, expected):
         entry['success'] += bool(hold.get('held'))
     for entry in by_grasp.values():
         entry['rate'] = entry['success'] / entry['trials']
+    lifted_transport = sum(lift_transport_success(report) for report in reports)
     return {'expected': expected, 'reported': len(reports), 'success': success,
+            'lift_transport': {'success': lifted_transport, 'assessed': assessed,
+                               'rate': lifted_transport / assessed if assessed else None,
+                               'criterion': 'first lift >= 0.05 m above settled placement and complete transport without drop'},
+            'stable_transport': {'success': success, 'assessed': assessed,
+                                 'rate': success / assessed if assessed else None,
+                                 'criterion': 'existing 5 mm / 5 degree stability limits'},
             'assessed': assessed, 'not_evaluated': sum(unassessed.values()),
             'not_evaluated_reasons': dict(unassessed),
             'closure_check': closure_statistics(reports),
@@ -302,6 +321,23 @@ def summarize(reports, expected):
             'failures': dict(failures), 'preference_data': {
                 'by_grasp': by_grasp, 'not_evaluated_by_grasp': dict(not_evaluated)},
             'status': 'PASS' if success == assessed and assessed else 'FAIL'}
+
+
+def lift_transport_success(report):
+    """First real lift and completed transport without a drop (#55 primary metric).
+
+    The existing status and strict stability criterion remain independently
+    available. A pickup from the floor after a failed preparation cannot
+    replace lifting off the original table. Missing measurements never pass.
+    """
+    hold = report.get('hold', {})
+    lift = report.get('lift', {})
+    settled, lifted = report.get('settled_pose'), lift.get('object_pose')
+    return (report.get('status') not in ('not_evaluated', 'error')
+            and settled is not None and lifted is not None
+            and lifted[2][3] - settled[2][3] >= .05
+            and lift.get('rise_m', 0.) >= .05
+            and bool(hold.get('completed')) and not hold.get('dropped', True))
 
 
 def transport_plan(model, arm, origin, start=None):
@@ -673,9 +709,7 @@ class Evaluator:
             self.env.contacts.phase = 'pick'
             candidates = list(targets(skill))
             report['excluded_targets'], report['target_count'] = list(excluded), len(candidates)
-            available = [item for i, item in enumerate(candidates) if i not in excluded]
-            target, result = pick(skill, report, available)
-            report['selected_target_index'] = next(i for i, item in enumerate(candidates) if item is target)
+            target, result = pick(skill, report, candidates, excluded)
             settled = np.asarray(report['settled_pose'])
             grasp_local = np.linalg.inv(settled) @ np.asarray(result['grasp']['pose'])
             result['body_grasp_pose'] = grasp_local.tolist()
@@ -702,6 +736,8 @@ class Evaluator:
             import traceback
             report.update(status='error', failure={'reason': 'execution error', 'traceback': traceback.format_exc()})
         finally:
+            report['acceptance'] = {'lift_transport': lift_transport_success(report),
+                                    'stable_transport': report.get('status') == 'success'}
             report['cpu_s'] = time.process_time() - cpu_started
             report['final_object_pose'] = self.env.object_pose('object')[0].tolist()
             report['events'] = ctx.events

@@ -19,11 +19,13 @@ CONTACT_OFFSET_M = .001
 ROOT_NAME = 'object'
 
 
-def author(geometry_path, output_path, mass_kg, friction, *, restitution=0., angular_damping=0., center_of_mass=None):
+def author(geometry_path, output_path, mass_kg, friction, *, restitution=0., angular_damping=0., center_of_mass=None,
+           position_iterations=16):
     """Write the physics layer over ``geometry_path`` into ``output_path``: ``mass_kg`` in total,
     ``friction`` ``(static, dynamic)`` on every collider, ``angular_damping`` in 1/s, and
     ``center_of_mass`` (m, in the body's frame) where the colliders' uniform density would put it
-    wrong (light reeds or flowers over a heavy base)."""
+    wrong (light reeds or flowers over a heavy base). ``position_iterations`` controls the
+    body's position solver (default 16); the velocity solver stays at 4 iterations."""
     from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
     layer = Sdf.Layer.CreateNew(str(Path(output_path).resolve()))
     stage = Usd.Stage.CreateInMemory()
@@ -52,7 +54,7 @@ def author(geometry_path, output_path, mass_kg, friction, *, restitution=0., ang
     body = PhysxSchema.PhysxRigidBodyAPI.Apply(root)
     body.CreateLinearDampingAttr(0)
     body.CreateAngularDampingAttr(float(angular_damping))
-    body.CreateSolverPositionIterationCountAttr(16)
+    body.CreateSolverPositionIterationCountAttr(position_iterations)
     body.CreateSolverVelocityIterationCountAttr(4)
 
     UsdGeom.Scope.Define(stage, '/Asset/Materials')

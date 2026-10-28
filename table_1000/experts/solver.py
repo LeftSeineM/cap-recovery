@@ -338,9 +338,10 @@ class MotionSolver:
                     raise
 
     # -- execution -----------------------------------------------------------------------
-    def follow(self, result):
+    def follow(self, result, monitor=None):
         """Send the path one waypoint per control step (with the torso lift's, if it moves), then
-        hold its end until arrival."""
+        hold its end until arrival. An optional monitor stops before the next
+        waypoint when it returns false, retaining the last applied command."""
         started = time.perf_counter()
         positions = np.asarray(result['position'])
         lift = result.get('lift')
@@ -353,6 +354,13 @@ class MotionSolver:
                     action['lift'] = lift[index][None]
                 self.ctx.step(action)
                 worst = max(worst, float(np.abs(self.qpos() - target).max()))
+                if monitor is not None and not monitor():
+                    final = np.r_[target, lift[index]] if lift is not None else target
+                    self.log[-1].update(max_tracking_error_rad=worst, stopped_waypoint=index)
+                    self.timings['executing_s'] += time.perf_counter() - started
+                    if lift is not None:
+                        note_torso(self.ctx, lift[:index + 1])
+                    return False
             if lift is not None:
                 positions = np.c_[positions, lift]
             final, held = positions[-1], 0
@@ -362,10 +370,17 @@ class MotionSolver:
                                          final_error_rad=float(np.abs(self.qpos(lift is not None) - final).max()))
                 self.ctx.step()
                 held += 1
+                if monitor is not None and not monitor():
+                    self.log[-1].update(max_tracking_error_rad=worst, stopped_waypoint=len(positions), settle_steps=held)
+                    self.timings['executing_s'] += time.perf_counter() - started
+                    if lift is not None:
+                        note_torso(self.ctx, lift)
+                    return False
             self.log[-1].update(max_tracking_error_rad=worst, settle_steps=held)
             self.timings['executing_s'] += time.perf_counter() - started
             if lift is not None:
                 note_torso(self.ctx, lift)
+            return True
         finally:
             measured = self.qpos(lift is not None)
             self._tracking(max(worst, float(np.abs(measured[:len(target)] - target).max())), held,

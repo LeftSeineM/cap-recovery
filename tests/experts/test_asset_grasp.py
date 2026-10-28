@@ -2,6 +2,7 @@
 import types
 
 import numpy as np
+import pytest
 
 from table_1000.experts.asset_grasp import displacement, inventory, summarize
 
@@ -30,6 +31,40 @@ def test_missing_and_failed_trials_stay_in_denominator():
     assert report['rate'] == 1 / 3
     assert report['status'] == 'FAIL'
     assert report['failures'] == {'object not held': 1, 'missing report': 1}
+
+
+def test_lift_without_drop_and_strict_stability_are_separate_metrics():
+    settled, lifted = np.eye(4), np.eye(4)
+    settled[2, 3], lifted[2, 3] = .755, .855
+    unstable = {'status': 'failed', 'failure': {'reason': 'unstable during transport'},
+                'settled_pose': settled.tolist(), 'lift': {'rise_m': .1, 'object_pose': lifted.tolist()},
+                'hold': {'completed': True, 'dropped': False, 'held': False}}
+    dropped = {**unstable, 'hold': {'completed': True, 'dropped': True, 'held': False}}
+    incomplete = {**unstable, 'hold': {'completed': False, 'dropped': False, 'held': False}}
+    unlifted = {**unstable, 'lift': {'rise_m': .001}}
+    result = summarize([unstable, dropped, incomplete, unlifted], 5)
+    assert result['lift_transport']['success'] == 1
+    assert result['lift_transport']['rate'] == .2
+    assert result['stable_transport']['success'] == result['success'] == 0
+    assert result['stable_transport']['rate'] == result['rate'] == 0.
+    invalid = {**unstable, 'status': 'invalid_motion',
+               'hold': {**unstable['hold'], 'motion_valid': False}}
+    result = summarize([unstable, invalid], 2)
+    assert result['assessed'] == 2 and result['not_evaluated'] == 0
+    assert result['lift_transport']['success'] == 2
+    assert result['lift_transport']['rate'] == 1.
+
+
+def test_floor_pickup_after_preparation_fall_is_not_a_table_lift():
+    from table_1000.experts.asset_grasp import lift_transport_success
+    settled, lifted = np.eye(4), np.eye(4)
+    settled[2, 3], lifted[2, 3] = .755, .102
+    report = {'status': 'success', 'settled_pose': settled.tolist(),
+              'lift': {'rise_m': .1, 'object_pose': lifted.tolist()},
+              'hold': {'completed': True, 'dropped': False}}
+    assert not lift_transport_success(report)
+    report['lift']['object_pose'] = None
+    assert not lift_transport_success(report)
 
 
 def test_only_unreachable_transport_is_excluded_from_acceptance_denominator():
@@ -210,7 +245,9 @@ def test_shake_samples_transient_slip_and_executes_full_wrist_motion():
     assert not ctx.observers
 
 
-def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch):
+@pytest.mark.parametrize('excluded', [(), (0,)])
+@pytest.mark.parametrize('thin', [False, True])
+def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thin, excluded):
     from table_1000.experts import asset_grasp
     from table_1000.experts.context import ExpertFailed
     from table_1000.experts.grasps import Box
@@ -240,13 +277,48 @@ def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch):
         if len(attempts)==2:
             pose[2,3] += .1
     skill = types.SimpleNamespace(ctx=ctx, hands={'right':types.SimpleNamespace()},
-            grasp=grasp, solvers={'right':solver}, move_by_displacement=move, release=released.append)
+            grasp=grasp, solvers={'right':solver}, move_by_displacement=move, release=released.append,
+            thin_geometry=lambda target: object() if thin else None)
+    selected = 1 if excluded else 0
+    virtual = types.SimpleNamespace(**vars(candidates[selected]))
+    skill.grasp_thin = lambda target, **kwargs: (virtual, grasp([virtual], **kwargs))
     report = {}
     import pytest
     with pytest.raises(ExpertFailed, match='object not lifted'):
-        asset_grasp.pick(skill, report)
-    assert attempts == ['handle'] and released == ['right']
+        asset_grasp.pick(skill, report, excluded=excluded)
+    assert attempts == [candidates[selected].names[0]] and released == ['right']
     assert report['target_attempts'][0]['lift']['rise_m'] == 0
+    assert report['selected_target_index'] == selected
+    attempts.clear()
+    def failed_release(arm):
+        raise ExpertFailed(None, 'joint_limit', stage='retreat')
+    skill.release = failed_release
+    report = {}
+    with pytest.raises(ExpertFailed, match='object not lifted'):
+        asset_grasp.pick(skill, report, excluded=excluded)
+    assert attempts == [candidates[selected].names[0]]
+    assert report['target_attempts'][0]['release_failure'] == {
+        'reason': 'joint_limit', 'details': {'stage': 'retreat'}}
+
+
+def test_thin_search_exhaustion_ends_acceptance_without_restarting_on_another_patch(monkeypatch):
+    from table_1000.experts import asset_grasp
+    from table_1000.experts.context import ExpertFailed
+    from table_1000.experts.grasps import Box
+    import pytest
+    candidates = [types.SimpleNamespace(shape=Box((.02, .01, .001)), names=[name])
+                  for name in ('patch1', 'patch2')]
+    monkeypatch.setattr(asset_grasp, 'targets', lambda skill: iter(candidates))
+    attempts = []
+    def grasp(target, **kwargs):
+        attempts.append(target)
+        raise ExpertFailed(None, 'thin preparation search exhausted', candidates=960, limit=960)
+    skill = types.SimpleNamespace(ctx=None, thin_geometry=lambda target: object(), grasp_thin=grasp)
+    report = {}
+    with pytest.raises(ExpertFailed, match='thin preparation search exhausted'):
+        asset_grasp.pick(skill, report)
+    assert attempts == candidates[:1]
+    assert report['target_attempts'][0]['failure']['details']['limit'] == 960
 
 
 def test_whole_envelope_is_only_a_planning_fallback():
@@ -263,7 +335,7 @@ def test_whole_envelope_is_only_a_planning_fallback():
         raise ExpertFailed(None, 'no reachable grasp' if len(calls) == 1 else 'tracking')
     report = {}
     with pytest.raises(ExpertFailed, match='tracking'):
-        pick(types.SimpleNamespace(ctx=None, grasp=grasp), report, parts)
+        pick(types.SimpleNamespace(ctx=None, grasp=grasp, thin_geometry=lambda target: None), report, parts)
     assert calls == [['part_a', 'part_b'], ['whole']]
     assert [row['failure']['reason'] for row in report['target_attempts']] == ['no reachable grasp', 'tracking']
 

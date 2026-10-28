@@ -6,6 +6,8 @@ contact tensors. The spawners activate contact reporting on the robot and the
 scene's shapes (see :mod:`table_1000.sim.isaaclab.scene`).
 """
 
+from contextlib import contextmanager
+
 
 class Contacts:
     """Contact intervals of labelled bodies, timed by physics steps of ``dt``.
@@ -28,6 +30,7 @@ class Contacts:
         self.open = {}
         self.impulses = {}
         self.surface_contacts = {}
+        self.impulse_observers = []
         self.tensor_view = None
         self.subscription = None
         if device == 'cpu':
@@ -75,7 +78,7 @@ class Contacts:
             start, count = int(starts[i, j]), int(counts[i, j])
             separation = float(distances[start:start+count].min())
             pair = tuple(sorted((self.label(self.tensor_view.sensor_paths[i]), self.label(self.filters[j]))))
-            self.impulses[pair] = self.impulses.get(pair, 0.) + float(np.abs(forces[start:start+count]).sum()) * self.dt
+            self.record_impulse(pair, float(np.abs(forces[start:start+count]).sum()) * self.dt)
             if separation < self.TOUCH:
                 touching[pair] = min(touching.get(pair, float('inf')), separation)
                 paths = [self.tensor_view.sensor_paths[i], self.filters[j]]
@@ -117,8 +120,8 @@ class Contacts:
             pair = tuple(sorted((a, b)))
             points = data[header.contact_data_offset:header.contact_data_offset + header.num_contact_data]
             separation = min((point.separation for point in points), default=float('inf'))
-            self.impulses[pair] = self.impulses.get(pair, 0.) + sum(
-                abs(sum(point.impulse[k] * point.normal[k] for k in range(3))) for point in points)
+            self.record_impulse(pair, sum(
+                abs(sum(point.impulse[k] * point.normal[k] for k in range(3))) for point in points))
             touching = 'LOST' not in str(header.type) and separation < self.TOUCH
             key = tuple(colliders)
             if touching:
@@ -138,6 +141,20 @@ class Contacts:
                 entry = self.open.pop(pair)
                 entry['end'] = self.time
                 self.events.append(entry)
+
+    def record_impulse(self, pair, impulse):
+        self.impulses[pair] = self.impulses.get(pair, 0.) + impulse
+        for observer in self.impulse_observers:
+            observer(self.time, pair, impulse)
+
+    @contextmanager
+    def observe_impulses(self, observer):
+        """Observe fresh physics-step impulses without consuming other readers' totals."""
+        self.impulse_observers.append(observer)
+        try:
+            yield
+        finally:
+            self.impulse_observers.remove(observer)
 
     def take_impulses(self):
         """Normal impulse (N s) summed per pair since the last call."""
