@@ -476,12 +476,14 @@ def transport_plan(model, arm, origin, start=None):
 
 
 class Evaluator:
-    def __init__(self, asset, robot, assets, work, root, device='cpu', views=None, diagnostic_shake=False):
+    def __init__(self, asset, robot, assets, work, root, device='cpu', views=None, diagnostic_shake=False,
+                 collect_preferences=False):
         from table_1000.robots import load_robot_test, load_spec
         from table_1000.robots.kinematics import RobotModel
         from table_1000.sim.isaaclab.env import RobotEnv
         self.asset, self.assets = asset, Path(assets)
         self.diagnostic_shake = diagnostic_shake
+        self.collect_preferences = collect_preferences
         self.spec = load_spec(robot, root)
         self.settings = load_robot_test(robot, root)
         self.center = np.asarray(self.settings.WORK) + WORK_OFFSET
@@ -660,14 +662,14 @@ class Evaluator:
                 'trace': trace}
 
     def trial(self, seed, center=None, size=REGION_SIZE, video=None):
-        """Search geometric targets, resetting the same placement after a failed shake."""
+        """Evaluate once; optionally reset failed holds to collect preference data."""
         attempts, excluded = [], []
         while True:
             report = self._attempt(seed, center, size, video, excluded)
             attempts.append(report)
             print(f'{report.get("asset", "<asset>")} seed={seed} attempt={len(attempts)} {report["status"]} '
                   f'{report.get("failure", {}).get("reason", "")}', flush=True)
-            if report['status'] == 'success' or 'hold' not in report:
+            if not self.collect_preferences or report['status'] == 'success' or 'hold' not in report:
                 break
             excluded.append(report['selected_target_index'])
             if len(excluded) >= report['target_count']:
@@ -675,6 +677,8 @@ class Evaluator:
         result = attempts[0]
         result['first_attempt_timing'] = {key: result[key] for key in ('cpu_s', 'wall_s', 'sim_s')}
         result['preference_attempts'] = attempts[1:]
+        result['preference_timing'] = {key: sum(attempt[key] for attempt in attempts[1:])
+                                       for key in ('cpu_s', 'wall_s', 'sim_s')}
         for key in ('cpu_s', 'wall_s', 'sim_s'):
             result[key] = sum(attempt[key] for attempt in attempts)
         return result

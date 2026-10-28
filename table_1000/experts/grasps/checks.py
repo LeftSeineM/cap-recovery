@@ -1,8 +1,10 @@
 """Closure checks against authored collision surfaces, including curved and hollow objects."""
 
+from collections import OrderedDict
+
 import numpy as np
 from scipy.spatial import ConvexHull
-from table_1000.experts.grasps._surface_query import intervals
+from table_1000.experts.grasps._surface_query import intervals, possible_pieces
 
 from table_1000.experts.grasps import CONTACT_TOLERANCE, _close
 
@@ -56,6 +58,8 @@ class CollisionSurface:
         # identical at successive back-offs, so share one exact-direction plan
         # too. Keep only the last plan, rather than retaining every wrist pose.
         self._query_cache = [None, None]
+        self._ray_orders = {}
+        self._interval_cache = OrderedDict()
 
     def points(self):
         return np.vstack(self.vertices)
@@ -168,31 +172,38 @@ class CollisionSurface:
         return self._query_cache[1]
 
     def interval(self, origins, direction):
+        if len(origins) <= 64:
+            return self._interval(origins, direction)
+        direction = np.asarray(direction)
+        span = getattr(self, '_closing_span', None)
+        span_key = None if span is None else (span[0].dtype.str, span[0].tobytes(), span[1], span[2])
+        key = (origins.dtype.str, origins.shape, origins.strides, origins.tobytes(),
+               direction.dtype.str, direction.shape, direction.tobytes(), span_key)
+        if not hasattr(self, '_interval_cache'):
+            self._interval_cache = OrderedDict()
+        cached = self._interval_cache.get(key)
+        if cached is not None:
+            self._interval_cache.move_to_end(key)
+            return cached[0].copy(), cached[1].copy()
+        low, high = self._interval(origins, direction)
+        # Closure's last gap is queried again for interior pad support and
+        # resistance. Keep a bounded exact-input cache, separate for different
+        # piece sets, and return independent writable endpoint arrays.
+        self._interval_cache[key] = low.copy(), high.copy()
+        if len(self._interval_cache) > 24:
+            self._interval_cache.popitem(last=False)
+        return low, high
+
+    def _interval(self, origins, direction):
         low, high = np.full(len(origins), np.inf), np.full(len(origins), -np.inf)
         if not len(origins) or not self.pieces:
             return low, high
         direction = np.asarray(direction)
-        possible = np.ones(len(self.pieces), dtype=bool)
-        if len(origins) and len(self.pieces) and hasattr(self, '_ray_bounds'):
-            # Any ray origin lies in this box. A translated ray can hit a
-            # piece only if the line through zero hits piece_box-origin_box.
-            bound_low = self._ray_bounds[:, 0] - origins.max(0)
-            bound_high = self._ray_bounds[:, 1] - origins.min(0)
-            parallel = direction == 0.
-            possible = ((bound_low[:, parallel] <= 0.) & (bound_high[:, parallel] >= 0.)).all(1)
-            if (~parallel).any():
-                a, b = bound_low[:, ~parallel] / direction[~parallel], bound_high[:, ~parallel] / direction[~parallel]
-                enter = np.nextafter(np.minimum(a, b), -np.inf).max(1)
-                leave = np.nextafter(np.maximum(a, b), np.inf).min(1)
-                possible &= leave >= enter
-            if hasattr(self, '_closing_span'):
-                axis, minimum, maximum = self._closing_span
-                finite = np.isfinite(self._ray_bounds).all(axis=(1, 2))
-                bounds = self._ray_bounds[finite]
-                lower = np.where(axis >= 0., bounds[:, 0], bounds[:, 1]) @ axis
-                upper = np.where(axis >= 0., bounds[:, 1], bounds[:, 0]) @ axis
-                possible[finite] &= (np.nextafter(upper, np.inf) >= minimum) \
-                    & (np.nextafter(lower, -np.inf) <= maximum)
+        axis, minimum, maximum = getattr(self, '_closing_span', (np.zeros(3), -np.inf, np.inf))
+        if not hasattr(self, '_ray_bounds'):
+            self._ray_bounds = np.tile([[-np.inf] * 3, [np.inf] * 3], (len(self.pieces), 1, 1))
+        possible = possible_pieces(origins, direction, self._ray_bounds, axis,
+                                   minimum, maximum, hasattr(self, '_closing_span'))
         if not possible.any():
             return low, high
         plan, transforms, compiled = self._query(direction)
@@ -200,13 +211,20 @@ class CollisionSurface:
         # once, using exactly the original arithmetic for each shared frame.
         # A conservative bounds miss above needs neither these transforms nor
         # a halfspace query; its endpoints are already the empty intervals.
-        locals = [(origins - transform[:3, 3]) @ transform[:3, :3]
-                  for transform in transforms]
+        needed = np.zeros(len(transforms), dtype=bool)
+        needed[compiled[0][possible]] = True
+        locals = np.empty((len(transforms), len(origins), 3))
+        for group in np.flatnonzero(needed):
+            transform = transforms[group]
+            locals[group] = (origins - transform[:3, 3]) @ transform[:3, :3]
         # Spheres keep their original NumPy quadratic arithmetic. Convex
         # halfspaces use the compiled loop, avoiding Python dispatch per piece.
         spheres = []
-        for group, kind, data, vector, query in plan:
+        for index, (group, kind, data, vector, query) in enumerate(plan):
             if kind != 'sphere':
+                continue
+            if not possible[index]:
+                spheres.append((np.full(len(origins), np.inf), np.full(len(origins), -np.inf)))
                 continue
             local = locals[group]
             b = local @ vector
@@ -214,11 +232,23 @@ class CollisionSurface:
             root = np.sqrt(np.maximum(disc, 0.))
             spheres.append((np.where(disc >= 0, -b - root, np.inf),
                             np.where(disc >= 0, -b + root, -np.inf)))
-        axis, minimum, maximum = getattr(self, '_closing_span', (np.zeros(3), -np.inf, np.inf))
-        return intervals(np.asarray(locals), *compiled,
+        # Samples on the hand are randomly ordered. A fixed spatial ordering
+        # makes small ray packets useful; it changes traversal only, and the
+        # kernel writes every endpoint back at its original sample index.
+        # Any permutation is valid even for a different point set of the same
+        # size, so span/contact views can safely share this bounded cache.
+        if not hasattr(self, '_ray_orders'):
+            self._ray_orders = {}
+        if len(origins) not in self._ray_orders:
+            from scipy.spatial import cKDTree
+            if len(self._ray_orders) >= 8:
+                self._ray_orders.pop(next(iter(self._ray_orders)))
+            self._ray_orders[len(origins)] = cKDTree(origins, leafsize=16).indices.copy() \
+                if len(origins) > 64 else np.arange(len(origins))
+        return intervals(locals, *compiled,
             np.asarray(spheres).reshape(-1, 2, len(origins)), possible, origins @ axis,
             direction @ axis, minimum, maximum, hasattr(self, '_closing_span'),
-            PARALLEL_PLANE_TOLERANCE)
+            PARALLEL_PLANE_TOLERANCE, self._ray_orders[len(origins)])
 
     def at_contacts(self, points):
         """Keep the convex patches that the measured pads actually touch.
@@ -228,8 +258,8 @@ class CollisionSurface:
         collision pieces share one authored part.
         """
         result = CollisionSurface.__new__(CollisionSurface)
-        result.pieces, result.vertices = [], []
-        for (transform, kind, data), vertices in zip(self.pieces, self.vertices):
+        result.pieces, result.vertices, indices = [], [], []
+        for index, ((transform, kind, data), vertices) in enumerate(zip(self.pieces, self.vertices)):
             local = (points - transform[:3, 3]) @ transform[:3, :3]
             if kind == 'sphere':
                 near = np.linalg.norm(local, axis=1) <= data + CONTACT_TOLERANCE
@@ -239,6 +269,11 @@ class CollisionSurface:
             if near.any():
                 result.pieces.append((transform, kind, data))
                 result.vertices.append(vertices)
+                indices.append(index)
+        if hasattr(self, '_ray_bounds'):
+            result._ray_bounds = self._ray_bounds[indices]
+        if hasattr(self, '_ray_orders'):
+            result._ray_orders = self._ray_orders
         return result
 
     def wide_sections(self, origins, direction, tolerance):
@@ -248,9 +283,13 @@ class CollisionSurface:
         thickness: rigid assemblies can be pinched on different components.
         """
         found = np.zeros(len(origins), dtype=bool)
-        for piece, vertices in zip(self.pieces, self.vertices):
+        for index, (piece, vertices) in enumerate(zip(self.pieces, self.vertices)):
             component = CollisionSurface.__new__(CollisionSurface)
             component.pieces, component.vertices = [piece], [vertices]
+            if hasattr(self, '_ray_bounds'):
+                component._ray_bounds = self._ray_bounds[index:index + 1]
+            if hasattr(self, '_ray_orders'):
+                component._ray_orders = self._ray_orders
             low, high = component.interval(origins, direction)
             found |= high - low >= np.ptp(vertices @ direction) - tolerance
         return found

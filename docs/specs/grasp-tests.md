@@ -29,10 +29,10 @@
 | `summary.lift_transport`、`stable_transport` | 两种口径的 `success`、`assessed`、`rate`：抬离原桌面并完成持物动作不掉落；与 `success` 相同的握稳口径。trial 的 `acceptance` 下有同名布尔值 |
 | `summary.assessed`、`expected`、`not_evaluated` | 验收分母、请求数、未评估数 |
 | `summary.closure_check` | 首次闭合信号（预测夹实/未夹实）× 实测结果（抓稳/失败）的四格表；没有实测结果的记为 `unmeasured`，未闭合的记为 `no_check` |
-| `summary.preference_data` | 按部位和资产坐标系下的接近轴、闭合轴分组的实测稳定率。第一次失败后换部位继续尝试的结果只进这里，不改变首次结果 |
+| `summary.preference_data` | 按部位和资产坐标系下的接近轴、闭合轴分组的实测稳定率。开启偏好补测（`conditions.json` 的 `collect_preferences`，默认关闭）时，第一次失败后换部位继续尝试的结果也进这里，不改变首次结果 |
 | `trial.hold.motion_peaks`、`segment_motion_peaks` | 25 Hz 实测 TCP 差分得到的整段与各段峰值 |
 | `trial.hold.preflight.selected.timing.<段>.constraint_ratios` | 指令的关节速度、加速度和 TCP 峰值与各自上限之比，用于判断强度受哪个约束限制；经过参考点转移的试次在 `trial.hold.preflight.relocation.actual_preflight.selected.timing` 下 |
-| `trial.cpu_s`、`wall_s`、`load` | CPU time、wall time 与主机负载 |
+| `trial.cpu_s`、`wall_s`、`load` | CPU time、wall time 与主机负载；含偏好补测，首次与补测分别在 `first_attempt_timing`、`preference_timing` |
 
 `eval_asset_grasp.py compare` 按相同 seed 配对两批结果，两侧都按当前验收规则从 trial 重新判定。
 

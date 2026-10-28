@@ -112,3 +112,21 @@ def test_full_candidate_stream_matches_numpy_query(monkeypatch):
             np.testing.assert_array_equal(first.pose, second.pose)
             assert (first.open_gap, first.width, first.backoff, first.cost, first.info) == (
                 second.open_gap, second.width, second.backoff, second.cost, second.info)
+
+
+def test_cached_packets_preserve_sample_order_span_and_writable_results():
+    rng = np.random.default_rng(19)
+    surface = CollisionSurface([(np.eye(4), 'convex', Box((.02, .04, .06)).points())])
+    axis = np.array([0., 1., 0.])
+    origins = rng.uniform(-.025, .025, (128, 3))
+    first = surface.closing_span(axis, -.03, 0.)
+    second = surface.closing_span(axis, .03, .04)
+    for query, points, direction in [(first, origins, axis), (second, origins, axis),
+            (surface, origins[::-1].copy(), -axis), (first, rng.normal(size=(128, 3)), axis),
+            (first, origins, axis), (surface.at_contacts(np.array([[.01, 0., 0.]])), origins, axis)]:
+        expected = reference(query, points, direction)
+        for actual, correct in zip(query.interval(points, direction), expected):
+            np.testing.assert_array_equal(actual, correct)
+            actual[:] = 123.  # A consumer cannot corrupt a later cached query.
+        for actual, correct in zip(query.interval(points, direction), expected):
+            np.testing.assert_array_equal(actual, correct)

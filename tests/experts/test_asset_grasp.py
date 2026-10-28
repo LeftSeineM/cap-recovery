@@ -360,6 +360,7 @@ def test_solid_whole_envelope_also_follows_authored_parts(monkeypatch):
 def test_shake_search_restarts_at_next_target_and_preserves_failures():
     from table_1000.experts.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
+    evaluator.collect_preferences = True
     calls = []
     def attempt(seed, center, size, video, excluded):
         calls.append((seed, center, size, list(excluded)))
@@ -372,6 +373,7 @@ def test_shake_search_restarts_at_next_target_and_preserves_failures():
     assert result['status'] == 'failed'
     assert [a['status'] for a in result['preference_attempts']] == ['success']
     assert result['cpu_s'] == 2 and result['wall_s'] == 4 and result['sim_s'] == 6
+    assert result['preference_timing'] == {'cpu_s': 1., 'wall_s': 2., 'sim_s': 3.}
     summary = summarize([result], 1)
     assert summary['success'] == 0 and summary['first_attempt_success'] == 0
     assert summary['attempts'] == 2
@@ -380,6 +382,7 @@ def test_shake_search_restarts_at_next_target_and_preserves_failures():
 def test_shake_search_stops_when_geometric_targets_are_exhausted():
     from table_1000.experts.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
+    evaluator.collect_preferences = True
     evaluator._attempt = lambda *args: {'status': 'failed', 'hold': {'held': False},
         'selected_target_index': 0, 'target_attempts': [{}], 'target_count': 1, 'cpu_s': 1., 'wall_s': 2., 'sim_s': 3.}
     result = evaluator.trial(0)
@@ -389,6 +392,7 @@ def test_shake_search_stops_when_geometric_targets_are_exhausted():
 def test_later_unreachable_target_does_not_count_as_initially_unreachable():
     from table_1000.experts.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
+    evaluator.collect_preferences = True
     def attempt(seed, center, size, video, excluded):
         report = {'status': 'failed', 'target_attempts': [{}], 'target_count': 2,
                   'cpu_s': 1., 'wall_s': 2., 'sim_s': 3.}
@@ -402,6 +406,23 @@ def test_later_unreachable_target_does_not_count_as_initially_unreachable():
     assert result['failure']['reason'] == 'slipped during shake'
     assert result['preference_attempts'][0]['failure']['reason'] == 'no reachable grasp'
     assert summarize([result], 1)['initial_unreachable'] == 0
+
+
+def test_default_trial_stops_after_first_hold_without_preference_retries():
+    from table_1000.experts.asset_grasp import Evaluator
+    evaluator = Evaluator.__new__(Evaluator)
+    evaluator.collect_preferences = False
+    calls = []
+    def attempt(*args):
+        calls.append(args)
+        return {'status': 'failed', 'hold': {'held': False}, 'selected_target_index': 0,
+                'target_count': 18, 'cpu_s': 1., 'wall_s': 2., 'sim_s': 3.}
+    evaluator._attempt = attempt
+    result = evaluator.trial(0)
+    assert len(calls) == 1 and result['status'] == 'failed'
+    assert result['preference_attempts'] == []
+    assert result['preference_timing'] == {'cpu_s': 0, 'wall_s': 0, 'sim_s': 0}
+    assert result['first_attempt_timing']['cpu_s'] == result['cpu_s'] == 1.
 
 
 def test_comparison_self_uses_same_assessed_denominator_on_both_sides(tmp_path):

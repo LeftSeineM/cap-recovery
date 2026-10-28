@@ -204,7 +204,8 @@ def test_empty_held_lift_phase_preserves_later_part_order_and_retry_ids(monkeypa
     def candidates(shape, *args, **kwargs):
         part = int(shape.size[0]) - 1
         for index in range(20 if part else 2):
-            generated[part] += 1
+            if not kwargs.get('_first_angle'):
+                generated[part] += 1
             angle = 40. if part else 20. * index
             yield Grasp(np.eye(4), .04, .03, 0., float(index),
                 {'approach_deg': angle, 'closest_deg': 40. if part else 0.,
@@ -226,10 +227,52 @@ def test_empty_held_lift_phase_preserves_later_part_order_and_retry_ids(monkeypa
     skill.why = lambda *args: None
     skip = set()
     choices = list(skill.options(targets, ['right'], skip))
-    assert at_first_lift == [[2, 1]]  # only prime the entirely out-of-angle part
+    assert at_first_lift == [[2, 1]]  # cost heads retain their original phase and retry order
     assert all(choice[-1] for choice in choices)
     assert [choice[1].info['label'] for choice in choices] == [*( (1, i) for i in range(20)), (0, 0), (0, 1)]
     assert skip == {('right', part, index) for part, count in [(0, 2), (1, 20)] for index in range(count)}
+
+
+@pytest.mark.parametrize('near_arm_reachable', [True, False])
+def test_part_cost_heads_are_lazy_for_unused_arm_and_phase(monkeypatch, near_arm_reachable):
+    import table_1000.experts.skills.grasping as grasping
+    from table_1000.experts.grasps import Grasp
+    skill = grasping.Grasping()
+    targets = [types.SimpleNamespace(body='object:body', names=[str(i)], offset=np.eye(4),
+                                     shape=Box((i + 1., .02, .02))) for i in range(2)]
+    calls = []
+    def candidates(shape, transform, hand, *args, **kwargs):
+        part = int(shape.size[0]) - 1
+        calls.append((hand, part, bool(kwargs.get('_first_angle'))))
+        angle = 40. if part else 0.
+        yield Grasp(np.eye(4), .04, .03, 0., float(part),
+                    {'approach_deg': angle, 'closest_deg': angle})
+    monkeypatch.setattr(grasping, 'grasp_candidates', candidates)
+    side = types.SimpleNamespace(finger_targets=lambda gap: {})
+    skill.ctx = types.SimpleNamespace(poses=lambda: {'object:body': np.eye(4)},
+                                     spec=types.SimpleNamespace(arms={'right': side, 'left': side}))
+    skill.model = types.SimpleNamespace(vector=lambda _: np.zeros(1), ik=lambda arm, *a, **kw:
+        ('Success' if near_arm_reachable or arm == 'left' else 'Failure', np.zeros(1)))
+    skill.solvers = {arm: types.SimpleNamespace(sync=lambda: None, allow=lambda *a: None)
+                     for arm in ('right', 'left')}
+    skill.hands = {arm: arm for arm in ('right', 'left')}
+    skill.centre = lambda target: np.zeros(3)
+    skill.shoulder = lambda arm: np.ones(3) * (1 if arm == 'right' else 2)
+    skill.obstacles = lambda *a: ([], [])
+    skill.contact_surface = lambda target: None
+    skill.grasp_center_of_mass = lambda *a: None
+    skill.grasp_weight = lambda target: 0.
+    skill.part_load = lambda *a: 0.
+    skill.why = lambda *a: None
+    skip = set()
+    first = next(skill.options(targets, ['left', 'right'], skip))
+    selected = 'right' if near_arm_reachable else 'left'
+    assert first[0] == selected and first[1].target.names == ['0']
+    assert skip == {(selected, 0, 0)}
+    assert {(arm, part) for arm, part, probe in calls if probe} == {
+        (arm, part) for arm in ('right', 'left') for part in (0, 1)}
+    assert {(arm, part) for arm, part, probe in calls if not probe} == (
+        {('right', 0)} if near_arm_reachable else {('right', 0), ('left', 0)})
 
 
 def test_part_heads_preserve_internal_order_even_when_hidden_load_is_lower():

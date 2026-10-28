@@ -245,6 +245,7 @@ class Grasping:
                 continue
             streams = []
             metadata = []
+            angles = []
             for target in targets:
                 transform = self.ctx.poses()[target.body] @ target.offset
                 preferred = approach if approach is not None else normalized(
@@ -259,25 +260,26 @@ class Grasping:
                                  contact_surface=surface,
                                  reference_rotation=self.model.tcp(arm, world=True)[:3, :3]
                                                     if surface is not None and need is not None else None)
-                if len(targets) == 1 or max_angle is not None and max_angle < np.pi:
-                    arguments['_placement_cache'] = {}
+                arguments['_placement_cache'] = {}
                 inputs = target.shape, transform, self.candidate_hand(target, arm), obstacles, preferred
+                # As with a single target, the phase needs only the closest
+                # valid approach. Cost-sorted part heads can be expensive and
+                # are needed only when this arm/phase is actually traversed.
+                # Share placements with the full stream, whose candidate and
+                # retry ordering remains unchanged.
+                probe = next(grasp_candidates(*inputs, **arguments, max_angle=max_angle,
+                                               _first_angle=True), None)
+                angles.append(probe.info['closest_deg'] if probe is not None else np.inf)
                 if len(targets) == 1:
-                    probe = next(grasp_candidates(*inputs, **arguments, max_angle=max_angle,
-                                                   _first_angle=True), None)
                     single[arm] = inputs, arguments, probe
                     streams.append(())
                     metadata.append((target, supports))
                     continue
                 # Keep original per-part retry ids when a phase has candidates.
-                empty = max_angle is not None and max_angle < np.pi and next(
-                    grasp_candidates(*inputs, **arguments, max_angle=max_angle), None) is None
-                candidates = iter(()) if empty else grasp_candidates(*inputs, **arguments)
+                candidates = iter(()) if probe is None else grasp_candidates(*inputs, **arguments)
                 streams.append(Replayed(candidates))
                 metadata.append((target, supports))
-            heads = [single[arm][2]] if len(targets) == 1 else [next(iter(stream), None) for stream in streams]
-            found[arm] = streams, metadata, [head.info['closest_deg'] if head is not None else np.inf
-                                             for head in heads]
+            found[arm] = streams, metadata, angles
         # The approach any candidate of either arm comes closest to (each knows it from its first).
         closest = min((angle for _, _, angles in found.values() for angle in angles if np.isfinite(angle)),
                       default=0.)

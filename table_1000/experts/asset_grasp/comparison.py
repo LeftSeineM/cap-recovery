@@ -30,6 +30,11 @@ def timing(reports):
     first = [report.get('first_attempt_timing', report) for report in reports]
     return {'trial_wall_s': quantiles(report['wall_s'] for report in reports),
             'first_attempt_wall_s': quantiles(report['wall_s'] for report in first),
+            'first_attempt_cpu_s': quantiles(report['cpu_s'] for report in first),
+            'preference_wall_s': quantiles(report['wall_s'] - initial['wall_s']
+                                           for report, initial in zip(reports, first)),
+            'preference_cpu_s': quantiles(report['cpu_s'] - initial['cpu_s']
+                                          for report, initial in zip(reports, first)),
             'first_sim_s': quantiles(report['sim_s'] for report in first),
             'cpu_s': quantiles(report['cpu_s'] for report in reports),
             'note': 'trial wall and CPU include all preference attempts; first_attempt_timing records the first attempt separately.'}

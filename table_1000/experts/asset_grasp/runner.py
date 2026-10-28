@@ -51,7 +51,8 @@ def worker(args, root):
         for asset in args.asset:
             try:
                 evaluator = Evaluator(asset, args.robot, args.assets, args.work, root, device,
-                                      VIEWS if cameras else {}, diagnostic_shake=args.diagnostic_shake)
+                                      VIEWS if cameras else {}, diagnostic_shake=args.diagnostic_shake,
+                                      collect_preferences=args.collect_preferences)
                 for seed in args.seeds:
                     dump_stacks_every()
                     result = args.result or args.output / asset
@@ -168,6 +169,7 @@ def run(args, root, jobs, error):
                   'center_xy_m': args.center or [a + b for a, b in zip(load_robot_test(args.robot).WORK, WORK_OFFSET)],
                   'physics_dt_s': PHYSICS_DT, 'external_force': False,
                   'diagnostic_shake': args.diagnostic_shake,
+                  'collect_preferences': args.collect_preferences,
                   'diagnostic_shake_amplitude_rad': SHAKE_AMPLITUDE, 'diagnostic_shake_segment_s': SHAKE_SECONDS,
                   'transport_envelope': TRANSPORT, 'motion_limits': MOTION_LIMITS,
                   'motion_tolerance': MOTION_TOLERANCE, 'rotation_limit_rad': float(ROTATION_LIMIT),
@@ -213,6 +215,8 @@ def run(args, root, jobs, error):
             cmd.append('--video')
         if args.diagnostic_shake:
             cmd.append('--diagnostic-shake')
+        if args.collect_preferences:
+            cmd.append('--collect-preferences')
         return cmd, work / 'run.log', f'asset grasp part {index}'
 
     started = time.perf_counter()

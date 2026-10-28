@@ -31,6 +31,8 @@ def main(argv=None):
     parser.add_argument('--center', nargs=2, type=float, help='world XY; default WORK + (0.05, 0) m')
     parser.add_argument('--region-size', type=float, default=.10, help='square side length in metres')
     parser.add_argument('--diagnostic-shake', action='store_true', help='append the optional vigorous wrist diagnostic')
+    parser.add_argument('--collect-preferences', action='store_true',
+                        help='reset failed holds and try remaining parts to collect extra grasp preference data')
     parser.add_argument('--video', action='store_true', help='record every requested seed live (requires --dev)')
     parser.add_argument('--seeds-per-worker', type=int,
                         help='maximum seeds of one asset per process, for balancing long candidate searches')
