@@ -22,6 +22,19 @@ from table_1000.common.timing import timed
 _CONTACT_MATH = ThreadpoolController()
 
 
+def oriented_bounds(points):
+    """Keep point-based bounds, repairing hull winding only if that query fails.
+
+    Trimesh raises ValueError for empty projected silhouettes of some prisms.
+    Repairing a valid hull can rotate the box and change the fitted shape.
+    """
+    import trimesh
+    try:
+        return trimesh.bounds.oriented_bounds(points)
+    except ValueError:
+        return trimesh.bounds.oriented_bounds(trimesh.convex.convex_hull(points))
+
+
 def normalized(vector):
     vector = np.asarray(vector, dtype=float)
     return vector / np.linalg.norm(vector)

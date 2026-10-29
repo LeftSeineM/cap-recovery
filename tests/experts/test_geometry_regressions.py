@@ -1,12 +1,15 @@
 """Round support floors and nondegenerate prisms encountered in scene 000100."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import trimesh
 
 from table_1000.experts.asset_grasp import oriented_shape
-from table_1000.experts.grasps import Box
+from table_1000.experts.grasps import Box, Cylinder, fitted, oriented_bounds
 from table_1000.experts.skills import semantic
 from table_1000.experts.skills.placing import Placing
 from table_1000.experts.thin_objects import box_extents
@@ -40,7 +43,40 @@ def test_round_floor_does_not_keep_out_the_table_below_it():
 ])
 def test_oriented_bounds_repairs_prism_winding(points):
     points = np.asarray(points, dtype=np.float32).astype(float)
-    assert (box_extents(points) > 0).all()
+    with pytest.raises(ValueError, match='zero-size array'):
+        trimesh.bounds.oriented_bounds(points)
+    repaired = trimesh.bounds.oriented_bounds(trimesh.convex.convex_hull(points))
+    actual = oriented_bounds(points)
+    np.testing.assert_array_equal(actual[0], repaired[0])
+    np.testing.assert_array_equal(actual[1], repaired[1])
+    np.testing.assert_array_equal(box_extents(points), np.sort(repaired[1]))
     shape, transform = oriented_shape(points)
     local = (points - transform[:3, 3]) @ transform[:3, :3]
     assert np.all(np.ptp(local, axis=0) <= np.ptp(shape.points(), axis=0) + 1e-8)
+
+
+def test_scope_probe_ground_lead_keeps_point_based_box(monkeypatch):
+    # Collision piece 11 from the regression asset, in its authored frame.
+    points = np.asarray(json.loads((Path(__file__).parent / 'fixtures' /
+                                   'scope_probe_ground_lead.json').read_text()))
+    expected_transform, expected_extents = trimesh.bounds.oriented_bounds(points)
+    repaired_transform, _ = trimesh.bounds.oriented_bounds(trimesh.convex.convex_hull(points))
+    repaired_local = points @ repaired_transform[:3, :3].T + repaired_transform[:3, 3]
+    assert isinstance(fitted(repaired_local)[0], Cylinder)
+    original_hull = trimesh.convex.convex_hull
+
+    def only_unrepaired_hull(*args, **kwargs):
+        assert kwargs.get('repair') is False, 'valid point-based bounds must not repair the hull'
+        return original_hull(*args, **kwargs)
+
+    monkeypatch.setattr(trimesh.convex, 'convex_hull', only_unrepaired_hull)
+    actual_transform, actual_extents = oriented_bounds(points)
+    np.testing.assert_array_equal(actual_transform, expected_transform)
+    np.testing.assert_array_equal(actual_extents, expected_extents)
+    np.testing.assert_array_equal(box_extents(points), np.sort(expected_extents))
+    shape, transform = oriented_shape(points)
+    assert isinstance(shape, Box)
+    local = points @ expected_transform[:3, :3].T + expected_transform[:3, 3]
+    expected_shape, offset = fitted(local)
+    np.testing.assert_array_equal(shape.points(), expected_shape.points())
+    np.testing.assert_array_equal(transform, np.linalg.inv(expected_transform) @ offset)

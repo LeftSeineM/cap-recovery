@@ -39,11 +39,8 @@ START_PROJECTION_TOLERANCE = .001
 
 def oriented_shape(points):
     """Fit in the geometry's oriented box, so a diagonal wire keeps its true width."""
-    import trimesh
-    from table_1000.experts.grasps import fitted
-    # Repair hull winding before the silhouette query (thin container walls
-    # and wrapper tails otherwise produce an empty projected contour).
-    to_box, _ = trimesh.bounds.oriented_bounds(trimesh.convex.convex_hull(points))
+    from table_1000.experts.grasps import fitted, oriented_bounds
+    to_box, _ = oriented_bounds(points)
     local = np.asarray(points) @ to_box[:3, :3].T + to_box[:3, 3]
     shape, offset = fitted(local)
     return shape, np.linalg.inv(to_box) @ offset
