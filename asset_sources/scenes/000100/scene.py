@@ -244,9 +244,10 @@ def ready_to_work(layout):
     notebook_stack(layout, NOTEBOOKS, (-.38, -.28))
     layout.row(['stapler', 'tape'], (-.22, -.30), yaw=ACROSS, gap=.03)
     into(layout, [*CLIPS, *MAGNETS], 'jar', .03)
-    drawer_contents(layout, 1, [*SMALL, 'knife', 'glue_stick'], yaw=(-.2, .2), lying=['glue_stick'])
+    # Keep the board eraser with the small tools: beside both jars it crowds the exposed drawer floor.
+    drawer_contents(layout, 1, [*SMALL, 'knife', 'glue_stick', 'board_eraser'], yaw=(-.2, .2), lying=['glue_stick'])
     drawer_contents(layout, 2, ['remote', 'charger', 'snack', 'glue_bottle'], yaw=(-.2, .2), lying=['glue_bottle'])
-    drawer_contents(layout, 3, ['screwdriver', 'board_eraser', 'lidded_jar', 'dish'], yaw=(-.2, .2))
+    drawer_contents(layout, 3, ['screwdriver', 'lidded_jar', 'dish'], yaw=(-.2, .2))
 
 
 def in_columns(layout):
