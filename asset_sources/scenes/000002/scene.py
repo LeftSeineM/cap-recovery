@@ -18,8 +18,7 @@ TABLE = {'size': (1.36, 1.02), 'height': .755, 'top_thickness': .03, 'leg_size':
 
 GAP = .29               # m from the base origin (the robot's centre) to the table edge
 
-ROBOT = {
-    'asset': 'robots/x1pro_rm001',
+ROBOTS = {'x1pro_rm001': {
     'position': (0., -TABLE['size'][1] / 2 - GAP, 0.),
     'yaw': math.pi / 2,
     # Arms in the zero pose (folded), torso raised so the folded hands clear the table top.
@@ -27,7 +26,8 @@ ROBOT = {
         'lift_joint': .40,
         'head_pitch_joint': .15,   # head camera looks at the whole table
     },
-}
+}}
+ROBOT = 'x1pro_rm001'
 
 OBJECTS = {
     'cabinet': {'asset': 'objects/cabinet/000000'},
@@ -61,7 +61,7 @@ TOP_FLOOR, PEN_REGION, PEN_TURN = 'cabinet.drawer1.bottom', ((-.03, -.06), (.03,
 def initialize(layout):
     """Cabinet anywhere in reach, facing the robot within +-15 degrees; pen in the top drawer."""
     rng = layout.rng
-    rx, ry = ROBOT['position'][:2]
+    rx, ry = ROBOTS[ROBOT]['position'][:2]
     x, y = rx + rng.uniform(-CABINET_SIDE, CABINET_SIDE), ry + rng.uniform(*CABINET_AHEAD)
     face = math.atan2(y - ry, x - rx) - math.pi / 2
     layout.place('cabinet', region=((x, y), (x, y)), yaw=(face - CABINET_TURN, face + CABINET_TURN))

@@ -22,7 +22,8 @@ def report(seed, done, status='failed', steps_run=None, reason='no grasp'):
 
 def write(batch, summary, reports):
     (batch / 'episodes').mkdir(parents=True)
-    (batch / 'summary.json').write_text(json.dumps(summary))
+    (batch / 'summary.json').write_text(json.dumps({'robot': 'test', 'expert': '0000', 'scope': {0: None}, 'layout': 0,
+                                                     'outside_scope': False, **summary}))
     for name, entry in reports.items():
         (batch / 'episodes' / f'{name}.json').write_text(json.dumps(entry))
 
@@ -48,7 +49,7 @@ def test_the_failed_step_is_the_first_not_completed():
 
 def test_cases_come_by_success_rate_and_start_before_the_failed_step(tmp_path):
     whole = tmp_path / 'expert' / '000002' / 'a-whole'
-    write(whole, {'run': 'a-whole', 'scene': '000002'},
+    write(whole, {'run': 'a-whole', 'scene': '000002', 'layout': 3, 'outside_scope': True},
           {'0': report(0, [1, 2, 3], status='success'), '1': report(1, [1])})
     repeated = tmp_path / 'expert' / '000002' / 'b-repeats'
     write(repeated, {'run': 'b-repeats', 'scene': '000002', 'steps_run': [2, 2], 'from': str(whole),
@@ -64,6 +65,7 @@ def test_cases_come_by_success_rate_and_start_before_the_failed_step(tmp_path):
     # The batch's first step starts from the checkpoints of the batch it ran from; a later one from its own.
     assert found[0]['start'] == str(whole / 'checkpoints' / 'step1.hdf5')
     assert found[2]['start'] == str(whole / 'checkpoints' / 'step1.hdf5') and found[2]['step'] == 2
+    assert found[2]['layout'] == 3 and found[2]['outside_scope'] is True
 
 
 def test_a_drag_moves_in_the_image_plane_at_the_point_depth():
@@ -132,6 +134,7 @@ def test_a_recorded_failure_gives_the_state_at_the_failure(tmp_path):
 
 def test_failure_snapshots_are_the_checkpoints_the_failed_steps_start_from(tmp_path):
     from scripts.experts.failure_snapshots import main
+    from scripts.scenes.run_expert import check_checkpoint_name
     from table_1000.experts.generate import read_checkpoints
     batch = tmp_path / 'batch'
     write(batch, {'scene': '000002', 'physics': 'isaac-cpu', 'commit': 'abc'},
@@ -141,6 +144,7 @@ def test_failure_snapshots_are_the_checkpoints_the_failed_steps_start_from(tmp_p
     (snapshots,) = (tmp_path / 'runs' / '000002').iterdir()
     attrs, found = read_checkpoints(snapshots / 'checkpoints' / 'step1.hdf5')   # seed 3 failed in step 2
     assert attrs['physics'] == 'isaac-cpu' and list(found) == [3]
+    check_checkpoint_name(attrs, [types.SimpleNamespace(name=name) for name in NAMES])
     # 1 s (25 control steps) before the last sample, not before the step began (sample 4).
     np.testing.assert_array_equal(found[3][1]['rigid_object']['pen']['root_pose'], [np.arange(4 * 7., 5 * 7.)])
     np.testing.assert_array_equal(found[3][1]['targets']['gripper'], [[14.]])
@@ -187,7 +191,8 @@ def test_step_start_operates_first_ik_without_a_solver(tmp_path, monkeypatch):
     generator.skill_attempts = 3
     generator.env, generator.model, generator.spec = env, model, model.spec
     generator.env_args = {}
-    generator.scene = types.SimpleNamespace(OBJECTS={}, ROBOT={'position': [0., 0., 0.]})
+    generator.identity = {'robot': 'test', 'expert': '0000', 'scope': {0: None}, 'layout': 0, 'outside_scope': False}
+    generator.scene = types.SimpleNamespace(OBJECTS={}, ROBOT='test', ROBOTS={'test': {'position': [0., 0., 0.]}})
     expert = types.SimpleNamespace(STEPS=[Step('first', None), Step('move', None)])
     generator.expert = HumanExpert(expert, 2, lambda ctx, step: operate(ctx, step, operator, show, {}, log))
     generator.recording = types.SimpleNamespace(begin=lambda *args: None, finish=lambda *args: None)

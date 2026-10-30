@@ -26,6 +26,8 @@ checks and evaluation, never for a policy. ``recorders`` (Isaac Lab's
 
 from pathlib import Path
 
+from table_1000.scenes import robot_config
+
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
@@ -178,9 +180,9 @@ def env_cfg(scene, spec, assets, *, modes=None, cameras=None, depth=False, views
     fixed video views; ``modes``: arm, lift and head control modes (:func:`.actions.actions_cfg`)."""
     root = Path(root or ROOT)
     urdf = root / spec.urdf
-    robot_q = dict(scene.ROBOT['joints'])
+    robot_q = dict(robot_config(scene, spec.name)['joints'])
     if spec.base:
-        robot_q.update(zip(spec.base.virtual_joints, scene_base(scene)))
+        robot_q.update(zip(spec.base.virtual_joints, scene_base(scene, spec.name)))
     joints = [*spec.body_joints, *(spec.base.virtual_joints if spec.base else ())]
 
     @configclass
@@ -198,7 +200,7 @@ def env_cfg(scene, spec, assets, *, modes=None, cameras=None, depth=False, views
     agent.base_pose = ObservationTermCfg(func=base_pose, params={
         'asset_cfg': SceneEntityCfg('robot', joint_names=list(spec.base.virtual_joints) if spec.base else [],
                                     preserve_order=True),
-        'fixed': None if spec.base else list(scene_base(scene))})
+        'fixed': None if spec.base else list(scene_base(scene, spec.name))})
     for name, arm in spec.arms.items():
         offset = np.eye(4)
         offset[:3, 3] = arm.tcp[1]
@@ -243,10 +245,10 @@ def env_cfg(scene, spec, assets, *, modes=None, cameras=None, depth=False, views
     return cfg
 
 
-def scene_base(scene):
+def scene_base(scene, robot=None):
     """``(x, y, yaw)`` of the robot in ``scene``."""
-    position = scene.ROBOT['position']
-    return float(position[0]), float(position[1]), float(scene.ROBOT['yaw'])
+    position = robot_config(scene, robot)['position']
+    return float(position[0]), float(position[1]), float(robot_config(scene, robot)['yaw'])
 
 
 class RobotEnv:
@@ -310,8 +312,8 @@ class RobotEnv:
 
     def initial_robot_q(self):
         """Scene joints (others at zero) and, for a mobile base, its pose as virtual joint values."""
-        q = dict(zip(self.spec.base.virtual_joints, scene_base(self.scene_source))) if self.spec.base else {}
-        q.update(self.scene_source.ROBOT['joints'])
+        q = dict(zip(self.spec.base.virtual_joints, scene_base(self.scene_source, self.spec.name))) if self.spec.base else {}
+        q.update(robot_config(self.scene_source, self.spec.name)['joints'])
         return q
 
     def reset(self, layout, robot_q=None, object_q=None):

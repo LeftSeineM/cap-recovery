@@ -1,6 +1,6 @@
 """How much expert episodes moved the torso and the base, from their reports.
 
-``uv run python scripts/experts/resource_stats.py data/scenes/000002/isaac-cpu [more batches ...]``
+``uv run python scripts/experts/resource_stats.py data/scenes/000002/x1pro_rm001/0000/isaac-cpu [more batches ...]``
 
 Counts, in each batch's ``episodes/*.json``, the ``torso moved`` notes (moves of the torso lift and
 their travel, m) and the ``base relocated`` notes (moves of the base, their travel, m, and turn,

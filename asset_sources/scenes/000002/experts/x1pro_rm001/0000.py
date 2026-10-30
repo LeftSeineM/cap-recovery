@@ -8,6 +8,10 @@ geometry and joints) and the atomic ones under them; which arm, and where the
 base stands, the skills choose.
 """
 
+ROBOT = 'x1pro_rm001'
+SCOPE = {0: None}
+SOURCE = 'hand'
+
 import numpy as np
 
 from table_1000.experts import skills

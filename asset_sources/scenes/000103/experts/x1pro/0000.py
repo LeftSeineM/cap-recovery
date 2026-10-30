@@ -6,6 +6,10 @@ move the wireless mouse to a clear part of the table. Intended for layout 3
 from the live geometry.
 """
 
+ROBOT = 'x1pro'
+SCOPE = {3: None}
+SOURCE = 'hand'
+
 from table_1000.experts import skills
 from table_1000.experts.context import Step, run_steps
 from table_1000.experts.skills import semantic

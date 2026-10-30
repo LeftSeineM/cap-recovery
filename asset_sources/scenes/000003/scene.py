@@ -14,8 +14,9 @@ from table_1000.scenes.layout import PENETRATION_LIMIT, SamplingFailed, yaw_pose
 
 TABLE = {'size': (1.36, 1.02), 'height': .755, 'top_thickness': .03, 'leg_size': .05,
          'center': (0., 0.), 'friction': (.5, .4)}
-ROBOT = {'asset': 'robots/x1pro_rm001', 'position': (0., -.80, 0.), 'yaw': math.pi / 2,
-         'joints': {'lift_joint': .40, 'head_pitch_joint': .15}}
+ROBOTS = {'x1pro_rm001': { 'position': (0., -.80, 0.), 'yaw': math.pi / 2,
+         'joints': {'lift_joint': .40, 'head_pitch_joint': .15}}}
+ROBOT = 'x1pro_rm001'
 OBJECTS = {'cabinet': {'asset': 'objects/cabinet/000000'}, 'pen': {'asset': 'objects/pen/000002'}}
 VIEWS = {'wide': {'position': (1.55, -1.65, 1.8), 'target': (0., -.15, .85),
                   'focal_length_mm': 20, 'resolution': (960, 540)}}

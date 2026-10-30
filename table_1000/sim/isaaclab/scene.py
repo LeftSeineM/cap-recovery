@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from table_1000.scenes import robot_config
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -248,10 +250,10 @@ def robot_cfg(scene, spec, assets, robot_q):
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
-    position, rotation = pose(np.eye(4) if spec.base else robot_base(scene.ROBOT))
+    position, rotation = pose(np.eye(4) if spec.base else robot_base(robot_config(scene, spec.name)))
     return ArticulationCfg(
         prim_path='{ENV_REGEX_NS}/Robot',
-        spawn=sim_utils.UsdFileCfg(usd_path=str(usd_entry(Path(assets) / scene.ROBOT['asset'])),
+        spawn=sim_utils.UsdFileCfg(usd_path=str(usd_entry(Path(assets) / robot_config(scene, spec.name)['asset'])),
                                    activate_contact_sensors=True),
         init_state=ArticulationCfg.InitialStateCfg(pos=position, rot=rotation,
                                                    joint_pos={name: float(value) for name, value in robot_q.items()}),

@@ -1,5 +1,9 @@
 """Open the bottom drawer, carry the table pen into it, and close it using shared skills."""
 
+ROBOT = 'x1pro_rm001'
+SCOPE = {0: None}
+SOURCE = 'hand'
+
 import numpy as np
 
 from table_1000.experts import skills

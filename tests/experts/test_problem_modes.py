@@ -78,7 +78,8 @@ def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeyp
         generator.skill_attempts = 1
         generator.env, generator.model, generator.spec = env, model, model.spec
         generator.env_args = {}
-        generator.scene = SimpleNamespace(OBJECTS={}, ROBOT={'position': [0., 0., 0.]})
+        generator.identity = {'robot': 'test', 'expert': '0000', 'scope': {0: None}, 'layout': 0, 'outside_scope': False}
+        generator.scene = SimpleNamespace(OBJECTS={}, ROBOT='test', ROBOTS={'test': {'position': [0., 0., 0.]}})
         generator.expert = SimpleNamespace(solve=solve)
         generator.recording = SimpleNamespace(begin=lambda *args: None, finish=lambda *args: None)
         (generator.output / 'episodes').mkdir(parents=True)

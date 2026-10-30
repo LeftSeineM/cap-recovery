@@ -183,11 +183,12 @@ def inventory(source, excluded=()):
 
 
 def scene(asset, spec, settings):
+    placement = settings.ROBOT
     return types.SimpleNamespace(
         TABLE=settings.TABLE, OBJECTS={'object': {'asset': asset}},
-        ROBOT={'asset': f'robots/{spec.name}', 'position': settings.ROBOT['position'],
-               'yaw': settings.ROBOT['yaw'],
-               'joints': spec.keyframe(settings.ROBOT.get('keyframe', 'zero'))})
+        ROBOT=spec.name, ROBOTS={spec.name: {'asset': f'robots/{spec.name}', 'position': placement['position'],
+               'yaw': placement['yaw'],
+               'joints': spec.keyframe(placement.get('keyframe', 'zero'))}})
 
 
 def placement(source, assets, seed, center, size=REGION_SIZE):

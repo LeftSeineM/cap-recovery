@@ -27,6 +27,8 @@ primitives are parked off to the side.
 """
 
 from pathlib import Path
+from table_1000.scenes import robot_config
+
 import time
 import types
 import xml.etree.ElementTree as ET
@@ -173,8 +175,8 @@ def check_scene(spec, settings):
     robot = settings.ROBOT
     scene = types.SimpleNamespace(
         TABLE=settings.TABLE, OBJECTS={}, PRIMITIVES=PRIMITIVES,
-        ROBOT={'asset': f'robots/{spec.name}', 'position': robot['position'], 'yaw': robot['yaw'],
-               'joints': spec.keyframe(robot.get('keyframe', 'zero'))})
+        ROBOT=spec.name, ROBOTS={spec.name: {'asset': f'robots/{spec.name}', 'position': robot['position'], 'yaw': robot['yaw'],
+               'joints': spec.keyframe(robot.get('keyframe', 'zero'))}})
 
     def placement(**poses):
         layout = {name: parked(i) for i, name in enumerate(PRIMITIVES)}
@@ -286,7 +288,7 @@ class Checker:
 
     def base_transform(self):
         x, y, yaw = self.env.obs['agent']['base_pose'][0]
-        transform = translation(x, y, 0. if self.spec.base else self.settings.ROBOT['position'][2])
+        transform = translation(x, y, 0. if self.spec.base else robot_config(self.scene, self.spec.name)['position'][2])
         transform[:3, :3] = Rotation.from_euler('z', yaw).as_matrix()
         return transform
 

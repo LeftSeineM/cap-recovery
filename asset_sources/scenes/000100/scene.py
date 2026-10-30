@@ -1,13 +1,17 @@
-"""Scene 000100: X1Pro at a cluttered office desk, 38 objects; layouts 1–10 arrange them, five tidy and five not.
+"""Scene 000100: cluttered office desk for X1Pro and RM001, 38 objects.
+
+Layouts 1–10 arrange them, five tidy and five not.
 
 World frame: origin on the floor below the table centre, +Z up. The robot stands
-in front of the table's -Y edge facing +Y, 0.29 m behind it (its torso reaches 0.26 m
-ahead of the base); with its torso lift and the gripper tilted up to 60 degrees from
+in front of the table's -Y edge facing +Y. X1Pro starts 0.29 m behind it (its torso
+reaches 0.26 m ahead of the base); with its torso lift and the gripper tilted up to 60 degrees from
 straight down it reaches the whole width of the table from the front edge to about
 y = +0.10. Containers stand in a
 back row inside that reach: the three-drawer cabinet on the right (drawers toward
 the robot), the file basket on the left, two pen holders and three glass jars
-between them. The rest lies in the front area, y from -0.47 to -0.10.
+between them. RM001 starts farther back for its head camera, then advances to the
+working edge; see ROBOTS for its placement and reach checks. The rest lies in the
+front area, y from -0.47 to -0.10.
 
 ``initialize`` makes a messy desk: containers jittered in the back row (the small
 jars may stand anywhere), pens partly in the holders and partly strewn, notebooks
@@ -27,13 +31,21 @@ from table_1000.scenes.layout import SamplingFailed, yaw_pose
 TABLE = {'size': (1.36, 1.02), 'height': .755, 'top_thickness': .03, 'leg_size': .05,
          'center': (0., 0.), 'friction': (.5, .4)}
 
-ROBOT = {
-    'asset': 'robots/x1pro',
+ROBOTS = {'x1pro': {
     'position': (-.03, -.80, 0.),
     'yaw': math.pi / 2,
     # Torso raised and head tilted down so the head camera sees the whole desk over the folded arms.
     'joints': {'lift_joint': .70, 'head_pitch_joint': .60},
-}
+}}
+# RM001 uses the README ready lift (0.45 m), as in 000002/000003 with 5 cm
+# extra torso clearance. With the calibrated head camera, y=-1.30 and pitch=0.10
+# put all four corners of the 1.36 x 1.02 m tabletop inside the image. The mobile
+# base starts 0.50 m behind x1pro to see the whole desktop, then advances about
+# 0.50 m to the front working edge for manipulation. Front/back container IK is
+# checked after this advance, as for the existing mobile-base scenes.
+ROBOTS['x1pro_rm001'] = {'position': (-.03, -1.30, 0.), 'yaw': math.pi / 2,
+                          'joints': {'lift_joint': .45, 'head_pitch_joint': .10}}
+ROBOT = 'x1pro_rm001'
 
 CONTAINERS = {
     'cabinet': 'cabinet/000000',            # three drawers, 0.29 m cube

@@ -13,7 +13,7 @@
 | [薄物体抓取](thin-grasp.md) | 片状与细线物体的分流、移边准备与验收指标 |
 | [机器人](robots.md) | 机器人源码、碰撞与物理、机器人层、验收用例 |
 | [场景](scenes.md) | `scene.py`：随机初始化、布局、初态检查 |
-| [专家](experts.md) | `expert.py`：分层、编写规则、步骤、重试与失败恢复 |
+| [专家](experts.md) | `experts/<机器人>/<NNNN>.py`：文件与适用范围、分层、编写规则、步骤、重试与失败恢复 |
 | [专家数据](expert-data.md) | 批次、轨迹、报告、检查点、调用帧与求解记录 |
 
 本页说明每个文件放在哪里，以及资产共用的单位、名称表示和 README。
@@ -75,17 +75,18 @@ assets/robots/x1pro/
 
 ```text
 asset_sources/scenes/000000/
-  scene.py            桌子、机器人、物体、录像视角、随机初始化（布局 0）、可选的其他布局（场景）
-  expert.py           专家程序（可以以后补）
-  thumbnail.jpg       最小有效 seed 初态的机器人主相机图像，480 × 270
-assets/scenes/000000/            build_scene.py 的产出，与后端无关
+  scene.py            桌子、支持的机器人与默认机器人、物体、录像视角、随机初始化（布局 0）、可选的其他布局（场景）
+  experts/<机器人>/<NNNN>.py    专家程序，按机器人分目录、4 位编号，文件内声明适用范围（专家）；可以以后补
+  experts/common.py   可选，本场景各专家共用的函数
+  thumbnail.jpg       默认机器人最小有效 seed 初态的主相机图像，480 × 270
+assets/scenes/000000/<机器人>/   build_scene.py 的产出，按机器人分开（--robot，all 为全部），与后端无关
   initial_states.hdf5 每个有效 seed 静置后的场景状态，专家轨迹从这里开始
   initial.json        初态检查：汇总与每次尝试的结果
   initial_states.jpg  可选，前 N × M 个有效初态的拼图
   initial/<seed>.jpg  可选，每个有效初态的相机原图
   layouts/<n>/        --layouts：布局 n 的同一套文件（initial.json 另记布局的好坏与说明）
   layouts.jpg         可选，多个布局时每个布局最小有效 seed 的拼图
-data/scenes/000000/<后端>/        场景的数据：一批专家轨迹，run_expert.py 生成（所有 seed、所有步骤），render.py 补上录像
+data/scenes/000000/<机器人>/<专家编号>/<后端>/   场景的数据：一个专家的一批轨迹，run_expert.py 生成（范围内所有 seed、所有步骤），render.py 补上录像；layout n 在其 layouts/<n>/
   summary.json        验收入口：提交、seed、成功率、失败的 seed、耗时、机器负载、有录像的 seed
   trajectories.hdf5、trajectories_failed.hdf5    成功与失败的轨迹，每条 data/demo_<seed>
   episodes/<seed>.json                           每条轨迹的报告
@@ -96,8 +97,9 @@ data/scenes/000000/<后端>/        场景的数据：一批专家轨迹，run_e
   fails/                                         失败轨迹的录像，结构同 videos/
   checkpoints/step<k>.hdf5                       由步骤组成的专家：每个 seed 第 k 步结束时的场景状态，step0 为初态
 runs/expert/000000/<运行>/        一次开发运行（run_expert.py --dev）：结构同上，以后的运行不会替换它；
-                                  <运行> = <日期>-<时间>-<提交>[-<标签>]
+                                  <运行> = <日期>-<时间>-<提交>-<机器人>-<专家编号>[-<标签>]
   cases/<seed>/                   可选，failure_cases.py 渲染的失败案例
+data/cases/000000/<机器人>/<专家编号>/<用例名>/   长期用例：只含一个检查点的最小批次（summary.json、checkpoints/step<k>.hdf5），可直接作为 --from；failure_snapshots.py --case 写入
 runs/resolve/000000/<运行>/       离线数值重解（scripts/experts/resolve.py），运行名同专家开发运行；
   summary.json                    JSON 列表，汇总各 seed 的重解结果，不是专家批次的验收入口
   <seed>[-<r>].json.gz             详细重解结果，planning-* 为临时规划模型

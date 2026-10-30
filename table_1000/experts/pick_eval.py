@@ -184,8 +184,8 @@ def scene(gap=.12, lift=.6, objects=OBJECTS, robot='x1pro', scenario='open'):
                        for name, size in obstacles.items()})
     source = types.SimpleNamespace(
         TABLE=TABLE, OBJECTS={}, PRIMITIVES=primitives, OBSTACLES=dict(obstacles), scenario=scenario,
-        ROBOT={'name': robot, 'asset': f'robots/{robot}', 'position': (0., -depth / 2 - gap, 0.), 'yaw': math.pi / 2,
-               'joints': {'lift_joint': lift, 'head_pitch_joint': .3}})
+        ROBOT=robot, ROBOTS={robot: {'name': robot, 'asset': f'robots/{robot}', 'position': (0., -depth / 2 - gap, 0.), 'yaw': math.pi / 2,
+               'joints': {'lift_joint': lift, 'head_pitch_joint': .3}}})
 
     def placement(**poses):
         layout = {}
@@ -243,7 +243,7 @@ class Evaluator:
         from table_1000.robots.kinematics import RobotModel
         from table_1000.sim.isaaclab.env import RobotEnv
         self.scene, self.assets, self.output = source, assets, output
-        self.spec = load_spec(source.ROBOT['name'], root)
+        self.spec = load_spec(source.ROBOT, root)
         self.env = RobotEnv(source, self.spec, assets, views=views or {}, root=root,
                             contact_watch=('robot', *source.PRIMITIVES))
         self.model = RobotModel(self.spec, output / 'planning', root)

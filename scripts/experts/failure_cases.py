@@ -125,6 +125,7 @@ def main(argv=None):
                     image.save(out / f'{moment}_{name}.jpg', quality=88)
                 tile([images[name] for name in names], CELL_HEIGHT).save(out / f'{moment}.jpg', quality=85)
             (out / 'case.json').write_text(json.dumps({'commit': summary['commit'], 'batch': str(args.batch.resolve()),
+                                                       **{key: summary[key] for key in ('robot', 'expert', 'layout')},
                                                        **case(report), 'frames': {'start': start, 'end': last}},
                                                       indent=1, default=str))
             print(seed, subtask, report['failure']['reason'], flush=True)

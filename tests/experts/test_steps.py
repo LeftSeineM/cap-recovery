@@ -9,6 +9,7 @@ import pytest
 
 from table_1000.experts.context import ExpertFailed, Step, run_steps
 from table_1000.experts.generate import INITIAL_STATE, merge_checkpoints, read_checkpoints, step_rates, write_checkpoints
+from table_1000.common.batch import seeds_record
 
 
 class FakeContext:
@@ -62,7 +63,7 @@ def test_checkpoints_are_merged_by_step(tmp_path):
     for seed, done in ((0, 2), (1, 1)):
         write_checkpoints(tmp_path / f'{seed}.hdf5', seed, 3, start,
                           [{'step': k, 'name': f'step {k}', 'at': 10 * k, 'state': state(seed + k)}
-                           for k in range(1, done + 1)])
+                           for k in range(1, done + 1)], {'robot': 'r', 'expert': '0000'})
     assert merge_checkpoints(tmp_path.glob('*.hdf5'), tmp_path / 'batch', {'scene': 's'}) == [1, 2]
     attrs, states = read_checkpoints(tmp_path / 'batch' / 'checkpoints' / 'step2.hdf5')
     assert attrs['scene'] == 's' and attrs['step'] == 2 and attrs['name'] == 'step 2'
@@ -77,7 +78,7 @@ def test_checkpoints_are_merged_by_step(tmp_path):
 def test_the_initial_state_is_step_0(tmp_path):
     start = {'qpos': np.zeros(3), 'base_pose': np.zeros(3)}
     write_checkpoints(tmp_path / '0.hdf5', 0, 0, start, [{'step': 0, 'name': INITIAL_STATE, 'at': 0, 'state': state(5)},
-                                                        {'step': 1, 'name': 'step 1', 'at': 10, 'state': state(6)}])
+                                                        {'step': 1, 'name': 'step 1', 'at': 10, 'state': state(6)}], {'robot': 'r', 'expert': '0000'})
     assert merge_checkpoints([tmp_path / '0.hdf5'], tmp_path / 'batch', {'scene': 's'}) == [0, 1]
     attrs, states = read_checkpoints(tmp_path / 'batch' / 'checkpoints' / 'step0.hdf5')
     assert attrs['step'] == 0 and attrs['name'] == INITIAL_STATE
@@ -128,7 +129,9 @@ def write_batch(directory, episodes, summary):
         if 'failure' in attrs:
             report['failure'] = attrs['failure']
         (directory / 'episodes' / f'{seed}.json').write_text(json.dumps(report))
-    (directory / 'summary.json').write_text(json.dumps(summary))
+    (directory / 'summary.json').write_text(json.dumps({'robot': 'test', 'expert': '0000', 'scope': {0: None}, 'layout': 0,
+                                                     'seeds': seeds_record(episodes),
+                                                     'outside_scope': False, **summary}))
 
 
 def test_join_cuts_each_part_at_the_checkpoint_the_next_started_from(tmp_path, monkeypatch):
@@ -145,7 +148,8 @@ def test_join_cuts_each_part_at_the_checkpoint_the_next_started_from(tmp_path, m
         2: ('failed', [1, 2, 3], {'steps': [{'step': 1, 'at': 2}], 'subtasks': [],
                                   'failure': {'subtask': 'b', 'reason': 'slipped'}}),
         3: ('error', [1, 2], {'steps': [], 'subtasks': [], 'failure': {'subtask': 'a', 'reason': 'error'}})},
-        {'scene': 'scene', 'physics': 'isaac-cpu', 'steps_run': [1, 2], 'from': None, 'commit': 'c1'})
+        {'scene': 'scene', 'physics': 'isaac-cpu', 'steps_run': [1, 2], 'from': None, 'commit': 'c1',
+         'command': 'run_expert.py scene --dev --steps 1-2 --seeds 0:4'})
     write_batch(second, {
         0: ('success', [7, 8, 9], {'steps': [{'step': 2, 'at': 1}, {'step': 3, 'at': 3}],
                                    'subtasks': [{'instruction': 'b', 'start': 0, 'end': 3}]}),
@@ -178,17 +182,63 @@ def test_join_cuts_each_part_at_the_checkpoint_the_next_started_from(tmp_path, m
     assert summary['seeds']['count'] == 4
     with pytest.raises(SystemExit):     # the first batch must start from the initial states
         main([str(second), '--output', str(tmp_path / 'scene' / 'other')])
-    data = tmp_path / 'data' / 'scenes' / 'scene' / 'isaac-cpu'
+    data = tmp_path / 'data' / 'scenes' / 'scene' / 'test' / '0000' / 'isaac-cpu'
     monkeypatch.setattr(join_steps, 'ROOT', tmp_path)
+    initial = tmp_path / 'assets' / 'scenes' / 'scene' / 'test'
+    initial.mkdir(parents=True)
+    with h5py.File(initial / 'initial_states.hdf5', 'w') as file:
+        for seed in range(4):
+            file.create_group(str(seed))
     with pytest.raises(SystemExit):     # steps 1-3 of 3 only: the first batch alone is not the data
         main([str(first)])
     main([str(first), str(second)])     # the scene's data by default
     assert json.loads((data / 'summary.json').read_text())['succeeded'] == 2
+    other_layout = data / 'layouts' / '2' / 'summary.json'
+    other_layout.parent.mkdir(parents=True)
+    other_layout.write_text('{"layout": 2}')
+    main([str(first), str(second)])
+    assert other_layout.read_text() == '{"layout": 2}'
     with pytest.raises(SystemExit):     # nor replace a batch it joins, or one inside it
         main([str(first), str(second), '--output', str(second)])
     with pytest.raises(SystemExit):
         main([str(first), str(second), '--output', str(tmp_path / 'scene' / 'isaac-cpu')])
     assert (first / 'summary.json').is_file()
+    second_summary = json.loads((second / 'summary.json').read_text())
+    second_summary['outside_scope'] = True
+    (second / 'summary.json').write_text(json.dumps(second_summary))
+    outside = tmp_path / 'outside'
+    main([str(first), str(second), '--output', str(outside)])
+    assert json.loads((outside / 'summary.json').read_text())['outside_scope'] is True
+    with pytest.raises(SystemExit):
+        main([str(first), str(second)])
+
+
+@pytest.mark.parametrize('scope, layout, initial_seeds', [([0, 1], 0, [0]), (None, 2, [0, 1])])
+def test_partial_seed_join_requires_output(tmp_path, monkeypatch, capsys, scope, layout, initial_seeds):
+    from scripts.scenes import join_steps
+    from table_1000.scenes import data_dir, initial_dir
+
+    monkeypatch.setattr(join_steps, 'ROOT', tmp_path)
+    initial = initial_dir(tmp_path / 'assets' / 'scenes', 'scene', 'test', layout)
+    initial.mkdir(parents=True)
+    with h5py.File(initial / 'initial_states.hdf5', 'w') as file:
+        for seed in initial_seeds:
+            file.create_group(str(seed))
+    batch = tmp_path / 'steps1-3'
+    write_batch(batch, {0: ('success', [1, 2, 3], {'steps': [{'step': 3, 'at': 3}], 'subtasks': []})},
+                {'scene': 'scene', 'physics': 'isaac-cpu', 'steps_run': [1, 3], 'scope': {layout: scope},
+                 'layout': layout, 'command': 'run_expert.py scene --dev --steps 1-3'})
+    formal = data_dir(tmp_path / 'data' / 'scenes', 'scene', 'test', '0000', 'isaac-cpu', layout)
+    formal.mkdir(parents=True)
+    previous = formal / 'summary.json'
+    previous.write_text('{"previous": true}')
+    with pytest.raises(SystemExit):
+        join_steps.main([str(batch)])
+    assert 'missing seeds 1' in capsys.readouterr().err
+    assert previous.read_text() == '{"previous": true}'
+    output = tmp_path / 'partial-join'
+    join_steps.main([str(batch), '--output', str(output)])
+    assert json.loads((output / 'summary.json').read_text())['seeds'] == {'range': '0', 'count': 1}
 
 
 def test_a_failure_case_is_the_last_run_of_its_subtask():
@@ -210,9 +260,9 @@ def test_a_failure_case_is_the_last_run_of_its_subtask():
 
 def test_the_steps_of_a_resumed_run_keep_the_seed_s_start():
     from table_1000.experts.context import Context
-    env = types.SimpleNamespace(spec=types.SimpleNamespace(base=None), steps=0,
+    env = types.SimpleNamespace(spec=types.SimpleNamespace(base=None, name='test'), steps=0,
                                 obs={'agent': {'qpos': np.ones((1, 2)), 'base_pose': np.zeros((1, 3))}}, joints=['a', 'b'])
-    scene = types.SimpleNamespace(OBJECTS={}, ROBOT={'position': [0., 0., .5]})
+    scene = types.SimpleNamespace(OBJECTS={}, ROBOT='test', ROBOTS={'test': {'position': [0., 0., .5]}})
     model = types.SimpleNamespace(set_state=lambda *args: None)
     start = {'qpos': np.zeros(2), 'base_pose': np.zeros(3)}
     assert Context(env, model, scene, '.', None, start=start).start is start
@@ -226,23 +276,24 @@ def test_successful_step_teleop_keeps_source_batch_and_can_be_joined(tmp_path):
 
     source, output = tmp_path / 'source-batch', tmp_path / 'teleop-result'
     write_batch(source, {4: ('success', [1, 2], {'steps': [{'step': 1, 'at': 2}], 'subtasks': []})},
-                {'scene': 'scene', 'robot': 'r', 'physics': 'isaac-cpu', 'steps_run': [1, 1]})
+                {'scene': 'scene', 'robot': 'r', 'expert': '0000', 'physics': 'isaac-cpu', 'steps_run': [1, 1]})
     write_batch(output, {4: ('success', [3, 4], {'steps': [{'step': 2, 'at': 2}], 'subtasks': []})}, {})
     (source / 'checkpoints').mkdir()
     (output / 'checkpoints').mkdir()
     start = {'qpos': np.zeros(3), 'base_pose': np.zeros(3)}
     write_checkpoints(source / 'checkpoints/4.hdf5', 4, 0, start,
-                      [{'step': 1, 'name': 'a', 'at': 2, 'state': state(2)}])
+                      [{'step': 1, 'name': 'a', 'at': 2, 'state': state(2)}], {'robot': 'r', 'expert': '0000'})
     merge_checkpoints([source / 'checkpoints/4.hdf5'], source, {})
     (source / 'checkpoints/4.hdf5').unlink()
     write_checkpoints(output / 'checkpoints/4.hdf5', 4, 0, start,
-                      [{'step': 2, 'name': 'b', 'at': 2, 'state': state(4)}])
+                      [{'step': 2, 'name': 'b', 'at': 2, 'state': state(4)}], {'robot': 'r', 'expert': '0000'})
     # The case can come from a later failed batch; step starts at its source's checkpoint.
     case = {'batch': str(tmp_path / 'failed-case'), 'start': str(source / 'checkpoints/step1.hdf5')}
     episode = json.loads((output / 'episodes/4.json').read_text())
     episode['steps_run'] = [2, 2]
     summary = save_attempt(output, episode, case, {'start': {'kind': 'step'}, 'verdict': 'done'},
-                           {'scene': 'scene', 'robot': 'r', 'physics': 'isaac-cpu', 'commit': 'abc', 'steps_run': [2, 2]})
+                           {'scene': 'scene', 'robot': 'r', 'expert': '0000', 'physics': 'isaac-cpu', 'commit': 'abc',
+                            'scope': {0: None}, 'layout': 0, 'outside_scope': False, 'steps_run': [2, 2]})
     assert summary['from'] == str(source)
     assert start_checkpoint(output, summary, 2) == source / 'checkpoints/step1.hdf5'
     assert start_checkpoint(output, summary, 2).is_file()

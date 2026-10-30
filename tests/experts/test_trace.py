@@ -213,15 +213,16 @@ def test_frame_snapshot_checkpoint_roundtrip_and_cli(tmp_path):
     ctx.trace.save(batch / report['call_trace'])
     (batch / 'episodes').mkdir()
     (batch / 'episodes/4.json').write_text(json.dumps(report))
-    (batch / 'summary.json').write_text(json.dumps({'scene': '000002', 'robot': 'x1pro', 'physics': 'isaac-cpu'}))
+    (batch / 'summary.json').write_text(json.dumps({'scene': '000002', 'robot': 'x1pro', 'expert': '0000', 'scope': {0: None}, 'layout': 0,
+                                                  'outside_scope': False, 'physics': 'isaac-cpu'}))
     with h5py.File(batch / 'trajectories_failed.hdf5', 'w') as file:
         demo = file.create_group('data/demo_4')
         demo.attrs['num_samples'] = 3
         demo.create_dataset('initial_state/x', data=[[10]])
         demo.create_dataset('obs/qpos', data=np.zeros((3, 2)))
         demo.create_dataset('obs/base_pose', data=np.zeros((3, 3)))
-    main([str(batch), '--output', str(tmp_path / 'snapshots')])
-    path = next((tmp_path / 'snapshots').glob('000002/*/checkpoints/step0.hdf5'))
+    main([str(batch), '--case', 'picked', '--output', str(tmp_path / 'snapshots')])
+    path = tmp_path / 'snapshots/000002/x1pro/0000/picked/checkpoints/step0.hdf5'
     _, states = read_checkpoints(path)
     state = states[4][1]
     assert state['x'][0, 0] == 10
@@ -287,7 +288,8 @@ def test_snapshot_of_resumed_episode_keeps_original_robot_start(tmp_path):
     ctx.trace.save(batch / report['call_trace'])
     (batch / 'episodes').mkdir()
     (batch / 'episodes/4.json').write_text(json.dumps(report))
-    (batch / 'summary.json').write_text(json.dumps({'scene': '000002', 'robot': 'x1pro', 'physics': 'isaac-cpu',
+    (batch / 'summary.json').write_text(json.dumps({'scene': '000002', 'robot': 'x1pro', 'expert': '0000', 'scope': {0: None}, 'layout': 0,
+                                                  'outside_scope': False, 'physics': 'isaac-cpu',
                                                   'steps_run': [1, 1], 'from': str(parent)}))
     with h5py.File(batch / 'trajectories_failed.hdf5', 'w') as file:
         demo = file.create_group('data/demo_4')

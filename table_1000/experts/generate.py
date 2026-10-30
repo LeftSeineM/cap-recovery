@@ -25,7 +25,7 @@ import numpy as np
 
 from table_1000.experts.context import Context, ExpertFailed, Unreachable
 from table_1000.experts.runtime import single_threaded_blas
-from table_1000.scenes import INSTRUCTION, load
+from table_1000.scenes import INSTRUCTION, load, load_expert
 from table_1000.scenes.initial import read_tree, write_tree
 from table_1000.sim import CONTROL_HZ, PHYSICS_DT
 
@@ -40,11 +40,11 @@ def checkpoint_path(directory, step):
     return Path(directory) / 'checkpoints' / f'step{step}.hdf5'
 
 
-def write_checkpoints(path, seed, attempt, start, checkpoints):
+def write_checkpoints(path, seed, attempt, start, checkpoints, identity):
     """One seed's checkpoints (:attr:`Context.checkpoints`) and the robot where its episode began."""
     import h5py
     with h5py.File(path, 'w') as file:
-        file.attrs.update(seed=seed, attempt=attempt)
+        file.attrs.update(seed=seed, attempt=attempt, **identity)
         write_tree(file.create_group('start'), start)
         for entry in checkpoints:
             group = file.create_group(str(entry['step']))
@@ -112,7 +112,8 @@ class Generator:
     DEVICES = {'isaac-cpu': 'cpu'}
 
     def __init__(self, scene_name, output, assets, root, physics='isaac-cpu', steps=None, source=None,
-                 problems='failed', skill_attempts=3, profile=False, **env_kwargs):
+                 problems='failed', skill_attempts=3, profile=False, robot=None, expert=None, layout=0,
+                 outside_scope=False, **env_kwargs):
         """``steps``: ``(first, last)`` of the expert's steps to run (all when None); ``source``: where
         the states come from (a checkpoint file), for the reports; ``problems`` saves numerical
         problems of failed/error runs, all runs, or none; ``env_kwargs`` (cameras, views) go to
@@ -127,17 +128,20 @@ class Generator:
         self.steps, self.source, self.problems = steps, source, problems
         self.skill_attempts = skill_attempts
         self.profile_enabled = profile
-        self.scene, self.expert = load(scene_name, 'scene', root), load(scene_name, 'expert', root)
+        self.scene = load(scene_name, 'scene', root)
+        self.expert = load_expert(scene_name, robot, expert, root)
+        self.identity = {'robot': self.expert.ROBOT, 'expert': self.expert.NUMBER,
+                         'scope': self.expert.SCOPE, 'layout': layout, 'outside_scope': outside_scope}
         if steps and not 1 <= steps[0] <= steps[1] <= len(getattr(self.expert, 'STEPS', ())):
             raise ValueError(f'steps {steps[0]}-{steps[1]}: the expert of {scene_name} has '
                              f'{len(getattr(self.expert, "STEPS", ()))} STEPS')
-        self.spec = load_spec(Path(self.scene.ROBOT['asset']).name, root)
+        self.spec = load_spec(self.expert.ROBOT, root)
         self.env = RobotEnv(self.scene, self.spec, self.assets, root=root, device=self.DEVICES[physics],
                             recorders=recording.recorder_cfg(self.output), **env_kwargs)
         self.model = RobotModel(self.spec, self.output / 'planning', root)
         for name in ('episodes', 'checkpoints'):
             (self.output / name).mkdir(parents=True, exist_ok=True)
-        self.env_args = {'scene': scene_name, 'robot': self.spec.name, 'physics': physics, 'instruction': INSTRUCTION,
+        self.env_args = {'scene': scene_name, **self.identity, 'physics': physics, 'instruction': INSTRUCTION,
                          'control_hz': CONTROL_HZ, 'physics_dt': PHYSICS_DT, 'joints': self.env.joints,
                          'action_layout': self.env.action_layout}
         self.load_s = time.perf_counter() - started
@@ -157,7 +161,7 @@ class Generator:
         (directory / 'calls').mkdir()
         with gzip.open(directory / calls, 'wt') as file:
             json.dump(branch_trace, file, separators=(',', ':'))
-        report = dict(scene=self.name, seed=trace.seed, attempt=trace.attempt, repeat=repeat, status='failed',
+        report = dict(scene=self.name, **self.identity, seed=trace.seed, attempt=trace.attempt, repeat=repeat, status='failed',
                       steps_run=self.steps, from_retry=dict(control=control, retry=retry), step_names=ctx.step_names,
                       failure=dict(subtask=failure.subtask, reason=failure.reason,
                                    unreachable=isinstance(failure, Unreachable), details=failure.details),
@@ -182,16 +186,16 @@ class Generator:
         finally:
             handler.close()
         first = (self.steps or (1,))[0]
-        checkpoints = [dict(step=first-1, name='retry episode entry', at=0, state=ctx.initial_state), *ctx.checkpoints]
+        checkpoints = [dict(step=first-1, name=INITIAL_STATE if first == 1 else self.expert.STEPS[first - 2].name, at=0, state=ctx.initial_state), *ctx.checkpoints]
         checkpoint = directory / 'checkpoints' / f'{trace.seed}.hdf5'
         checkpoint.parent.mkdir()
-        write_checkpoints(checkpoint, trace.seed, trace.attempt, ctx.start, checkpoints)
-        merge_checkpoints([checkpoint], directory, dict(scene=self.name, robot=self.spec.name,
+        write_checkpoints(checkpoint, trace.seed, trace.attempt, ctx.start, checkpoints, {key: self.identity[key] for key in ('robot', 'expert')})
+        merge_checkpoints([checkpoint], directory, dict(scene=self.name, robot=self.spec.name, expert=self.identity['expert'],
                                                        physics=self.env_args['physics']))
         checkpoint.unlink()
         (directory / 'episodes').mkdir()
         (directory / 'episodes' / f'{trace.seed}.json').write_text(json.dumps(report, indent=1, default=float)+'\n')
-        summary = dict(scene=self.name, robot=self.spec.name, physics=self.env_args['physics'],
+        summary = dict(scene=self.name, **self.identity, physics=self.env_args['physics'],
                        steps_run=self.steps, retry_parent='../../..', **{'from':None}, seeds=[trace.seed], succeeded=0, success_rate=0.)
         (directory / 'summary.json').write_text(json.dumps(summary, indent=1)+'\n')
         archived = dict(batch=str(branch), control=control, retry=retry, frame=branch_trace['failure_frame'], reason=failure.reason)
@@ -217,7 +221,7 @@ class Generator:
     def episode(self, seed, attempt, state, start, repeat):
         started = time.perf_counter()
         first = self.steps[0] if self.steps else 1
-        report = {'scene': self.name, 'seed': seed, 'attempt': attempt, 'steps_run': self.steps, 'from': self.source,
+        report = {'scene': self.name, **self.identity, 'seed': seed, 'attempt': attempt, 'steps_run': self.steps, 'from': self.source,
                   'repeat': repeat, 'skill_attempts': self.skill_attempts}
         snapshot = json.loads(state['_expert_frame']) if '_expert_frame' in state else None
         state = {key: value for key, value in state.items() if key != '_expert_frame'}
@@ -313,7 +317,7 @@ class Generator:
         if first == 1 and start is None and hasattr(self.expert, 'STEPS'):
             checkpoints = [{'step': 0, 'name': INITIAL_STATE, 'at': 0, 'state': state}, *checkpoints]
         if checkpoints:
-            write_checkpoints(self.output / 'checkpoints' / f'{seed}.hdf5', seed, attempt, ctx.start, checkpoints)
+            write_checkpoints(self.output / 'checkpoints' / f'{seed}.hdf5', seed, attempt, ctx.start, checkpoints, {key: self.identity[key] for key in ('robot', 'expert')})
         attrs = {'scene': self.name, 'seed': seed, 'attempt': attempt,
                  'instruction': INSTRUCTION, 'subtasks': ctx.subtasks, 'status': report['status'],
                  'steps': [{key: entry[key] for key in ('step', 'name', 'at')} for entry in report['steps']]}

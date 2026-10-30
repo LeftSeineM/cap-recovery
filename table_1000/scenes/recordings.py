@@ -1,4 +1,4 @@
-"""A batch of trajectories in ``data/scenes/<scene>/<backend>/``, without changing Isaac Lab's HDF5 format.
+"""A batch of trajectories in ``data/scenes/<scene>/<robot>/<expert>/<backend>/``, without changing Isaac Lab's HDF5 format.
 
 ``trajectories.hdf5`` and ``trajectories_failed.hdf5`` hold one ``data/demo_<seed>``
 group per episode; the processes of a batch write their own files, merged at the
@@ -45,12 +45,14 @@ def merge(sources, target, keep=lambda source, seed: True):
     return len(episodes)
 
 
-def clear_batch(directory):
-    """Empty a batch directory for a new batch."""
+def clear_batch(directory, *, keep=()):
+    """Empty a batch directory for a new batch, preserving named sibling product trees."""
     import shutil
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     for path in directory.iterdir():
+        if path.name in keep:
+            continue
         shutil.rmtree(path) if path.is_dir() else path.unlink()
 
 

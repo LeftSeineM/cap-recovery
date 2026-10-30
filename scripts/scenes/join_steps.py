@@ -15,7 +15,7 @@ and ``parts``: each part's batch, commit, steps, first step in the joined episod
 length.
 
 The joined episodes are the scene's batch like one run of the whole expert: ``DIR``
-(default the scene's data, ``data/scenes/<scene>/<backend>/``) is replaced by ``trajectories.hdf5`` and ``trajectories_failed.hdf5`` (by the
+(default the scene's data, ``data/scenes/<scene>/<robot>/<expert>/<backend>/``) is replaced by ``trajectories.hdf5`` and ``trajectories_failed.hdf5`` (by the
 last part's status) and a ``summary.json``; ``render.py <scene> --physics <backend>``
 renders them. ``episodes/<seed>.json`` is the last part's report placed in the joined episode
 (control steps shifted, ``status`` and ``failure`` as the joined episode's, ``parts``, the
@@ -30,7 +30,6 @@ goes.
 
 import argparse
 import json
-import shlex
 import shutil
 from pathlib import Path
 import sys
@@ -94,7 +93,7 @@ def carry_traces(batch, report, group, output, offset):
 
 def main(argv=None):
     import h5py
-    from table_1000.common.batch import seeds_record
+    from table_1000.common.batch import parse_seeds, seed_range, seeds_record
     from table_1000.experts.generate import summarize
     from table_1000.scenes.recordings import clear_batch, concatenate, decoded_attrs
     from table_1000.sim import CONTROL_HZ
@@ -102,7 +101,7 @@ def main(argv=None):
     parser.add_argument('batches', type=Path, nargs='+', help='batch directories, in step order')
     parser.add_argument('--output', type=Path,
                         help="the joined batch directory, replaced (default: the scene's data, "
-                             "data/scenes/<scene>/<backend>/)")
+                             "data/scenes/<scene>/<robot>/<expert>/<backend>/)")
     args = parser.parse_args(argv)
     summaries = []
     for index, batch in enumerate(args.batches):
@@ -113,8 +112,16 @@ def main(argv=None):
             parser.error(f'{batch} did not start from {args.batches[index - 1]}')
         summaries.append(summary)
     first = summaries[0]
+    from table_1000.scenes import data_dir, initial_dir
+    from table_1000.experts.identity import check_identity
+    for batch, summary in zip(args.batches, summaries):
+        check_identity(summary, first['robot'], first['expert'], batch)
+        if summary['layout'] != first['layout']:
+            parser.error('cannot join batches of different layouts')
+        if summary['outside_scope'] and args.output is None:
+            parser.error('outside_scope batches cannot become formal data')
     default = args.output is None
-    args.output = args.output or ROOT / 'data' / 'scenes' / first['scene'] / first['physics']
+    args.output = args.output or data_dir(ROOT / 'data' / 'scenes', first['scene'], first['robot'], first['expert'], first['physics'], first['layout'])
     if (first.get('steps_run') or [1])[0] != 1:
         parser.error(f'{args.batches[0]} does not start from the initial states (step 1)')
     output = Path(args.output).resolve()
@@ -122,11 +129,16 @@ def main(argv=None):
         if batch.is_relative_to(output) or output.is_relative_to(batch):
             parser.error(f'{args.output} would replace {batch}, one of the batches joined; give another --output')
     # The scene's data comes from every seed: batches of some seeds go elsewhere.
-    partial = [batch for batch, summary in zip(args.batches, summaries)
-               if any(token == '--seeds' or token.startswith('--seeds=') for token in shlex.split(summary.get('command') or ''))]
-    if default and (partial or first.get('from')):
-        parser.error(f'{(partial or args.batches)[0]} may not cover every seed of the scene, so the join is not its '
-                     f'data; give --output')
+    if default:
+        if first.get('from'):
+            parser.error(f'{args.batches[0]} starts from another batch, not initial states; give --output')
+        required = first['scope'][str(first['layout'])]
+        if required is None:
+            states = initial_dir(ROOT / 'assets' / 'scenes', first['scene'], first['robot'], first['layout'])
+            with h5py.File(states / 'initial_states.hdf5', 'r') as file:
+                required = [int(seed) for seed in file]
+        if missing := sorted(set(required) - set(parse_seeds(first['seeds']['range'].split()))):
+            parser.error(f'{args.batches[0]} is missing seeds {seed_range(missing)} from the expert scope; give --output')
     # ... and every step: a join that stops early is a development batch.
     last_run, count = summaries[-1].get('steps_run'), step_count(args.batches[-1])
     if default and last_run and last_run[1] != count:
@@ -156,7 +168,7 @@ def main(argv=None):
             chain.append((index, group, status, cut, done))
             index += 1
         chains[seed] = chain
-    clear_batch(args.output)
+    clear_batch(args.output, keep=('layouts',) if default and not first['layout'] else ())
     (args.output / 'episodes').mkdir()
     reports = []
     files = {kind: h5py.File(args.output / f'{kind}.hdf5', 'w') for kind in ('trajectories', 'trajectories_failed')}
@@ -218,7 +230,9 @@ def main(argv=None):
             for file in {entry[0] for entry in batch_episodes.values()}:
                 file.close()
     commits = sorted({str(summary.get('commit')) for summary in summaries})
-    summary = {'scene': summaries[0].get('scene'), 'robot': summaries[0].get('robot'),
+    summary = {**{key: first[key] for key in ('expert', 'scope', 'layout')},
+               'outside_scope': any(item['outside_scope'] for item in summaries),
+               'scene': summaries[0].get('scene'), 'robot': summaries[0].get('robot'),
                'physics': summaries[0].get('physics'), 'joined': [str(batch.resolve()) for batch in args.batches],
                'commit': commits[0] if len(commits) == 1 else None, 'commits': commits,
                **summarize(reports, sorted(chains)), 'failed': counts.get('failed', 0), 'error': counts.get('error', 0),

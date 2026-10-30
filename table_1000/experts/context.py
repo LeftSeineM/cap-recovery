@@ -24,6 +24,8 @@ reach) with the subtask and a reason; nothing is retried unless the expert does 
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from table_1000.scenes import robot_config
+
 import time
 from typing import Callable
 
@@ -124,7 +126,7 @@ class Context:
         transform[:3, :3] = Rotation.from_euler('z', yaw).as_matrix()
         transform[:2, 3] = x, y
         if not self.spec.base:
-            transform[2, 3] = self.scene.ROBOT['position'][2]
+            transform[2, 3] = robot_config(self.scene, self.spec.name)['position'][2]
         return transform
 
     def sync_model(self):

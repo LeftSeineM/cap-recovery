@@ -3,6 +3,7 @@
 ``uv run python scripts/scenes/build_scene.py 000000 --seeds 0:100 --gpus 0 1 2 3 [--jobs N] [--grid 5x5] [--images] [--camera NAME] [--output DIR]``
 ``uv run python scripts/scenes/build_scene.py 000100 --layouts 1:11 --seeds 0 [--grid 5x2] ...``
 
+Select --robot NAME (default scene.ROBOT), or --robot all to build every ROBOTS entry.
 For each layout and seed, makes the initial state as in ``table_1000/scenes/initial.py``
 (the layout's arrangement: ``scene.initialize`` for layout 0, ``scene.LAYOUTS[n]['arrange']``
 for layout n; penetration and settling checks, retried with sub-seeds) on CPU PhysX.
@@ -11,8 +12,8 @@ The seeds of each layout are split into ``--jobs`` contiguous parts, one process
 over ``--gpus`` or submitted through ``--launcher`` (see ``table_1000/common/batch.py``); each
 seed's result is written when it is done, and seeds whose process stopped before theirs run
 again (``--retries``), as do seeds that raised an error (the error may be the process's: GPU memory,
-a lost device) and seeds without a valid state after an error in their process. Logs are in ``outputs/scenes/<scene>/build/``; the processes' results go to
-``<output>/<scene>/staging/``, removed once merged. Into ``<output>/<scene>/``
+a lost device) and seeds without a valid state after an error in their process. Logs are in ``outputs/scenes/<scene>/<robot>/build/``; the processes' results go to
+``<output>/<scene>/<robot>/staging/``, removed once merged. Into ``<output>/<scene>/<robot>/``
 (``<output>`` = ``assets/scenes`` by default), replacing what an earlier run wrote:
 
 - ``initial_states.hdf5``: the settled state of every seed with one, its ``seed`` and ``attempt``;
@@ -21,14 +22,14 @@ a lost device) and seeds without a valid state after an error in their process. 
 - ``initial_states.jpg`` with ``--grid NxM``: the first N × M valid states in N columns;
 - ``initial/<seed>.jpg`` with ``--images``: every valid state at the camera's resolution.
 
-That is layout 0; layout n goes to ``<output>/<scene>/layouts/<n>/``, the same files (the summary
+That is layout 0; layout n goes to ``<output>/<scene>/<robot>/layouts/<n>/``, the same files (the summary
 also with the layout's ``quality`` and ``description``). With ``--grid`` and several layouts,
 ``layouts.jpg`` shows the smallest valid seed of each, N per row.
 
 Images come from ``--camera`` (default: the scene's ``IMAGE_VIEW``, else the robot's first
 RGB camera; or another fixed view of the scene). When images are rendered into the default output, the
 smallest valid seed's image also becomes ``asset_sources/scenes/<scene>/thumbnail.jpg``
-(480 px wide), from layout 0. The exit status is non-zero when a seed has no result, an error or no valid state.
+(480 px wide), from layout 0 of the default robot. The exit status is non-zero when a seed has no result, an error or no valid state.
 """
 
 import argparse
@@ -76,13 +77,13 @@ def worker(args):
     try:
         from PIL import Image
         from table_1000.robots import load_spec
-        from table_1000.scenes import load
+        from table_1000.scenes import load, robot_config, initial_dir
         from table_1000.common.batch import parse_seeds
         from table_1000.scenes.initial import InitializationFailed, initial_state, write_states
         from table_1000.sim.isaaclab.env import RobotEnv
         root, assets = args.root.resolve(), args.assets.resolve()
         scene = load(args.scene, 'scene', root)
-        spec = load_spec(Path(scene.ROBOT['asset']).name, root)
+        spec = load_spec(Path(robot_config(scene, args.robot)['asset']).name, root)
         camera = None
         kwargs = {}
         if render:
@@ -169,6 +170,7 @@ def main(argv=None):
     from table_1000.common.batch import add_arguments, job_count, parse_seeds, process_name, run_batch, seed_range, seeds_record
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
+    parser.add_argument('--robot', help='supported robot name, default scene.ROBOT; all builds every robot')
     parser.add_argument('--seeds', nargs='+', required=True, help='a:b (a to b - 1) and single seeds')
     parser.add_argument('--layouts', nargs='+', default=['0'],
                         help="layouts, like --seeds: 0 is scene.initialize, n is scene.LAYOUTS[n] (default 0)")
@@ -176,7 +178,7 @@ def main(argv=None):
     parser.add_argument('--grid', type=grid_size, help='NxM: the first N x M valid states of each layout in N columns')
     parser.add_argument('--images', action='store_true', help='one image per valid state')
     parser.add_argument('--camera', help="a robot camera or a view of the scene (default: the scene's IMAGE_VIEW, else the robot's first RGB camera)")
-    parser.add_argument('--output', type=Path, help='results go to <output>/<scene>/ (default: assets/scenes)')
+    parser.add_argument('--output', type=Path, help='results go to <output>/<scene>/<robot>/ (default: assets/scenes)')
     parser.add_argument('--root', type=Path, default=ROOT, help='repository root holding the scene and robot sources')
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
@@ -187,19 +189,39 @@ def main(argv=None):
     if args.worker:
         worker(args)
         return
-    from table_1000.scenes import load
+    from table_1000.scenes import load, robot_config, initial_dir
     from table_1000.scenes.initial import read_states, summarize, write_states
     jobs = job_count(parser, args)
     seeds, layouts = parse_seeds(args.seeds), parse_seeds(args.layouts)
     if not seeds:
         parser.error('no seeds')
     root = args.root.resolve()
+    scene = load(args.scene, root=root)
+    if args.robot == 'all':
+        failures = []
+        original = list(sys.argv[1:] if argv is None else argv)
+        index = next(i for i, argument in enumerate(original) if argument == '--robot' or argument.startswith('--robot='))
+        for robot in scene.ROBOTS:
+            command = original.copy()
+            if command[index] == '--robot':
+                command[index + 1] = robot
+            else:
+                command[index] = f'--robot={robot}'
+            try:
+                main(command)
+            except SystemExit as error:
+                failures.append(f'{robot}: {error}')
+        if failures:
+            raise SystemExit('; '.join(failures))
+        return
+    robot_config(scene, args.robot)
+    args.robot = args.robot or scene.ROBOT
     defined = getattr(load(args.scene, 'scene', root), 'LAYOUTS', {}) if any(layouts) else {}
     unknown = [layout for layout in layouts if layout and layout not in defined]
     if unknown:
         parser.error(f'layouts {seed_range(unknown)} not in the scene\'s LAYOUTS ({seed_range(defined) or "none"})')
-    output = ((args.output or args.assets / 'scenes') / args.scene).resolve()
-    staging, logs = output / 'staging', root / 'outputs' / 'scenes' / args.scene / 'build'
+    output = initial_dir(args.output or args.assets / 'scenes', args.scene, args.robot).resolve()
+    staging, logs = output / 'staging', root / 'outputs' / 'scenes' / args.scene / args.robot / 'build'
 
     def result(item):
         """The latest result of ``(layout, seed)`` and the process directory holding it, or ``(None, None)``."""
@@ -226,7 +248,7 @@ def main(argv=None):
         name = process_name(f'part{index}', attempt)
         for item in part:
             parts.setdefault(item, []).append(staging / name)
-        argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--layout', str(layout),
+        argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--robot', args.robot, '--layout', str(layout),
                 '--seeds', *seed_range(part_seeds).split(), '--work', str(staging / name), '--first', str(first),
                 '--root', str(root), '--assets', str(args.assets.resolve())]
         argv += ['--images'] if args.images else []
@@ -282,7 +304,7 @@ def main(argv=None):
             (directory / 'initial').mkdir()
             for seed in valid:
                 shutil.copy(images[seed], directory / 'initial' / f'{seed}.jpg')
-        if valid and args.output is None and layout == 0:
+        if valid and args.output is None and layout == 0 and args.robot == scene.ROBOT:
             thumbnail(images[valid[0]], root / 'asset_sources' / 'scenes' / args.scene / 'thumbnail.jpg')
         print(json.dumps(summary, indent=1, default=float))
         lost = {seed for seed in seeds if (layout, seed) in missing}

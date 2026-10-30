@@ -134,7 +134,7 @@ def batch_cases(batch):
         successes = repeats.get('succeeded', {}).get(str(seed)) if repeats else None
         count = repeats.get('count') if repeats else None
         cases.append({'batch': str(batch.resolve()), 'run': summary.get('run') or '/'.join(batch.resolve().parts[-3:]),
-                      'scene': summary.get('scene'), 'step': step, 'step_name': report['step_names'][step - 1],
+                      'scene': summary.get('scene'), **{key: summary[key] for key in ('robot', 'expert', 'scope', 'layout', 'outside_scope')}, 'step': step, 'step_name': report['step_names'][step - 1],
                       'seed': seed, 'attempt': report.get('attempt', 0), 'successes': successes, 'runs': count,
                       'rate': successes / count if count else None,
                       'failure': (report.get('failure') or {}).get('reason'),

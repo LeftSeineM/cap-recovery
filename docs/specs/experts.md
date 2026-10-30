@@ -1,12 +1,25 @@
 # 专家规范
 
-场景的专家程序 `expert.py` 怎么写，以及专家运行时的语义。专家由大模型按本规范编写（code as policy），每个场景一个。接口和技能的细节以代码为准：`ctx` 见 [`context.py`](../../table_1000/experts/context.py)，原子技能见 [`skills`](../../table_1000/experts/skills/__init__.py)，语义技能见 [`skills/semantic.py`](../../table_1000/experts/skills/semantic.py)，动作链见 [`skills/chain.py`](../../table_1000/experts/skills/chain.py)，模块说明里有完整的行为描述。生成的数据见[专家数据](expert-data.md)。示例：[场景 000002](../../asset_sources/scenes/000002/expert.py)。
+场景的专家程序怎么写，以及专家运行时的语义。专家由大模型按本规范编写（code as policy），也可以由人或 agent 交互操作后导出。接口和技能的细节以代码为准：`ctx` 见 [`context.py`](../../table_1000/experts/context.py)，原子技能见 [`skills`](../../table_1000/experts/skills/__init__.py)，语义技能见 [`skills/semantic.py`](../../table_1000/experts/skills/semantic.py)，动作链见 [`skills/chain.py`](../../table_1000/experts/skills/chain.py)，模块说明里有完整的行为描述。生成的数据见[专家数据](expert-data.md)。示例：[场景 000002](../../asset_sources/scenes/000002/experts/x1pro_rm001/0000.py)。
+
+## 文件与适用范围
+
+专家按机器人分目录、用编号区分：`asset_sources/scenes/<场景>/experts/<机器人>/<NNNN>.py`。编号是 4 位数字，同一场景、同一机器人下从 `0000` 起顺序分配，删除的编号不再复用；编号只作身份，不表达含义。一个专家只服务一个机器人，可以只适用于一个 layout 甚至一个 seed：专家就是一种数据，允许针对一条轨迹完全写死。同一场景、同一机器人可以有多个专家。
+
+文件开头的 docstring 用一句话说明这个专家做什么、和同目录其他专家有什么不同。模块变量：
+
+- `ROBOT`：机器人名，必须与所在目录一致，加载时核对。
+- `SCOPE`：`{layout: seed 列表或 None}`，`None` 表示该 layout 的全部 seed。`run_expert.py` 默认运行范围内的全部 layout 与 seed；范围外的请求报错，开发运行加 `--outside-scope` 才允许并在记录中标出，场景的数据不允许越界。
+- `SOURCE`（可选）：`hand`（手写）、`harness`（交互导出）或 `agent`。
+- `STEPS` 或 `solve(ctx)`，见下文。
+
+同一场景各专家共用的函数可以放在 `experts/common.py`，专家用相对导入引用。
 
 ## 分层
 
 | 层 | 回答 | 不管 |
 | --- | --- | --- |
-| 专家 `expert.py` | 物体要到哪、按什么顺序；有语义的中间状态（先拉开抽屉再取笔）；每步的判据；风格提示（接近方向、`near`、`keep_out`） | 用哪只手、底盘站在哪、手臂何时收回 |
+| 专家 `experts/<机器人>/<NNNN>.py` | 物体要到哪、按什么顺序；有语义的中间状态（先拉开抽屉再取笔）；每步的判据；风格提示（接近方向、`near`、`keep_out`） | 用哪只手、底盘站在哪、手臂何时收回 |
 | 语义技能 `skills.semantic` | 把以名字给出的目标（物体、关节、表面、容器）换成几何约束：放置区域与禁放区、把手与拉动方向、开度；判断结果的谓词 | 怎样满足这些约束 |
 | 原子技能与动作链 `skills` | 在约束下选手、握法、交接、躯干和底盘；`chain` 让前一个动作满足后一个动作的需要 | 物体该放到哪 |
 | 运动原语 `ctx.solver(arm)`（MPlib） | IK、RRTConnect、直线 screw 运动、执行 | 任务语义 |
@@ -14,6 +27,8 @@
 专家优先用语义技能和原子技能，不调用 `ready`、`make_room`，也不指定手臂；先挪开哪个物体、挪到哪，仍由专家决定。取放相连时用 `chain`，否则拿起时不会考虑放下的需要。
 
 ## 编写规则
+
+下面的规则与上一节的“优先用语义技能、不指定手臂”适用于覆盖整个 layout 的专家（`SCOPE` 的值为 `None`）。只服务列出的少数 seed 的专家（例如一条轨迹）可以写死站位、手臂、握持部位、释放高度和固定世界坐标，以换取这条轨迹能完成；但目标判据、全场防跌等检查不能放宽，随机仍用 `ctx.rng`，子任务仍要标出。写死的值尽量用相对物体或容器的量表示，便于以后归纳成通用规则。
 
 - 每个目标由物体**当下**的位姿和资产几何算出，不按 seed 或固定世界坐标写特例。
 - 需要变化的选择用 `ctx.rng`，不用其他随机源。

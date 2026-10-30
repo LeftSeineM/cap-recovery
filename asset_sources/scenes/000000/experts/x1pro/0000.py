@@ -7,6 +7,12 @@ opening (see asset_sources/robots/x1pro/robot.py); the fingertips are
 TIP_BEYOND_TCP past the TCP.
 """
 
+ROBOT = 'x1pro'
+SCOPE = {0: None}
+SOURCE = 'hand'
+
+from table_1000.scenes import robot_config
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -146,7 +152,7 @@ class Expert:
         self.cabinet = Cabinet(ctx.geometry['cabinet'])
         self.table_height = ctx.scene.TABLE['height']
         self.cabinet_xy = ctx.pose('cabinet')[:2, 3]
-        yaw = ctx.scene.ROBOT['yaw']
+        yaw = robot_config(ctx.scene, ctx.spec.name)['yaw']
         self.backward = -np.array([np.cos(yaw), np.sin(yaw), 0.])
         self.regrasps = 0
         arm.add_table()

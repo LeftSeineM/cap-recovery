@@ -8,9 +8,9 @@
 
 | 交付物 | 位置 | 内容 |
 | --- | --- | --- |
-| 场景源码（进 Git） | `asset_sources/scenes/<编号>/` | `scene.py`（场景与随机初始化，见[场景规范](../specs/scenes.md)）、`expert.py`（专家程序）、`thumbnail.jpg` |
-| 初态 | `assets/scenes/<编号>/` | `initial.json` 检查报告、`initial_states.jpg` 拼图；有其他布局时另有 `layouts.jpg` |
-| 专家轨迹 | `data/scenes/<编号>/<后端>/` | `summary.json` 汇总、`trajectories.hdf5` 成功的轨迹 |
+| 场景源码（进 Git） | `asset_sources/scenes/<编号>/` | `scene.py`（场景、支持的机器人与随机初始化，见[场景规范](../specs/scenes.md)）、`experts/<机器人>/<NNNN>.py`（专家程序，见[专家规范](../specs/experts.md#文件与适用范围)）、`thumbnail.jpg` |
+| 初态 | `assets/scenes/<编号>/<机器人>/` | `initial.json` 检查报告、`initial_states.jpg` 拼图；有其他布局时另有 `layouts.jpg` |
+| 专家轨迹 | `data/scenes/<编号>/<机器人>/<专家编号>/<后端>/` | `summary.json` 汇总、`trajectories.hdf5` 成功的轨迹 |
 | 录像 | 同上 `videos/<seed>/`、`fails/<seed>/` | 前 5 条成功轨迹和全部失败轨迹，四个视角合成一条并加标注 |
 
 文件格式见[专家数据](../specs/expert-data.md)。
@@ -41,9 +41,9 @@
 ## 命令
 
 ```bash
-# 构建初态（有其他布局时加 --layouts 1:11）
+# 构建初态（默认机器人；--robot <名字> 选其他机器人，--robot all 构建全部；有其他布局时加 --layouts 1:11）
 uv run python scripts/scenes/build_scene.py 000000 --seeds 0:100 --gpus 0 1 2 3 --grid 5x5
-# 生成轨迹，整体替换 data/ 下的目录；试跑用 --dev（见第 5 章）
+# 生成轨迹，整体替换 data/ 下的目录；默认机器人和它编号最小的专家，可用 --robot、--expert 指定；试跑用 --dev（见第 5 章）
 uv run python scripts/scenes/run_expert.py 000000 --physics isaac-cpu --gpus 0 1 2 3 --jobs 8
 # 渲染前 5 条成功轨迹；失败的加 --failed、去掉 --count
 uv run python scripts/scenes/render.py 000000 --physics isaac-cpu --gpus 0 1 2 3 --jobs 8 \

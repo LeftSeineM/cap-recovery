@@ -29,12 +29,12 @@ from table_1000.scenes.layout import PENETRATION_LIMIT, SamplingFailed, yaw_pose
 TABLE = {'size': (1.36, 1.02), 'height': .755, 'top_thickness': .03, 'leg_size': .05,
          'center': (0., 0.), 'friction': (.5, .4)}
 
-ROBOT = {
-    'asset': 'robots/x1pro',
+ROBOTS = {'x1pro': {
     'position': (-.03, -.80, 0.),
     'yaw': math.pi / 2,
     'joints': {'lift_joint': .70, 'head_pitch_joint': .60},
-}
+}}
+ROBOT = 'x1pro'
 
 BACKGROUND = {'backboard': 'bench_backboard/000000', 'monitor': 'monitor/000000', 'psu': 'bench_power_supply/000000',
               'scope': 'oscilloscope/000000', 'box': 'instrument_box/000000', 'lamp': 'desk_lamp/000000',

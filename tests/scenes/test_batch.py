@@ -1,6 +1,7 @@
 """Batch runs and the three scene steps without a simulator: processes, seeds, initial-state files, merged batches,
 the choice of renders."""
 
+from pathlib import Path
 import json
 import sys
 
@@ -18,6 +19,15 @@ from table_1000.scenes.recordings import merge, video_path, videos
 
 STATE = {'articulation': {'robot': {'joint_position': np.zeros((1, 3), np.float32)}},
          'rigid_object': {'pen': {'root_pose': np.ones((1, 7), np.float32)}}, 'deformable_object': {}}
+
+
+@pytest.fixture(autouse=True)
+def scene_sources(tmp_path):
+    """Batch controllers read source identity before launching their mocked workers."""
+    import shutil
+    from table_1000.scenes import ROOT
+    destination = tmp_path / 'checkout' / 'asset_sources' / 'scenes' / '000000'
+    shutil.copytree(ROOT / 'asset_sources' / 'scenes' / '000000', destination)
 
 
 def test_seeds_are_ranges_and_single_seeds():
@@ -117,7 +127,7 @@ def test_render_chooses_episodes():
 
 @pytest.fixture
 def batch(tmp_path):
-    directory = tmp_path / 'data' / '000000' / 'isaac-cpu'
+    directory = tmp_path / 'data' / '000000' / 'x1pro' / '0000' / 'isaac-cpu'
     directory.mkdir(parents=True)
     trajectory_file(directory / 'trajectories.hdf5', [0, 1, 4])
     (directory / 'summary.json').write_text(json.dumps({'seeds': {'range': '0:5', 'count': 5}, 'videos': {}, 'fails': {},
@@ -161,7 +171,7 @@ def test_render_keeps_other_videos(batch, tmp_path, monkeypatch):
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
     monkeypatch.setattr(render, 'check_cameras', lambda *args: None)
     common = ['000000', '--physics', 'isaac-cpu', '--gpus', '0', '1', '--jobs', '4',
-              '--input', str(tmp_path / 'data'), '--root', str(tmp_path)]
+              '--input', str(tmp_path / 'data'), '--root', str(tmp_path / 'checkout')]
     render.main([*common, '--cameras', 'wide', '--count', '2'])
     render.main([*common, '--cameras', 'wide', 'face_view', '--merge', '--failed'])
     assert chosen == [[0], [1], [2], [3]]
@@ -173,7 +183,7 @@ def test_render_keeps_other_videos(batch, tmp_path, monkeypatch):
 
 
 def test_run_expert_merges_parts(tmp_path, monkeypatch):
-    initial = tmp_path / 'assets' / 'scenes' / '000000'
+    initial = tmp_path / 'assets' / 'scenes' / '000000' / 'x1pro'
     initial.mkdir(parents=True)
     write_states(initial / 'initial_states.hdf5', {seed: (0, STATE) for seed in range(4)},
                  {'scene': '000000', 'robot': 'x1pro'})
@@ -197,13 +207,12 @@ def test_run_expert_merges_parts(tmp_path, monkeypatch):
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
-    monkeypatch.setattr(run_expert, 'scene_robot', lambda scene, root: 'x1pro')
     output = tmp_path / 'data'
     with pytest.raises(SystemExit, match='no episode: seeds 2;'):
         run_expert.main(['000000', '--physics', 'isaac-cpu', '--gpus', '0', '1', '--input', str(tmp_path / 'assets/scenes'),
                          '--output', str(output), '--root', str(tmp_path / 'checkout')])
     assert rounds == [2, 2]          # seeds 2 and 3 once more
-    directory = output / '000000' / 'isaac-cpu'
+    directory = output / '000000' / 'x1pro' / '0000' / 'isaac-cpu'
     summary = json.loads((directory / 'summary.json').read_text())
     assert summary['failures'] == {PROCESS_EXITED: [2]} and summary['succeeded'] == 3
     assert sorted(path.name for path in (directory / 'episodes').iterdir()) == ['0.json', '1.json', '3.json']
@@ -213,7 +222,7 @@ def test_run_expert_merges_parts(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('problems', ['failed', 'all', 'none'])
 def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
-    initial = tmp_path / 'assets' / 'scenes' / '000000'
+    initial = tmp_path / 'assets' / 'scenes' / '000000' / 'x1pro'
     initial.mkdir(parents=True)
     write_states(initial / 'initial_states.hdf5', {seed: (0, STATE) for seed in range(4)},
                  {'scene': '000000', 'robot': 'x1pro'})
@@ -231,7 +240,6 @@ def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
-    monkeypatch.setattr(run_expert, 'scene_robot', lambda scene, root: 'x1pro')
     common = ['000000', '--physics', 'isaac-cpu', '--input', str(tmp_path / 'assets/scenes'),
               '--root', str(tmp_path / 'checkout')]
     with pytest.raises(SystemExit):     # some seeds are a development run
@@ -240,7 +248,7 @@ def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
     run_expert.main([*common, '--dev', '--name', 'try', '--seeds', '1', '3', '--output', str(tmp_path / 'runs'),
                      *(['--problems', problems] if problems != 'failed' else [])])
     [directory] = (tmp_path / 'runs' / '000000').iterdir()
-    assert directory.name.endswith('-nocommit-try')
+    assert directory.name.endswith('-nocommit-x1pro-0000-layout0-try')
     summary = json.loads((directory / 'summary.json').read_text())
     assert summary['run'] == directory.name and '--dev' in summary['command'] and summary['succeeded'] == 2
     assert summary['problems'] == problems
@@ -254,9 +262,8 @@ def test_run_names_carry_the_commit():
 
 
 def test_run_expert_rejects_another_robot(tmp_path, monkeypatch):
-    monkeypatch.setattr(run_expert, 'scene_robot', lambda scene, root: 'x1pro')
-    initial = tmp_path / '000000'
-    initial.mkdir()
+    initial = tmp_path / '000000' / 'x1pro'
+    initial.mkdir(parents=True)
     write_states(initial / 'initial_states.hdf5', {0: (0, STATE)}, {'scene': '000000', 'robot': 'other'})
     with pytest.raises(SystemExit):
         run_expert.main(['000000', '--physics', 'isaac-cpu', '--input', str(tmp_path), '--output', str(tmp_path / 'out')])
@@ -292,12 +299,12 @@ def test_build_scene_combines_parts(tmp_path, monkeypatch):
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
     root = tmp_path / 'checkout'
     output = tmp_path / 'custom'
-    (output / '000000' / 'initial').mkdir(parents=True)
+    (output / '000000' / 'x1pro' / 'initial').mkdir(parents=True)
     with pytest.raises(SystemExit, match=r'errors: seeds 3 \(see .*\); seeds without a valid state: 1$'):
         build_scene.main(['000000', '--seeds', '0:5', '--gpus', '0', '1', '--grid', '2x1', '--output', str(output),
                           '--root', str(root)])
     assert rounds == [[0, 1, 2], [3, 4], [2, 3], [4]]  # seeds without a result or with an error run again
-    directory = output / '000000'
+    directory = output / '000000' / 'x1pro'
     report = json.loads((directory / 'initial.json').read_text())
     assert report['seeds'] == {'range': '0:5', 'count': 5} and report['without_state'] == [1, 3]
     assert report['records']['3']['error'] == 'RuntimeError: CUDA error'
@@ -306,7 +313,7 @@ def test_build_scene_combines_parts(tmp_path, monkeypatch):
     assert Image.open(directory / 'initial_states.jpg').size == (2 * build_scene.TILE_WIDTH, 216 + build_scene.CAPTION)
     assert not (directory / 'initial').exists()            # replaced, and no --images this time
     assert not (directory / 'staging').exists()            # the processes' results, removed once merged
-    assert not (root / 'asset_sources').exists()           # a custom output keeps the thumbnail
+    assert (root / 'asset_sources/scenes/000000/thumbnail.jpg').read_bytes() == (Path(__file__).resolve().parents[2] / 'asset_sources/scenes/000000/thumbnail.jpg').read_bytes()           # a custom output keeps the thumbnail
 
 
 def test_build_scene_layouts(tmp_path, monkeypatch):
@@ -332,7 +339,7 @@ def test_build_scene_layouts(tmp_path, monkeypatch):
     root = tmp_path / 'checkout'
     (root / 'asset_sources' / 'scenes' / '000100').mkdir(parents=True)
     (root / 'asset_sources' / 'scenes' / '000100' / 'scene.py').write_text(
-        "LAYOUTS = {1: {'quality': 'good', 'description': 'tidy', 'arrange': None},\n"
+        "ROBOT = 'x1pro'\nROBOTS = {'x1pro': {'position': (0,0,0), 'yaw': 0, 'joints': {}}}\nLAYOUTS = {1: {'quality': 'good', 'description': 'tidy', 'arrange': None},\n"
         "           2: {'quality': 'bad', 'description': 'a heap', 'arrange': None}}\n")
     output = tmp_path / 'custom'
     with pytest.raises(SystemExit):
@@ -340,7 +347,7 @@ def test_build_scene_layouts(tmp_path, monkeypatch):
     build_scene.main(['000100', '--layouts', '0:3', '--seeds', '0', '1', '--jobs', '3', '--grid', '2x1',
                       '--output', str(output), '--root', str(root)])
     assert sorted(built) == [(layout, seed) for layout in range(3) for seed in range(2)]
-    directory = output / '000100'
+    directory = output / '000100' / 'x1pro'
     assert list(read_states(directory / 'initial_states.hdf5')[1]) == [0, 1]
     report = json.loads((directory / 'layouts' / '2' / 'initial.json').read_text())
     assert report['layout'] == 2 and report['quality'] == 'bad' and report['valid'] == 2

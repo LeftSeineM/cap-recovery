@@ -2,7 +2,7 @@
 
 ``uv run python scripts/scenes/render.py 000000 --physics isaac-cpu --gpus 0 1 2 3 [--jobs N] --cameras NAME ... [--merge] [--captions] [--count N] [--seeds ...] [--failed] [--input DIR]``
 
-Reads the batch ``<input>/<scene>/<backend>/`` (``<input>`` = ``data/scenes``,
+Reads the batch ``<input>/<scene>/<robot>/<expert>/<backend>/`` (``<input>`` = ``data/scenes``,
 written by ``run_expert.py``; ``--batch DIR``: that batch, e.g. a development run) and writes, per episode, one video per camera
 ``videos/<seed>/<camera>.mp4`` (``fails/`` for failed episodes), or with
 ``--merge`` the cameras in one grid ``videos/<seed>/merge.mp4``. ``--cameras``
@@ -148,6 +148,9 @@ def main(argv=None):
     from table_1000.common.batch import add_arguments, job_count, parse_seeds, process_name, run_batch, seed_range
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
+    parser.add_argument('--robot', help='default scene robot, ignored with --batch')
+    parser.add_argument('--expert', help='default smallest expert number, ignored with --batch')
+    parser.add_argument('--layout', type=int, default=0)
     parser.add_argument('--physics', required=True, help='the backend the batch was generated on')
     parser.add_argument('--cameras', nargs='+', required=True, help='robot cameras (RGB) and views of the scene')
     parser.add_argument('--merge', action='store_true', help='one video with the cameras in a grid')
@@ -157,11 +160,11 @@ def main(argv=None):
     parser.add_argument('--count', type=int, help='the first N of the chosen episodes by seed')
     add_arguments(parser)
     parser.add_argument('--input', type=Path, default=ROOT / 'data' / 'scenes',
-                        help='the batch in <input>/<scene>/<backend>/, videos written next to it')
+                        help='the batch in <input>/<scene>/<robot>/<expert>/<backend>/, videos written next to it')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--batch', type=Path, help='this batch directory instead of <input>/<scene>/<backend>/')
+    parser.add_argument('--batch', type=Path, help='this batch directory instead of <input>/<scene>/<robot>/<expert>/<backend>/')
     parser.add_argument('--work', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
@@ -174,7 +177,12 @@ def main(argv=None):
         parser.error('--count must be positive')
     if len(set(args.cameras)) != len(args.cameras):
         parser.error('--cameras lists a camera twice')
-    directory = (args.batch or args.input / args.scene / args.physics).resolve()
+    from table_1000.scenes import load_expert, data_dir
+    if args.batch:
+        directory = args.batch.resolve()
+    else:
+        expert = load_expert(args.scene, args.robot, args.expert, args.root)
+        directory = data_dir(args.input, args.scene, expert.ROBOT, expert.NUMBER, args.physics, args.layout).resolve()
     trajectories = directory / 'trajectories.hdf5'
     if not trajectories.is_file():
         parser.error(f'no trajectories {trajectories}; run run_expert.py first')

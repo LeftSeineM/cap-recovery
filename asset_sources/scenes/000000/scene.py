@@ -11,8 +11,7 @@ import math
 TABLE = {'size': (1.36, 1.02), 'height': .755, 'top_thickness': .03, 'leg_size': .05,
          'center': (0., 0.), 'friction': (.5, .4)}
 
-ROBOT = {
-    'asset': 'robots/x1pro',
+ROBOTS = {'x1pro': {
     'position': (-.03, -.80, 0.),
     'yaw': math.pi / 2,
     # Arms in the zero pose (folded, the real robot's usual start), torso raised
@@ -21,7 +20,8 @@ ROBOT = {
         'lift_joint': .40,
         'head_pitch_joint': .30,   # head camera looks at the workspace
     },
-}
+}}
+ROBOT = 'x1pro'
 
 OBJECTS = {
     'cabinet': {'asset': 'objects/cabinet/000000'},

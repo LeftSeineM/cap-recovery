@@ -1,6 +1,6 @@
 """Where expert episodes spend simulated and wall time, by step and subtask, from their reports.
 
-``uv run python scripts/experts/step_times.py data/scenes/000002/isaac-cpu [more batches ...]``
+``uv run python scripts/experts/step_times.py data/scenes/000002/x1pro_rm001/0000/isaac-cpu [more batches ...]``
 
 Per batch: the success rate, the mean wall time per episode, and how many successes stayed within
 ``--sim-limit`` s of simulated time; then per step of the expert (``steps`` of the reports) the

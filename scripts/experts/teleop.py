@@ -129,7 +129,7 @@ def save_attempt(output, report, case, log, metadata):
     report['teleop'] = {'case': case, **log}
     (output / 'episodes' / f"{report['seed']}.json").write_text(json.dumps(report, indent=1, default=float))
     sources = list((output / 'checkpoints').glob('*.hdf5'))
-    merge_checkpoints(sources, output, {key: metadata[key] for key in ('scene', 'robot', 'physics', 'commit')})
+    merge_checkpoints(sources, output, {key: metadata[key] for key in ('scene', 'robot', 'expert', 'physics', 'commit')})
     for checkpoint in sources:
         checkpoint.unlink()
     summary = {**metadata, 'from': str(source_batch), **summarize([report], [report['seed']]),
@@ -143,6 +143,8 @@ def save_attempt(output, report, case, log, metadata):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
+    parser.add_argument('--robot')
+    parser.add_argument('--expert')
     parser.add_argument('--physics', default='isaac-cpu')
     parser.add_argument('--runs', type=Path, default=ROOT / 'runs' / 'expert', help='where the cases come from')
     parser.add_argument('--batches', type=Path, nargs='+', default=[], help='more batches whose cases are listed')
@@ -154,6 +156,13 @@ def main(argv=None):
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--render-every', type=int, default=3, help='control steps per streamed frame')
     args = parser.parse_args(argv)
+    if args.batches:
+        from table_1000.experts.identity import check_identity
+        first = json.loads((args.batches[0] / 'summary.json').read_text())
+        args.robot = args.robot or first['robot']
+        args.expert = args.expert or first['expert']
+        for batch in args.batches:
+            check_identity(json.loads((batch / 'summary.json').read_text()), args.robot, args.expert, batch)
     from table_1000.sim.isaaclab.app import start_app
     from table_1000.sim.isaaclab.render import RT2_ARGS
     app = start_app(gpu=args.gpu, workers=4, extra_args=RT2_ARGS)
@@ -170,14 +179,15 @@ def run(args, argv):
     from table_1000.experts.generate import Generator, read_checkpoints
     from table_1000.robots import load_spec
     from table_1000.robots.teleop import Server
-    from table_1000.scenes import load
+    from table_1000.scenes import load, load_expert
     from table_1000.sim import CONTROL_HZ
     from table_1000.sim.isaaclab import recording, render
     from scripts.scenes.render import camera_sets
     from scripts.scenes.run_expert import run_name
     render.configure()
     scene = load(args.scene, 'scene', ROOT)
-    spec = load_spec(Path(scene.ROBOT['asset']).name, ROOT)
+    selected = load_expert(args.scene, args.robot, args.expert, ROOT)
+    spec = load_spec(selected.ROBOT, ROOT)
     names = args.views or [next(iter(scene.VIEWS)), *(name for name, camera in spec.cameras.items()
                                                       if camera.sensor.kind == 'rgb')]
     cameras, views = camera_sets(scene, spec, names)
@@ -186,8 +196,9 @@ def run(args, argv):
         camera, sensor=camera.sensor.resized(DISPLAY_WIDTH, round(camera.sensor.resolution[1] * DISPLAY_WIDTH
                                                                   / camera.sensor.resolution[0])))
                for name, camera in cameras.items()}
-    generator = Generator(args.scene, ROOT / 'outputs' / 'teleop' / args.scene, args.assets, ROOT, args.physics,
-                          cameras=cameras, views=views)
+    generator = Generator(args.scene, ROOT / 'outputs' / 'teleop' / args.scene / selected.ROBOT / selected.NUMBER,
+                          args.assets, ROOT, args.physics,
+                          cameras=cameras, views=views, robot=selected.ROBOT, expert=selected.NUMBER)
     env, expert = generator.env, generator.expert
     operator = teleop.Operator()
     state = {'message': 'pick a case on the left'}
@@ -208,7 +219,9 @@ def run(args, argv):
         return b'ok', 'text/plain'
 
     server = Server(operator.keys, names, args.port, page=PAGE,
-                    gets={'/cases': lambda: json_reply(teleop.cases(args.runs, args.scene, args.batches)),
+                    gets={'/cases': lambda: json_reply([
+                        case for case in teleop.cases(args.runs, args.scene, args.batches)
+                        if case['robot'] == selected.ROBOT and case['expert'] == selected.NUMBER]),
                           '/views': lambda: json_reply(list(orbits)),
                           '/state': lambda: json_reply({**state, **operator.status})},
                     posts={'/drag': on_drag, '/view': on_view, '/command': on_command})
@@ -272,6 +285,8 @@ def run(args, argv):
             continue
         case, kind, back_s = command['case'], command.get('start', 'step'), float(command.get('back_s') or 0.)
         command = None
+        from table_1000.experts.identity import check_identity
+        check_identity(case, selected.ROBOT, selected.NUMBER, case['batch'])
         step, seed = int(case['step']), int(case['seed'])
         path = Path(case['start'])
         found = read_checkpoints(path)[1] if path.is_file() else {}
@@ -299,12 +314,14 @@ def run(args, argv):
             attempt, initial, start = found[seed]
             start = None if step == 1 else start
             source, label, begins = str(path), f'step{step}-seed{seed}', {'kind': 'step'}
-        name = run_name(checkout, label)
+        name = run_name(checkout, f'{selected.ROBOT}-{selected.NUMBER}-{label}')
         output = args.output / args.scene / name
         output.mkdir(parents=True)
         for sub in ('episodes', 'checkpoints'):
             (output / sub).mkdir()
         generator.output, generator.steps, generator.source = output, (step, step), source
+        generator.identity.update(layout=case['layout'], outside_scope=case['outside_scope'])
+        generator.env_args.update(generator.identity)
         recording.redirect(env, output)
         log = {'start': begins}
         generator.expert = teleop.HumanExpert(
@@ -317,7 +334,7 @@ def run(args, argv):
         command = log.pop('next', None)
         save_attempt(output, report, case, log,
                      {'run': name, 'command': shlex.join(sys.argv if argv is None else ['teleop.py', *argv]),
-                      'scene': args.scene, 'robot': spec.name, 'physics': args.physics, 'commit': checkout,
+                      'scene': args.scene, **generator.identity, 'physics': args.physics, 'commit': checkout,
                       'steps_run': [step, step]})
         final = log.get('final_check') or {}
         state['message'] = (f'saved {output.name}: {report["status"]} (operator: {log.get("verdict")}; check '
