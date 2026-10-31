@@ -1,5 +1,7 @@
 """Place: the held object put down in a region of a surface."""
 
+from table_1000.experts.skills.place import regions
+
 import itertools
 from dataclasses import replace
 from functools import cached_property
@@ -12,14 +14,14 @@ from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
 from table_1000.experts.context import ExpertFailed, Unreachable, remaining_wall
-from table_1000.experts.grasps import MIN_HOLD_AREA, OPEN_MARGIN, _close, _held_area, _vertices, translated
+from table_1000.experts.skills.hold.frames import MIN_HOLD_AREA, OPEN_MARGIN, _close, _held_area, _vertices, translated
 from table_1000.experts.skills.chain import InHand
-from table_1000.experts.skills.flat_release import FlatReleaseGeometry, FLAT_LEVEL, FLAT_STEP
-from table_1000.experts.skills.low_release import LowRelease
+from table_1000.experts.skills.place.flat import FlatReleaseGeometry, FLAT_LEVEL, FLAT_STEP
+from table_1000.experts.skills.place.low import LowRelease
 from table_1000.planning.world import geometry, pose as fcl_pose
 from table_1000.experts.skills.common import CANDIDATE_PLANS, IK_ATTEMPTS, RETREATS, ROOM_PLACES, collisions, convex_keepout
 from table_1000.experts.solver import PlanningFailed
-from table_1000.experts.problems import decision, mark
+from table_1000.experts.audit.problems import decision, mark
 
 PLACE_ABOVE = .08       # m, place comes down from this high above the release pose
 PLACE_CLEARANCE = .01   # m between the held object and the surface at the release
@@ -35,53 +37,6 @@ PLACE_MARGIN = .01      # m the footprint keeps inside the region and off its ke
 # at the release and above it (more than one: the object may turn a little in the hand as it closes),
 # per hold (arm, and the object in the hand rounded to NEED_ROUND m / rad).
 NEED_PLACES, NEED_REACHED, NEED_IK_ATTEMPTS, NEED_ROUND = 24, 3, 5, (.02, .1)
-
-
-def overlaps(outline, low, high):
-    """Whether the convex polygon ``outline`` (vertices in order) overlaps the rectangle
-    ``low``-``high``: no separating axis among the rectangle's and the polygon's edge normals (a
-    long, thin footprint may cross a corner with no vertex inside)."""
-    if np.any(outline.max(0) < low) or np.any(outline.min(0) > high):
-        return False
-    corners = np.array([low, [high[0], low[1]], high, [low[0], high[1]]])
-    for edge in np.roll(outline, -1, axis=0) - outline:
-        normal = np.array([-edge[1], edge[0]])
-        a, b = outline @ normal, corners @ normal
-        if a.max() < b.min() or b.max() < a.min():
-            return False
-    return True
-
-
-def orientations(points, current, frame, orientation=None):
-    """Seed rotations for yaw search, derived from collision extents in the body frame.
-
-    None preserves tilt. ``'upright'`` aligns either end of the longest axis
-    with the support normal (length at least twice either width); ``'flat'``
-    aligns either face of the shortest axis (both widths at least twice the
-    thickness). Unsupported modes/shapes raise ValueError: omit orientation
-    for ordinary placement. ``'insert'`` tries either end of every body axis
-    for a small object through a narrow mouth. No asset names/layout poses are used.
-    """
-    if orientation is None:
-        return [current[:3, :3]]
-    if orientation not in ('upright', 'flat', 'insert'):
-        raise ValueError("orientation must be None, 'upright', 'flat' or 'insert'")
-    size = np.ptp(points, axis=0)
-    order = np.argsort(size)
-    upright = orientation == 'upright'
-    if orientation != 'insert' and (size[order[2]] < 2 * size[order[1]] if upright else size[order[1]] < 2 * size[order[0]]):
-        raise ValueError(f'{orientation} requires a slender or planar collision shape respectively; '
-                         'omit orientation for ordinary placement')
-    axes = np.eye(3) if orientation == 'insert' else [np.eye(3)[order[2] if upright else order[0]]]
-    seeds = [Rotation.align_vectors([sign * frame[:3, 2]], [current[:3, :3] @ axis])[0].as_matrix()
-             @ current[:3, :3] for axis in axes for sign in (1., -1.)]
-    if orientation == 'flat':
-        # A narrow rectangular container may fit only close to its own axes.
-        # A yaw grid starting at the held yaw can miss that whole feasible band.
-        seeds += [Rotation.align_vectors([sign * frame[:3, 2], frame[:3, 0]],
-                                         [current[:3, order[0]], current[:3, order[2]]])[0].as_matrix()
-                  @ current[:3, :3] for sign in (1., -1.)]
-    return seeds
 
 
 class Placing(LowRelease):
@@ -129,7 +84,7 @@ class Placing(LowRelease):
     def insertion_obstacles(self, target):
         """Named live scene geometry, excluding the carried body."""
         # semantic imports placement constants, so this dependency stays local.
-        from table_1000.experts.skills.semantic import scene_shapes
+        from table_1000.experts.world.geometry import scene_shapes
         obstacles = []
         for s in scene_shapes(self.ctx, exclude=(target.obj,)):
             remaining_wall(self.ctx)
@@ -174,7 +129,7 @@ class Placing(LowRelease):
     def check_insertion_depth(self, target, container, part, clearance):
         """Do not release a slipped object whose measured end is still above the live floor."""
         # semantic imports placement constants, so this dependency stays local.
-        from table_1000.experts.skills.semantic import scene_shapes, support_region
+        from table_1000.experts.world.geometry import scene_shapes, support_region
         ctx = self.ctx
         floor, _ = support_region(scene_shapes(ctx, exclude=(target.obj,)), container, part, floor=True)
         if floor is None:
@@ -190,7 +145,7 @@ class Placing(LowRelease):
     def flat_release_geometry(self, target, region):
         """Live obstacles and measured wall height, without asset-specific constants."""
         # semantic imports placement constants, so this dependency stays local.
-        from table_1000.experts.skills.semantic import scene_shapes, selects
+        from table_1000.experts.world.geometry import scene_shapes, selects
         every = scene_shapes(self.ctx)
         shapes = [shape for shape in every if shape.obj != target.obj]
         local = np.linalg.inv(self.ctx.poses()[target.body])
@@ -234,7 +189,7 @@ class Placing(LowRelease):
         ctx = self.ctx
         if len(region) > 3 and 'flat_container' in region[3]:
             # semantic imports placement constants, so this dependency stays local.
-            from table_1000.experts.skills.semantic import inside_region
+            from table_1000.experts.skills.place.regions import inside_region
             support = region[3]
             region, _ = inside_region(target.obj, support['flat_container'], support['part'],
                                      support=support['support'], orientation='flat',
@@ -312,7 +267,7 @@ class Placing(LowRelease):
                         return True
                 return False
         options = []
-        for seed, turn in itertools.product(orientations(target.points, current, frame, orientation),
+        for seed, turn in itertools.product(regions.orientations(target.points, current, frame, orientation),
                                             np.radians(np.arange(0., 360., PLACE_TURN_STEP))):
             remaining_wall(getattr(self, 'ctx', None))
             # Turned about the surface normal, in the region frame.
@@ -340,7 +295,7 @@ class Placing(LowRelease):
                     spot = frame @ [x, y, 0., 1.]
                     footprint = hull[:, :2] - centre + [x, y]
                     world = (frame @ np.c_[footprint, np.zeros(len(footprint)), np.ones(len(footprint))].T).T
-                    if any(overlaps((inv @ world.T).T[:, :2], low_, high_) for inv, low_, high_ in boxes):
+                    if any(regions.overlaps((inv @ world.T).T[:, :2], low_, high_) for inv, low_, high_ in boxes):
                         continue
                     pose = np.eye(4)
                     pose[:3, :3] = rotation

@@ -1,8 +1,7 @@
 import numpy as np
 from types import SimpleNamespace
 
-from table_1000.experts.grasps import (Box, Cylinder, Hand, grasp_candidates, PAD_SPACING,
-    MIN_PAD_AREA, HOLD_MARGIN, MIN_HOLD_AREA, OPEN_MARGIN)
+from table_1000.experts.skills.hold.frames import Box, Cylinder, Hand, grasp_candidates, PAD_SPACING, MIN_PAD_AREA, HOLD_MARGIN, MIN_HOLD_AREA, OPEN_MARGIN
 
 
 def hand():
@@ -50,7 +49,7 @@ def test_hand_reuses_shape_geometry_across_openings(monkeypatch):
 
 
 def test_vertices_cache_reuses_convex_hull_and_tracks_content(monkeypatch):
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
 
     grasps._cached_vertices.cache_clear()
     original = grasps._mesh
@@ -99,8 +98,8 @@ def test_cached_geometry_preserves_candidates_and_rejections():
 
 
 def test_angle_probe_reuses_placements_and_preserves_retry_order(monkeypatch):
-    from table_1000.experts import grasps
-    from table_1000.experts.grasps.checks import CollisionSurface
+    from table_1000.experts.skills.hold import frames as grasps
+    from table_1000.experts.skills.hold.checks import CollisionSurface
 
     calls, original = [], grasps._placed
 
@@ -132,8 +131,8 @@ def test_angle_probe_reuses_placements_and_preserves_retry_order(monkeypatch):
 def test_contact_math_scopes_blas_and_restores_after_failure(monkeypatch):
     import pytest
     from threadpoolctl import threadpool_limits
-    from table_1000.experts import grasps
-    from table_1000.experts.grasps import build_grasp_pose
+    from table_1000.experts.skills.hold import frames as grasps
+    from table_1000.experts.skills.hold.frames import build_grasp_pose
 
     seen = []
     monkeypatch.setattr(grasps, '_collides', lambda *args: False)

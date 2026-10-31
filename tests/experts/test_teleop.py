@@ -208,7 +208,7 @@ def test_step_start_operates_first_ik_without_a_solver(tmp_path, monkeypatch):
 def test_resolve_outputs_stay_outside_the_teleop_case_scan(tmp_path, monkeypatch):
     import gzip
     from scripts.experts import resolve
-    from table_1000.experts import problems
+    from table_1000.experts.audit import problems
 
     batch = tmp_path / 'runs/expert/000002/failed'
     episode = {**report(4, [1]), 'solve_trace': 'problems/4.json.gz'}

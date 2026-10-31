@@ -3,8 +3,8 @@ import pytest
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.grasps.checks import CollisionSurface
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.checks import CollisionSurface
+from table_1000.experts.skills.hold.frames import Box
 
 
 def scalar_intervals(shapes, origins, direction):

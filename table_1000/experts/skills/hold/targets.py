@@ -4,7 +4,7 @@ import numpy as np
 
 def oriented_shape(points):
     """Fit in the geometry's oriented box, so a diagonal wire keeps its true width."""
-    from table_1000.experts.grasps import fitted, oriented_bounds
+    from table_1000.experts.skills.hold.frames import fitted, oriented_bounds
     to_box, _ = oriented_bounds(points)
     local = np.asarray(points) @ to_box[:3, :3].T + to_box[:3, 3]
     shape, offset = fitted(local)
@@ -84,8 +84,8 @@ def rim_sections(skill, obj, whole, geometry):
     exist. A lid above all sampled cavities marks it enclosed and returns no
     inner-wall targets. Geometry and authored material remain unchanged.
     """
-    from table_1000.experts.grasps import Box
-    from table_1000.experts.thin_objects import Edge, exposed_points
+    from table_1000.experts.skills.hold.frames import Box
+    from table_1000.experts.skills.hold.sections import Edge, exposed_points
     # Narrow cavities already use the geometry's solid planning envelope.
     # Keep their ordinary target ordering and whole-body expert frame.
     if geometry.solid(None):
@@ -107,7 +107,7 @@ def rim_sections(skill, obj, whole, geometry):
     top = all_points[:, 2].max()
     # Require a horizontal empty section enclosed on both axes. This is a
     # geometric container test, excluding forks, coils and decorative slats.
-    from table_1000.experts.grasps.checks import CollisionSurface
+    from table_1000.experts.skills.hold.checks import CollisionSurface
     surface = CollisionSurface([(np.eye(4), 'convex', points) for _, points in pieces])
     center = (all_points.min(0) + all_points.max(0)) / 2
     depth = min(float(np.ptp(points[pads, 0])) for _, points, pads in hand.inner(0.))

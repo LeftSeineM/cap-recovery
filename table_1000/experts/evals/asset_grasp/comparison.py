@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from table_1000.common.batch import load_record
-from table_1000.experts.asset_grasp import acceptance_report, summarize
+from table_1000.experts.evals.asset_grasp import acceptance_report, summarize
 
 THIN = {'paper_label', 'receipt', 'plastic_scrap', 'wire_scrap', 'zip_bag', 'lab_notebook'}
 

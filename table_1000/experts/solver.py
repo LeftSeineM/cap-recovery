@@ -224,7 +224,7 @@ class MotionSolver:
             with capture as problem_entry:
                 result = function()
                 if problem_entry is not None:
-                    from table_1000.experts.problems import summary
+                    from table_1000.experts.audit.problems import summary
                     problem_entry['result'] = summary(result)
         finally:
             adapter.before_simplify = before
@@ -331,7 +331,7 @@ class MotionSolver:
 
     def depart(self):
         """Back the hand straight off what it touches unasked for (see DEPARTS), where it does."""
-        from table_1000.experts.grasps import standoff, translated
+        from table_1000.experts.skills.hold.frames import standoff, translated
         touched = self.touching()
         if not touched:
             return

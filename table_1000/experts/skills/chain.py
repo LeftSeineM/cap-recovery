@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from table_1000.experts.context import Unreachable
-from table_1000.experts.trace import traced
+from table_1000.experts.audit.trace import traced
 from table_1000.experts.skills.common import Unmet
 
 ADAPT = ('base', 'handover')

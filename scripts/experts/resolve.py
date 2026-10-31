@@ -99,7 +99,7 @@ def last_decision(document, frame=None):
 
 def main(argv=None):
     from table_1000.common.batch import Load, commit, parse_seeds, run_name
-    from table_1000.experts.problems import Offline, load
+    from table_1000.experts.audit.problems import Offline, load
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('batch', type=Path)
     parser.add_argument('--seeds', nargs='+', required=True, help='seed numbers or a:b')

@@ -6,7 +6,7 @@
 A group is one robot (``--robots``) in one scenario (``--scenarios``: ``open`` the bare table,
 ``box`` the object in an open box, ``side``/``back``/``corner`` walls beside and behind it) with
 one seed (``--seeds``); its ``--trials`` random trials cycle through the test objects
-(``table_1000/experts/pick_eval.py``), each placed by the seed and its index. ``--case NAME X Y
+(``table_1000/experts/evals/pick_eval.py``), each placed by the seed and its index. ``--case NAME X Y
 YAW POSE`` (world frame: table centre at the origin, robot on the -Y side) runs given placements
 in the open scenario instead.
 
@@ -40,7 +40,7 @@ CLOSE = {'position': (.5, .6, 1.2), 'target': (0., 0., .8), 'focal_length_mm': 2
 def tasks(args, scenario, seed):
     """``[(index, name, placement)]`` of a group."""
     import numpy as np
-    from table_1000.experts.pick_eval import OBJECTS, sample
+    from table_1000.experts.evals.pick_eval import OBJECTS, sample
     if args.case:
         return [(index, name, {'x': float(x), 'y': float(y), 'yaw': float(yaw), 'pose': pose})
                 for index, (name, x, y, yaw, pose) in enumerate(args.case)]
@@ -86,7 +86,7 @@ def worker(args):
     work = args.work
     work.mkdir(parents=True, exist_ok=True)
     try:
-        from table_1000.experts.pick_eval import Evaluator, scene
+        from table_1000.experts.evals.pick_eval import Evaluator, scene
         from table_1000.sim.isaaclab.video import encode
         views = {'wide': WIDE, 'close': CLOSE} if args.video else {}
         evaluator = Evaluator(scene(args.gap, args.lift, robot=args.robot, scenario=args.scenario), args.assets, work, ROOT,

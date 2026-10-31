@@ -1,7 +1,7 @@
 """A nearest release IK branch may have no above pose at its torso height."""
 from types import SimpleNamespace
 import numpy as np
-from table_1000.experts.skills.placing import Placing
+from table_1000.experts.skills.place.strict import Placing
 
 
 def test_need_and_place_keep_a_release_branch_that_can_reach_above():

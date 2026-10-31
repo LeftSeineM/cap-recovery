@@ -16,7 +16,7 @@ from table_1000.scenes import robot_config
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.grasps import build_grasp_pose, standoff, translated
+from table_1000.experts.skills.hold.frames import build_grasp_pose, standoff, translated
 from table_1000.experts.solver import PlanningFailed
 
 TIP_BEYOND_TCP = .0185

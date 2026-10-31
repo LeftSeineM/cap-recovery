@@ -10,7 +10,7 @@ about the vertical).
 
 The giving arm plans to the first pose whose screening passes, the receiving one to the pre-grasp
 and straight in, closes and must hold; then the giving hand lets go and backs out
-(:meth:`~table_1000.experts.skills.motion.Motion.release`). The torso lift, shared by the
+(:meth:`~table_1000.experts.skills.push.motion.Motion.release`). The torso lift, shared by the
 arms, moves only with the giving arm, before the receiving one reaches.
 """
 
@@ -22,10 +22,10 @@ from table_1000.common.timing import timed
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.grasps import grasp_candidates, standoff
+from table_1000.experts.skills.hold.frames import grasp_candidates, standoff
 from table_1000.experts.skills.common import APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, Unmet, collisions, normalized, upright_need
 from table_1000.experts.solver import PlanningFailed
-from table_1000.experts.problems import decision, mark
+from table_1000.experts.audit.problems import decision, mark
 
 REACH = (.30, .20)                  # m ahead of the point between the shoulders
 HEIGHTS = (0., .10)                 # m above the object's height now, or TABLE_CLEARANCE above the table

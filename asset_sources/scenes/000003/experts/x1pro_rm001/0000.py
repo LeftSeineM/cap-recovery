@@ -1,5 +1,8 @@
 """Open the bottom drawer, carry the table pen into it, and close it using shared skills."""
 
+from table_1000.experts.skills.drawer import joints as drawer_joints
+from table_1000.experts.skills.place import regions
+
 ROBOT = 'x1pro_rm001'
 SCOPE = {0: None}
 SOURCE = 'hand'
@@ -32,11 +35,11 @@ def open_drawer(ctx):
 
 
 def put_pen_inside(ctx):
-    if not semantic.is_open(ctx, 'cabinet', DRAWER, OPENING):
+    if not drawer_joints.is_open(ctx, 'cabinet', DRAWER, OPENING):
         open_drawer(ctx)
     skills.chain(ctx, [skills.Pick('pen', approach=pick_approach(ctx), max_angle=PICK_ANGLES,
                                    instruction='pick up the pen from the table'),
-                       skills.Place('pen', semantic.inside_region('pen', 'cabinet', 'cabinet.drawer3'),
+                       skills.Place('pen', regions.inside_region('pen', 'cabinet', 'cabinet.drawer3'),
                                     instruction='put the pen into the bottom drawer')])
 
 
@@ -50,14 +53,14 @@ def pen_inside(ctx):
 
 
 def closed_with_pen(ctx):
-    semantic.require(ctx, semantic.is_closed(ctx, 'cabinet', DRAWER), 'drawer not closed')
+    semantic.require(ctx, drawer_joints.is_closed(ctx, 'cabinet', DRAWER), 'drawer not closed')
     pen_inside(ctx)
 
 
 # Pick checks that the pen was lifted; pick and place share one step so that
 # checkpoints between steps never leave an object in hand (as in 000002).
 STEPS = [Step('open the bottom drawer', open_drawer,
-              lambda ctx: semantic.require(ctx, semantic.is_open(ctx, 'cabinet', DRAWER, OPENING), 'drawer not opened')),
+              lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'cabinet', DRAWER, OPENING), 'drawer not opened')),
          Step('move the pen from the table to the bottom drawer', put_pen_inside, pen_inside),
          Step('close the bottom drawer', close_drawer, closed_with_pen)]
 

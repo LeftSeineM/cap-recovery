@@ -9,7 +9,7 @@ import torch
 from threadpoolctl import threadpool_info, threadpool_limits
 
 from table_1000.experts.generate import Generator
-from table_1000.experts.pick_eval import Evaluator
+from table_1000.experts.evals.pick_eval import Evaluator
 from table_1000.experts.runtime import single_threaded_blas
 
 

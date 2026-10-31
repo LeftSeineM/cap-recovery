@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 import numpy as np
 import pytest
-from table_1000.experts.skills.motion import Motion
+from table_1000.experts.skills.push.motion import Motion
 from table_1000.experts.solver import PlanningFailed
 
 @pytest.mark.parametrize('moved,upper,expected_lift',[(.04,1.,.26),(.1,1.,.2),(.02,.25,.25)])

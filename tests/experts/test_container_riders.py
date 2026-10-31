@@ -5,10 +5,10 @@ import mplib
 import numpy as np
 import pytest
 
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.frames import Box
 from table_1000.experts.skills.common import Target
-from table_1000.experts.skills.grasping import Grasping
-from table_1000.experts.skills.motion import Motion
+from table_1000.experts.skills.hold.pick import Grasping
+from table_1000.experts.skills.push.motion import Motion
 from table_1000.experts.skills import semantic
 from table_1000.experts.solver import MotionSolver
 from table_1000.planning.screw import plan_screw

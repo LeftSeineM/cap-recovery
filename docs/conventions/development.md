@@ -43,6 +43,6 @@ seed 数要满足两点：失败的案例足够多，可以分析和迭代；成
 
 ## 抓取几何依赖
 
-专家抓取代码在 `table_1000/experts/grasps/`，资产验收、结果与录制在 `table_1000/experts/asset_grasp/`。`robots` 环境显式包含 Numba 和 threadpoolctl：前者编译真实凸块的批量半空间射线查询，避免按凸块和采样点重复进入 Python；后者复用仿真环境已有的线程池控制工具，只在小矩阵接触计算期间使用单个 BLAS 线程，退出时恢复调用方设置。Kit 会在启动后重置部分原生池，因此仅设置启动环境变量不能保证这段计算仍是单线程；不调整 PhysX 或 OpenMP。
+专家抓取代码在 `table_1000/experts/skills/hold/`，资产验收、结果与录制在 `table_1000/experts/evals/asset_grasp/`。`robots` 环境显式包含 Numba 和 threadpoolctl：前者编译真实凸块的批量半空间射线查询，避免按凸块和采样点重复进入 Python；后者复用仿真环境已有的线程池控制工具，只在小矩阵接触计算期间使用单个 BLAS 线程，退出时恢复调用方设置。Kit 会在启动后重置部分原生池，因此仅设置启动环境变量不能保证这段计算仍是单线程；不调整 PhysX 或 OpenMP。
 
 射线内核使用 `njit(cache=True)`，不启用 fastmath 或放宽几何容差。第一次遇到参数类型或缓存失效时会同步编译，计入当次调用；其后进程可读取 Numba 缓存（通常在模块的 `__pycache__`，只读检出也可能选择用户缓存）。移动模块或更新 Python/Numba 可能使缓存失效，性能报告须区分首次编译与稳态。Numba 是 `robots` 的必需依赖，未安装或编译失败直接抛错，不静默换算法；无可写缓存时按 Numba 的实际错误处理。

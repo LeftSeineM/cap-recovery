@@ -1,4 +1,6 @@
 """Measured feedback, yaw wrap and finite failure of tabletop squaring."""
+from table_1000.experts.world import geometry as world_geometry
+
 from types import SimpleNamespace
 
 import numpy as np
@@ -6,8 +8,8 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from table_1000.experts import skills
-from table_1000.experts.grasps import Box
-from table_1000.experts.skills import squaring
+from table_1000.experts.skills.hold.frames import Box
+from table_1000.experts.skills.push import squaring
 
 
 def world(monkeypatch, *, heading=0., gain=.8, turn_gain=0.):
@@ -25,7 +27,7 @@ def world(monkeypatch, *, heading=0., gain=.8, turn_gain=0.):
         scene=SimpleNamespace(TABLE={'height': .755}),
         pose=lambda obj: pose.copy(), poses=lambda: {'box:body': pose.copy()},
         skills=lambda: SimpleNamespace(held={}), note=lambda *a, **kw: None, fail=fail)
-    monkeypatch.setattr(squaring.semantic, 'object_points',
+    monkeypatch.setattr(world_geometry, 'object_points',
                         lambda c, obj: points @ pose[:3, :3].T + pose[:3, 3])
 
     def push(c, obj, **options):
@@ -118,7 +120,7 @@ def test_invalid_parameters_do_not_move_the_object_or_modify_direction(monkeypat
 
 
 def test_only_carried_payload_contacts_are_allowed_and_restored_after_failure(monkeypatch):
-    from table_1000.experts.skills.squaring import _payload_contacts
+    from table_1000.experts.skills.push.squaring import _payload_contacts
     objects = {name: SimpleNamespace(body=name, fcl=lambda pose, n=name: n)
                for name in ('pen', 'remote', 'glue')}
     original = frozenset(('pen', 'remote'))
@@ -141,7 +143,7 @@ def test_only_carried_payload_contacts_are_allowed_and_restored_after_failure(mo
 
 
 def test_payload_permissions_cover_cap_and_barrel_but_exclude_external_objects(monkeypatch):
-    from table_1000.experts.skills.squaring import _payload_contacts
+    from table_1000.experts.skills.push.squaring import _payload_contacts
     names = ('a:cap', 'a:barrel', 'b:cap', 'b:barrel', 'c:cap')
     objects = {name: SimpleNamespace(body=name, fcl=lambda pose, n=name: n) for name in names}
     permissions = set()

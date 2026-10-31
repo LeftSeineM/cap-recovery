@@ -23,7 +23,7 @@ import types
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.grasps import Box, Cylinder
+from table_1000.experts.skills.hold.frames import Box, Cylinder
 from table_1000.experts.runtime import single_threaded_blas
 
 TABLE = {'size': (1.4, .8), 'height': .75, 'top_thickness': .03, 'leg_size': .05, 'center': (0., 0.),

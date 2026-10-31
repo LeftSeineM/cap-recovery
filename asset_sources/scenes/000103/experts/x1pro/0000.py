@@ -6,6 +6,10 @@ move the wireless mouse to a clear part of the table. Intended for layout 3
 from the live geometry.
 """
 
+from table_1000.experts.skills.drawer import joints as drawer_joints
+from table_1000.experts.skills.place import regions
+from table_1000.experts.world import geometry as world_geometry
+
 ROBOT = 'x1pro'
 SCOPE = {3: None}
 SOURCE = 'hand'
@@ -29,17 +33,17 @@ def subtask(instruction, action):
 
 
 def clear(ctx):
-    return [semantic.body_box(ctx, 'chest', 'tool_chest.housing', CLEAR),
-            semantic.travel(ctx, 'chest', DRAWER, CLEAR)]
+    return [world_geometry.body_box(ctx, 'chest', 'tool_chest.housing', CLEAR),
+            drawer_joints.travel(ctx, 'chest', DRAWER, CLEAR)]
 
 
 def store_wick(ctx):
-    if not semantic.is_open(ctx, 'chest', DRAWER, OPENING):
+    if not drawer_joints.is_open(ctx, 'chest', DRAWER, OPENING):
         subtask('open the middle drawer of the tool chest',
                 lambda ctx: semantic.open(ctx, 'chest', DRAWER, OPENING))(ctx)
     skills.chain(ctx, [
         skills.Pick('wick', instruction='pick up the desoldering wick from the table'),
-        skills.Place('wick', semantic.inside_region('wick', 'chest', BODY),
+        skills.Place('wick', regions.inside_region('wick', 'chest', BODY),
                      instruction='put the desoldering wick into the middle drawer'),
     ])
 
@@ -47,14 +51,14 @@ def store_wick(ctx):
 def move_mouse(ctx):
     skills.chain(ctx, [
         skills.Pick('wireless_mouse', instruction='pick up the wireless mouse from the table'),
-        skills.Place('wireless_mouse', semantic.on_region(
+        skills.Place('wireless_mouse', regions.on_region(
             'wireless_mouse', 'table', near=(*ASIDE, ctx.scene.TABLE['height']), keep_out=clear(ctx)),
             instruction='put the wireless mouse on the clear part of the table'),
     ])
 
 
 def stored(ctx):
-    semantic.require(ctx, semantic.is_closed(ctx, 'chest', DRAWER), 'drawer not closed')
+    semantic.require(ctx, drawer_joints.is_closed(ctx, 'chest', DRAWER), 'drawer not closed')
     semantic.require(ctx, semantic.inside(ctx, 'wick', 'chest', BODY), 'wick not in the drawer')
 
 
@@ -67,7 +71,7 @@ def finished(ctx):
 STEPS = [
     Step('open the middle drawer', subtask('open the middle drawer of the tool chest',
          lambda ctx: semantic.open(ctx, 'chest', DRAWER, OPENING)),
-         lambda ctx: semantic.require(ctx, semantic.is_open(ctx, 'chest', DRAWER, OPENING), 'drawer not opened')),
+         lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'chest', DRAWER, OPENING), 'drawer not opened')),
     Step('store the desoldering wick in the middle drawer', store_wick,
          lambda ctx: semantic.require(ctx, semantic.inside(ctx, 'wick', 'chest', BODY), 'wick not in the drawer')),
     Step('close the middle drawer', subtask('close the middle drawer of the tool chest',

@@ -3,8 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from table_1000.experts.pressure import (PressureLoad, correction_path, material_motion,
-                                        same_pressure_contact)
+from table_1000.experts.skills.push.pressure import PressureLoad, correction_path, material_motion, same_pressure_contact
 from table_1000.experts.solver import MotionSolver
 from table_1000.sim.isaaclab.contacts import Contacts
 

@@ -9,8 +9,8 @@ import pytest
 import torch
 
 from table_1000.common import batch
-from table_1000.experts.asset_grasp import results
-from table_1000.experts.asset_grasp.recording import Recorder
+from table_1000.experts.evals.asset_grasp import results
+from table_1000.experts.evals.asset_grasp.recording import Recorder
 from table_1000.sim.isaaclab import replay
 
 
@@ -115,7 +115,7 @@ def test_recorded_states_survive_mutation_and_search_reset(tmp_path):
 @pytest.mark.parametrize('dev', [False, True])
 def test_cli_complete_pipeline_uses_only_its_mode_destination(checkout, monkeypatch, dev):
     from scripts.experts import eval_asset_grasp as cli
-    from table_1000.experts.asset_grasp import runner
+    from table_1000.experts.evals.asset_grasp import runner
     config = checkout / 'configs/test.py'
     config.write_text("SCENE = '000103'\nROBOT = 'x1pro_rm001'\nTRIALS = 2\nASSETS = ['objects/computer_mouse/000000']\n")
     git(checkout, 'add', '.')
@@ -200,7 +200,7 @@ def test_selection_requires_config_or_explicit_assets(tmp_path, capsys, argv, me
 def test_formal_publication_keeps_frozen_source_after_workspace_changes(checkout, monkeypatch, advance_commit):
     """Actual CLI/batch/worker/publication in a temporary Git repo, without Isaac."""
     from scripts.experts import eval_asset_grasp as cli
-    from table_1000.experts.asset_grasp import runner
+    from table_1000.experts.evals.asset_grasp import runner
     import sys
     config = checkout / 'configs/test.py'
     config.write_text("SCENE = '000103'\nROBOT = 'x1pro_rm001'\nTRIALS = 1\nASSETS = ['objects/computer_mouse/000000']\n")

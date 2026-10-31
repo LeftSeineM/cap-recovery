@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.grasps.checks import CollisionSurface, GAP_TOLERANCE, closure, pad_contacts
-from table_1000.experts.grasps import Box, Hand
+from table_1000.experts.skills.hold.checks import CollisionSurface, GAP_TOLERANCE, closure, pad_contacts
+from table_1000.experts.skills.hold.frames import Box, Hand
 from table_1000.robots import load_spec
 
 
@@ -33,7 +33,7 @@ def _flat_test_hand():
 
 
 def test_empty_closing_needs_no_open_hand_surface_queries(monkeypatch):
-    from table_1000.experts.grasps import _close
+    from table_1000.experts.skills.hold.frames import _close
     hand = _flat_test_hand()
     remote = np.eye(4)
     remote[0, 3] = .1
@@ -58,7 +58,7 @@ def test_empty_closing_needs_no_open_hand_surface_queries(monkeypatch):
 
 @pytest.mark.parametrize('edge_width,accepted', [(.0232, True), (.025, False)])
 def test_candidate_pad_layer_does_not_exceed_existing_contact_tolerance(edge_width, accepted):
-    from table_1000.experts.grasps import _close, CONTACT_TOLERANCE
+    from table_1000.experts.skills.hold.frames import _close, CONTACT_TOLERANCE
     hand = _flat_test_hand()
     surface = CollisionSurface([
         (np.eye(4), 'convex', Box((.002, edge_width, .002)).points()),
@@ -75,7 +75,7 @@ def test_candidate_pad_layer_does_not_exceed_existing_contact_tolerance(edge_wid
 
 
 def test_candidate_pad_layer_keeps_first_contact_when_it_already_supports_the_pads():
-    from table_1000.experts.grasps import _close
+    from table_1000.experts.skills.hold.frames import _close
     hand = _flat_test_hand()
     surface = CollisionSurface([(np.eye(4), 'convex', Box((.008, .02, .008)).points())])
     old = _close(surface, np.eye(4), np.eye(4), hand, .04)
@@ -86,7 +86,7 @@ def test_candidate_pad_layer_keeps_first_contact_when_it_already_supports_the_pa
 
 
 def test_remote_component_cannot_centre_itself_into_an_empty_hand():
-    from table_1000.experts.grasps import _close, _closing_surface, contact_resistance
+    from table_1000.experts.skills.hold.frames import _close, _closing_surface, contact_resistance
     remote = np.eye(4)
     remote[1, 3] = .14
     surface = CollisionSurface([(remote, 'convex', Box((.02,) * 3).points())])
@@ -123,7 +123,7 @@ def test_finite_closing_queries_keep_true_faces_and_leave_other_views_unchanged(
 
 
 def test_closing_span_includes_intermediate_finger_positions_and_transformed_frame():
-    from table_1000.experts.grasps import _closing_surface
+    from table_1000.experts.skills.hold.frames import _closing_surface
     hand = _flat_test_hand()
     inner = hand.inner
     def bending(gap):
@@ -142,7 +142,7 @@ def test_closing_span_includes_intermediate_finger_positions_and_transformed_fra
 
 
 def test_actual_wide_section_only_at_pad_tip_cannot_borrow_bounding_box_area(monkeypatch):
-    import table_1000.experts.grasps as grasps
+    import table_1000.experts.skills.hold.frames as grasps
     proxy = Box((.04, .02, .02))
     transforms = [np.eye(4), np.eye(4)]
     transforms[0][0, 3], transforms[1][0, 3] = .0195, -.0005
@@ -166,7 +166,7 @@ def test_actual_wide_section_only_at_pad_tip_cannot_borrow_bounding_box_area(mon
 
 
 def test_subpart_closure_uses_all_actual_surfaces_on_the_same_body():
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     patch = CollisionSurface([(np.eye(4), 'convex', Box((.01, .02, .01)).points())])
     skill = Grasping()
     remote = np.eye(4)
@@ -182,7 +182,7 @@ def test_subpart_closure_uses_all_actual_surfaces_on_the_same_body():
     assert np.ptp(surface.points(), axis=0)[1] == pytest.approx(.05)
     # A local patch predicts a narrow pinch, while another fin on the same
     # body already blocks that opening. Neither path fills the air gap.
-    from table_1000.experts.grasps import _close
+    from table_1000.experts.skills.hold.frames import _close
     x, z = np.meshgrid(np.arange(-.004, .0041, .001), np.arange(-.004, .0041, .001))
     hand = types.SimpleNamespace(pad_spacing=.001, min_pad_area=15e-6,
         inner=lambda gap: [(sign, np.c_[x.ravel(), np.full(x.size, sign * gap / 2), z.ravel()],
@@ -192,7 +192,7 @@ def test_subpart_closure_uses_all_actual_surfaces_on_the_same_body():
 
 
 def test_candidate_contact_surfaces_belong_to_the_held_rigid_body():
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     skill = Grasping()
     geometry = types.SimpleNamespace(_candidate_surfaces={}, _grasp_surfaces={}, shapes=[
         ('body', 'barrel', np.eye(4), 'convex', Box((.02, .02, .1)).points()),
@@ -207,7 +207,7 @@ def test_candidate_contact_surfaces_belong_to_the_held_rigid_body():
 
 
 def test_curved_patch_does_not_have_to_hold_the_global_widest_section():
-    from table_1000.experts.grasps import _contact_area, _held_area
+    from table_1000.experts.skills.hold.frames import _contact_area, _held_area
     remote = np.eye(4)
     remote[2, 3] = .1
     surface = CollisionSurface([(np.eye(4), 'convex', Box((.04, .02, .02)).points()),
@@ -222,7 +222,7 @@ def test_curved_patch_does_not_have_to_hold_the_global_widest_section():
 
 @pytest.mark.parametrize('first_section', ['no opposing faces', 'small patch'])
 def test_backoff_can_find_a_later_component_after_an_unheld_section(monkeypatch, first_section):
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     # A compound body need not shrink monotonically along the approach. An
     # early edge can have no opposing face, then a later component can hold.
     frame = np.eye(4)
@@ -246,7 +246,7 @@ def test_backoff_can_find_a_later_component_after_an_unheld_section(monkeypatch,
 
 
 def test_tangent_cylinder_patch_does_not_replace_safe_insertion_depth():
-    from table_1000.experts.grasps import Cylinder, _contact_area, CONTACT_TOLERANCE
+    from table_1000.experts.skills.hold.frames import Cylinder, _contact_area, CONTACT_TOLERANCE
     surface = CollisionSurface([(np.eye(4), 'convex', Cylinder(.009, .1).points())])
     x, z = np.meshgrid(np.arange(.006, .0121, .001), np.arange(-.01, .0101, .001))
     points = np.c_[x.ravel(), np.full(x.size, .0065), z.ravel()]
@@ -265,7 +265,7 @@ def test_tangent_cylinder_patch_does_not_replace_safe_insertion_depth():
 
 
 def test_opposing_components_do_not_count_their_separation_as_patch_thickness():
-    from table_1000.experts.grasps import _contact_area, _held_area
+    from table_1000.experts.skills.hold.frames import _contact_area, _held_area
     pieces = []
     for y in (-.02, .02):
         transform = np.eye(4)
@@ -282,7 +282,7 @@ def test_opposing_components_do_not_count_their_separation_as_patch_thickness():
 
 @pytest.mark.parametrize('only_record,checks,opens', [(False, 2, 1), (True, 1, 0)])
 def test_asset_closure_observation_does_not_change_expert_default(only_record, checks, opens):
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     skill = Grasping()
     skill.arms, skill.held, skill.log = ['right'], {}, []
     skill.constrained = lambda target: False
@@ -318,8 +318,8 @@ def test_asset_closure_observation_does_not_change_expert_default(only_record, c
     (.020, 5e-6, False, False, 'missing opposing pad contact'),
 ])
 def test_expert_closure_retains_main_gap_and_area_checks(monkeypatch, gap, area, surface_held, held, reason):
-    import table_1000.experts.grasps.checks as checks
-    import table_1000.experts.skills.grasping as grasping
+    import table_1000.experts.skills.hold.checks as checks
+    import table_1000.experts.skills.hold.pick as grasping
     skill = grasping.Grasping()
     hand = types.SimpleNamespace(side=types.SimpleNamespace(finger_links=[]))
     skill.hands = {'right': hand}
@@ -354,7 +354,7 @@ def test_expert_closure_retains_main_gap_and_area_checks(monkeypatch, gap, area,
 
 @pytest.mark.parametrize('offset_x', [0., .001])
 def test_primitive_closure_uses_its_supplied_shape_without_asset_geometry(offset_x):
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     skill = Grasping()
     skill.hands = {'right': _flat_test_hand()}
     skill.solvers = {'right': types.SimpleNamespace(finger_gap=lambda: .02)}
@@ -384,7 +384,7 @@ def test_body_or_tip_contact_cannot_substitute_for_two_pad_contacts():
 
 
 def test_closure_uses_actual_surface_gap_and_geometric_tolerance(monkeypatch):
-    import table_1000.experts.grasps.checks as checks
+    import table_1000.experts.skills.hold.checks as checks
     monkeypatch.setattr(checks, '_close', lambda *args, **kwargs: (.020, np.zeros(3)))
     hand = types.SimpleNamespace(side=types.SimpleNamespace(finger_links=['l', 'r']), max_gap=.1,
            pad_alignment=lambda gap: {'edge_only': False})
@@ -414,7 +414,7 @@ def test_tensor_contact_points_identify_pad_surface_and_exclude_tip():
 
 
 def test_contact_patch_resistance_uses_size_and_normal_alignment():
-    from table_1000.experts.grasps import contact_resistance
+    from table_1000.experts.skills.hold.frames import contact_resistance
     x, z = np.meshgrid(np.arange(-.012, .0121, .0015), np.arange(-.009, .0091, .0015))
     hand = types.SimpleNamespace(hold_margin=0., pad_spacing=.0015,
         inner=lambda gap: [(s, np.c_[x.ravel(), np.full(x.size, s * gap / 2), z.ravel()],
@@ -495,8 +495,8 @@ def test_holder_rim_clearance_keeps_the_authored_floor_hull():
 
 @pytest.mark.parametrize('x,accepted', [(.008, True), (.016, False)])
 def test_round_part_measured_area_uses_the_touched_facets_with_the_original_tip_margin(x, accepted):
-    from table_1000.experts.grasps import Cylinder, MIN_HOLD_AREA, _contact_area, _held_area
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.frames import Cylinder, MIN_HOLD_AREA, _contact_area, _held_area
+    from table_1000.experts.skills.hold.pick import Grasping
     hand = _flat_test_hand()
     pieces = []
     for k in range(12):
@@ -524,9 +524,9 @@ def test_round_part_measured_area_uses_the_touched_facets_with_the_original_tip_
 def test_recorded_jar_closures_use_the_candidate_finite_sweep(tmp_path):
     import json
     from pathlib import Path
-    from table_1000.experts.grasps import MIN_HOLD_AREA, _grasp_area
-    from table_1000.experts.skills.grasping import Grasping
-    from table_1000.experts.skills.targets import oriented_shape
+    from table_1000.experts.skills.hold.frames import MIN_HOLD_AREA, _grasp_area
+    from table_1000.experts.skills.hold.pick import Grasping
+    from table_1000.experts.skills.hold.targets import oriented_shape
     from table_1000.robots.kinematics import RobotModel
     from table_1000.scenes.geometry import AssetGeometry
     root = Path(__file__).resolve().parents[2]
@@ -573,8 +573,8 @@ def test_recorded_jar_closures_use_the_candidate_finite_sweep(tmp_path):
 
 
 def test_measured_surface_area_cannot_borrow_support_at_the_pad_tip():
-    from table_1000.experts.grasps import MIN_HOLD_AREA, _held_area
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.frames import MIN_HOLD_AREA, _held_area
+    from table_1000.experts.skills.hold.pick import Grasping
     hand = _flat_test_hand()
     # The broad contact face reaches only the last millimetre of the pads;
     # a thinner backing body cannot supply opposing support at this gap.
@@ -596,9 +596,9 @@ def test_measured_surface_area_cannot_borrow_support_at_the_pad_tip():
 
 def test_recorded_a4_closure_uses_its_actual_cover_contact_layer(tmp_path):
     from pathlib import Path
-    from table_1000.experts.grasps import MIN_HOLD_AREA, _held_area
-    from table_1000.experts.skills.grasping import Grasping
-    from table_1000.experts.skills.targets import oriented_shape
+    from table_1000.experts.skills.hold.frames import MIN_HOLD_AREA, _held_area
+    from table_1000.experts.skills.hold.pick import Grasping
+    from table_1000.experts.skills.hold.targets import oriented_shape
     from table_1000.robots.kinematics import RobotModel
     from table_1000.scenes.geometry import AssetGeometry
     root = Path(__file__).resolve().parents[2]

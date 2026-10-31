@@ -1,9 +1,13 @@
 """Orientation is derived from body geometry, and passed through Place lookahead."""
+from table_1000.experts.skills.place import regions
+from table_1000.experts.world import geometry as world_geometry
+
 from types import SimpleNamespace
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
-from table_1000.experts.skills.placing import Placing, orientations
+from table_1000.experts.skills.place.strict import Placing
+from table_1000.experts.skills.place.regions import orientations
 
 
 def box(size):
@@ -64,12 +68,12 @@ def test_inside_resting_height_excludes_upright_bottle_but_allows_horizontal(mon
     parts = [('bottom', box((.26, .28, .003)) - [0., 0., .0015])]
     parts += [('wall', box((.003, .28, .08025)) + [x, 0., .040125])
               for x in (-.13, .13)]
-    shapes = [semantic.Shape('cabinet', 'drawer', name, frame,
+    shapes = [world_geometry.Shape('cabinet', 'drawer', name, frame,
                               points @ frame[:3, :3].T + frame[:3, 3])
               for name, points in parts]
-    monkeypatch.setattr(semantic, 'scene_shapes', lambda *a, **kw: shapes)
-    monkeypatch.setattr(semantic, 'headroom', lambda *a: .2)
-    region, _ = semantic.inside_region('bottle', 'cabinet', 'drawer', orientation='insert',
+    monkeypatch.setattr(world_geometry, 'scene_shapes', lambda *a, **kw: shapes)
+    monkeypatch.setattr(regions, 'headroom', lambda *a: .2)
+    region, _ = regions.inside_region('bottle', 'cabinet', 'drawer', orientation='insert',
                                       top_tolerance=.005 if bounded else None)(SimpleNamespace())
     target = SimpleNamespace(points=box((.0248, .0248, .0945)))
     skill = Placing()
@@ -100,12 +104,12 @@ def test_bounded_drawer_uses_exposed_floor_and_measured_release_opening(monkeypa
              ('drawer', 'side', box((.003, .28, .08)) + [.13, 0., .04]),
              ('housing', 'shelf', box((.30, .20, .01)) + [0., .15, .085]),
              ('housing', 'roof', box((.30, .20, .01)) + [0., .15, .285])]
-    shapes = [semantic.Shape('cabinet', body, name, frame, points)
+    shapes = [world_geometry.Shape('cabinet', body, name, frame, points)
               for body, name, points in parts]
-    monkeypatch.setattr(semantic, 'scene_shapes', lambda *a, **kw: shapes)
-    monkeypatch.setattr(semantic, 'headroom', lambda *a: .2)
+    monkeypatch.setattr(world_geometry, 'scene_shapes', lambda *a, **kw: shapes)
+    monkeypatch.setattr(regions, 'headroom', lambda *a: .2)
     ctx = SimpleNamespace(poses=lambda: {'tape:body': np.eye(4)})
-    region, blocked = semantic.inside_region('tape', 'cabinet', 'drawer', orientation='flat',
+    region, blocked = regions.inside_region('tape', 'cabinet', 'drawer', orientation='flat',
                                              top_tolerance=.005)(ctx)
     target = SimpleNamespace(obj='tape', body='tape:body', points=box((.06, .06, .02)))
     skill = Placing()
@@ -176,7 +180,7 @@ def test_keepout_hull_handles_settled_nearly_coplanar_vertices(fixture):
     import json
     from pathlib import Path
     from mplib.collision_detection import fcl
-    from table_1000.experts.skills.placing import convex_keepout
+    from table_1000.experts.skills.place.strict import convex_keepout
     points = np.array(json.loads((Path(__file__).parent/f'fixtures/{fixture}.json').read_text()))
     obstacle = convex_keepout(points)
     assert fcl.distance(obstacle, obstacle).min_distance <= 0.
@@ -190,8 +194,8 @@ def test_upright_inside_uses_same_measured_tilt_and_containment(monkeypatch):
     target = SimpleNamespace(points=box((.14,.01,.01)),body='rod:body')
     ctx = SimpleNamespace(skills=lambda:SimpleNamespace(target=lambda obj:target),
                           poses=lambda:{'rod:body':pose})
-    wall = semantic.Shape('holder','body','wall',np.eye(4),box((.1,.1,.1)))
-    monkeypatch.setattr(semantic,'scene_shapes',lambda ctx:[wall])
+    wall = world_geometry.Shape('holder','body','wall',np.eye(4),box((.1,.1,.1)))
+    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx:[wall])
     monkeypatch.setattr(semantic,'_inside_point',lambda *args:True)
     assert semantic.upright_inside(ctx,'rod','holder')
     pose[:3,:3] = np.eye(3)
@@ -212,9 +216,9 @@ def test_upright_inside_checks_immersed_segment_above_mouth(monkeypatch):
     parts = [(box((.1,.1,.003)),[0,0,0])]
     parts += [(box((.003,.1,.1)),[x,0,.05]) for x in (-.05,.05)]
     parts += [(box((.1,.003,.1)),[0,y,.05]) for y in (-.05,.05)]
-    shapes = [semantic.Shape('holder','body',str(i),np.eye(4),p+offset)
+    shapes = [world_geometry.Shape('holder','body',str(i),np.eye(4),p+offset)
               for i,(p,offset) in enumerate(parts)]
-    monkeypatch.setattr(semantic,'scene_shapes',lambda ctx:shapes)
+    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx:shapes)
     # The body centre is above the rim, but the lower end is well enclosed.
     assert semantic.upright_inside(ctx,'rod','holder')
     pose[2,3] = .17
@@ -228,7 +232,7 @@ def test_stack_region_uses_live_support_top(monkeypatch):
     from table_1000.experts.skills import semantic
     def shape(name, low, high):
         points = box(np.subtract(high,low)) + (np.asarray(high)+low)/2
-        return semantic.Shape(name,name,name,np.eye(4),points)
+        return world_geometry.Shape(name,name,name,np.eye(4),points)
     shapes = [shape('basket',[-.2,-.2,0],[.2,.2,.01]),
               shape('basket',[-.2,-.2,0],[-.19,.2,.15]),
               shape('basket',[.19,-.2,0],[.2,.2,.15]),
@@ -236,9 +240,9 @@ def test_stack_region_uses_live_support_top(monkeypatch):
               shape('basket',[-.2,.19,0],[.2,.2,.15]),
               shape('lower',[-.15,-.15,.01],[.15,.15,.03]),
               shape('upper',[.3,.3,.01],[.5,.5,.02])]
-    monkeypatch.setattr(semantic,'scene_shapes',lambda ctx,exclude=():[s for s in shapes if s.obj not in exclude])
+    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx,exclude=():[s for s in shapes if s.obj not in exclude])
     ctx = SimpleNamespace(fail=lambda reason,**options:pytest.fail(reason))
-    where = semantic.inside_region('upper','basket',support='lower')
+    where = regions.inside_region('upper','basket',support='lower')
     first, _ = where(ctx)
     assert first[0][2,3] == pytest.approx(.03)
     shapes[-2] = shape('lower',[-.15,-.15,.04],[.15,.15,.06])
@@ -270,24 +274,24 @@ def test_flat_stack_allows_overhang_only_with_com_on_the_support():
 
 def test_flat_stack_uses_container_up_when_lower_body_is_flipped(monkeypatch):
     from table_1000.experts.skills import semantic
-    shapes = [semantic.Shape('basket','body','floor',np.eye(4),box((.4,.3,.01))),
-              semantic.Shape('lower','body','cover',np.diag([1.,-1.,-1.,1.]),
+    shapes = [world_geometry.Shape('basket','body','floor',np.eye(4),box((.4,.3,.01))),
+              world_geometry.Shape('lower','body','cover',np.diag([1.,-1.,-1.,1.]),
                              box((.245,.148,.02)) + [0,0,.015]),
-              semantic.Shape('upper','body','cover',np.eye(4),box((.21,.161,.01)) + [1,0,0])]
-    monkeypatch.setattr(semantic,'scene_shapes',lambda ctx,exclude=():[s for s in shapes if s.obj not in exclude])
+              world_geometry.Shape('upper','body','cover',np.eye(4),box((.21,.161,.01)) + [1,0,0])]
+    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx,exclude=():[s for s in shapes if s.obj not in exclude])
     monkeypatch.setattr(semantic,'inside',lambda *args:True)
     target = SimpleNamespace(body='upper:body')
     ctx = SimpleNamespace(fail=lambda reason,**kw:pytest.fail(reason),
                           skills=lambda:SimpleNamespace(target=lambda obj:target),
                           poses=lambda:{target.body:np.eye(4)},
                           env=SimpleNamespace(center_of_mass=lambda body:np.array([[.02,0,0]])))
-    region,_ = semantic.inside_region('upper','basket',support='lower',orientation='flat')(ctx)
+    region,_ = regions.inside_region('upper','basket',support='lower',orientation='flat')(ctx)
     assert region[0][2,3] == pytest.approx(.025)
     assert region[0][2,2] == pytest.approx(1.)
     np.testing.assert_allclose(region[3]['centre_of_mass'],[.02,0,0])
     shapes[1].points[:,2] += .05 * shapes[1].points[:,0]
     shapes[1].__post_init__()
-    tilted,_ = semantic.inside_region('upper','basket',support='lower',orientation='flat')(ctx)
+    tilted,_ = regions.inside_region('upper','basket',support='lower',orientation='flat')(ctx)
     assert tilted[0][2,3] == pytest.approx(shapes[1].points[:,2].max())
 
     # A tilt must not collapse the usable top to its highest grid strip.
@@ -295,7 +299,7 @@ def test_flat_stack_uses_container_up_when_lower_body_is_flipped(monkeypatch):
 
 
 def test_oriented_motion_rejects_lost_hold_before_updating_attachments(monkeypatch):
-    from table_1000.experts.skills import placing
+    from table_1000.experts.skills.place import strict as placing
     monkeypatch.setattr(placing,'_held_area',lambda *args:0.)
     attached = []
     target = SimpleNamespace(obj='rod',body='rod:body',names=['rod:part'],
@@ -317,7 +321,7 @@ def test_oriented_motion_rejects_lost_hold_before_updating_attachments(monkeypat
 
 
 def test_oriented_low_projected_area_keeps_measured_opposing_pad_contact(monkeypatch):
-    from table_1000.experts.skills import placing
+    from table_1000.experts.skills.place import strict as placing
     monkeypatch.setattr(placing, '_held_area', lambda *args: 0.)
     attached = []
     target = SimpleNamespace(obj='rod', body='rod:body', names=['rod:part'],
@@ -340,7 +344,7 @@ def test_insertion_channel_reports_the_pen_above_the_release(monkeypatch):
     skill = Placing()
     shape = (np.eye(4), 'box', (.01, .01, .01), False)
     skill.hands = {'left':SimpleNamespace(shapes={'finger':[shape]}, frames=lambda gap:{'finger':np.eye(4)})}
-    from table_1000.experts.skills.placing import convex_keepout
+    from table_1000.experts.skills.place.strict import convex_keepout
     blocker = box((.015,.015,.015)) + [0,0,.1]
     obstacle = ('other_pen:barrel',convex_keepout(blocker),(blocker.min(0),blocker.max(0)))
     assert skill.insertion_blockers('left',np.eye(4),.2,.02,[obstacle]) == ['other_pen:barrel']
@@ -393,8 +397,8 @@ def test_insertion_depth_uses_measured_end_and_live_floor(monkeypatch):
         assert details['recoverable']
         raise RuntimeError(reason)
     skill.ctx=SimpleNamespace(poses=lambda:{target.body:pose},note=lambda *a,**k:events.append(k),fail=fail)
-    monkeypatch.setattr(semantic,'scene_shapes',lambda ctx,exclude:[])
-    monkeypatch.setattr(semantic,'support_region',lambda *a,**k:((floor,[-.1,-.1],[.1,.1]),[]))
+    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx,exclude:[])
+    monkeypatch.setattr(world_geometry,'support_region',lambda *a,**k:((floor,[-.1,-.1],[.1,.1]),[]))
     skill.check_insertion_depth(target,'holder',None,.002)
     assert events[-1]['floor_gap_m'] == pytest.approx(.002)
     pose[2,3]+=.02
@@ -421,7 +425,7 @@ def test_flat_release_rechecks_measured_bottom_against_live_support(monkeypatch)
     skill.hands={'left':object()};skill.held={'left':{'grasp':{'open_gap':.05}}}
     skill.solvers={'left':SimpleNamespace(tcp=lambda:np.eye(4),finger_gap=lambda:.02)}
     skill.flat_release_geometry=lambda *a:SimpleNamespace(minimum=lambda *a,**k:.002,maximum=.03,blocked_by=set())
-    monkeypatch.setattr(semantic,'inside_region',lambda *a,**k:
+    monkeypatch.setattr(regions,'inside_region',lambda *a,**k:
         lambda ctx:((frame,[-.1,-.1],[.1,.1]),[]))
     region = (np.eye(4),[-.1,-.1],[.1,.1],
               dict(flat_container='basket',part=None,support='lower'))

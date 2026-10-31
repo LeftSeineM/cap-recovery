@@ -1,10 +1,12 @@
 """A reachable contact does not imply that the following push can be planned."""
+from table_1000.experts.world import geometry as world_geometry
+
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from table_1000.experts.skills.motion import Motion
+from table_1000.experts.skills.push.motion import Motion
 from table_1000.experts.solver import PlanningFailed
 
 
@@ -82,11 +84,12 @@ def test_braced_unreachable_push_keeps_the_support_and_base_fixed():
 
 
 def test_dragging_an_object_does_not_carry_its_lower_support(monkeypatch):
-    from table_1000.experts.skills import motion as module, semantic
+    from table_1000.experts.skills.push import motion as module
+    from table_1000.experts.skills import semantic
     from table_1000.experts.skills.common import SUPPORT_DISTANCE
     monkeypatch.setattr(module.fcl, 'distance', lambda *a: SimpleNamespace(min_distance=0.))
     heights = {'book': 0., 'payload': .03}
-    monkeypatch.setattr(semantic, 'object_points',
+    monkeypatch.setattr(world_geometry, 'object_points',
                         lambda ctx, obj: np.array([[0., 0., heights[obj]]]))
     pieces = {name: SimpleNamespace(body=body, fcl=lambda _: object()) for name, body in
               [('target:body', 'target:body'), ('book:cover', 'book:body'), ('payload:body', 'payload:body')]}

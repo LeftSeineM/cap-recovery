@@ -28,8 +28,8 @@ already geometrically inside it. Physical bodies move only through simulation.
 
 What is grasped is an object of the scene (an asset, by name), or a part or body
 of it: its shape is the collision box of that part in the frame of its body, or
-one given (a :class:`~table_1000.experts.grasps.Box` or
-:class:`~table_1000.experts.grasps.Cylinder` placed by ``offset`` in the body
+one given (a :class:`~table_1000.experts.skills.hold.frames.Box` or
+:class:`~table_1000.experts.skills.hold.frames.Cylinder` placed by ``offset`` in the body
 frame, also for a scene primitive that is not an asset). Every asset of the scene
 is in each arm's planning world, one planning object per part (``<object>:<part>``);
 the table too.
@@ -41,7 +41,7 @@ at their ready pose (where none is in reach as they are), then the base moving
 where its goal leaves it where it is.
 
 **grasp** -- candidates of the shape at its live pose
-(:func:`~table_1000.experts.grasps.grasp_candidates`, cheapest first: close to the
+(:func:`~table_1000.experts.skills.hold.frames.grasp_candidates`, cheapest first: close to the
 ``approach`` direction, default reaching out and down from the arm's shoulder;
 centred on ``point``, default the chosen shape's centre, with the additional
 gravity moment of a free held body scored about its actual COM) are tried per arm, the arm whose
@@ -124,7 +124,7 @@ sweep something on the way; the base turns in place, drives straight and turns i
 started.
 
 **handover** -- the held object passed to the other hand, held as the next action needs
-(:mod:`~table_1000.experts.skills.handover`, after WRS): the giving arm brings it in front of the
+(:mod:`~table_1000.experts.skills.hold.handover`, after WRS): the giving arm brings it in front of the
 body, the receiving one grasps it, the giving one lets go.
 Loaded container rim holds reject handover: keep the current arm and place
 the container before changing hands, since handover turns can spill contents.
@@ -160,16 +160,16 @@ from dataclasses import replace
 import numpy as np
 
 from table_1000.experts.context import ExpertFailed, Unreachable
-from table_1000.experts.grasps import Hand
+from table_1000.experts.skills.hold.frames import Hand
 from table_1000.experts.skills.base import Base
 from table_1000.experts.skills.chain import InHand, Pick, Place, chain
 from table_1000.experts.skills.common import Unmet, upright_need
-from table_1000.experts.skills.grasping import LIFT, Grasping
-from table_1000.experts.skills.handover import Handing
-from table_1000.experts.skills.motion import Motion
-from table_1000.experts.skills.placing import PLACE_ABOVE, PLACE_CLEARANCE, PLACE_MARGIN, PLACE_STEP, PLACE_TURNS, Placing
-from table_1000.experts.skills.thin import ThinPicking
-from table_1000.experts.skills.targets import targets as enumerate_targets, target_groups, rim_sections
+from table_1000.experts.skills.hold.pick import LIFT, Grasping
+from table_1000.experts.skills.hold.handover import Handing
+from table_1000.experts.skills.push.motion import Motion
+from table_1000.experts.skills.place.strict import PLACE_ABOVE, PLACE_CLEARANCE, PLACE_MARGIN, PLACE_STEP, PLACE_TURNS, Placing
+from table_1000.experts.skills.hold.thin import ThinPicking
+from table_1000.experts.skills.hold.targets import targets as enumerate_targets, target_groups, rim_sections
 
 ATTEMPTS = 3            # tries of a step under retry
 
@@ -423,7 +423,7 @@ def close_gripper(ctx, arm):
 
 
 # Public skill calls are the evaluated, replayable boundary.
-from table_1000.experts.trace import traced
+from table_1000.experts.audit.trace import traced
 
 for _name in ('grasp', 'pick', 'place', 'push', 'move_by_displacement', 'release', 'handover',
               'braced_drawer', 'make_room', 'ready', 'open_gripper', 'close_gripper'):

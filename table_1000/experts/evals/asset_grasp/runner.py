@@ -10,12 +10,10 @@ import time
 
 from table_1000.common.batch import commit, run_batch
 from table_1000.common.diagnostics import dump_stacks_every
-from table_1000.experts.asset_grasp import (inventory, summarize, SHAKE_AMPLITUDE, SHAKE_SECONDS,
-    SLIP_LIMIT, WORK_OFFSET, START_PROJECTION_TOLERANCE)
-from table_1000.experts.asset_grasp.results import prepare, require_mode, publish, video_seed
-from table_1000.experts.asset_grasp.stability import (TRANSPORT, ROTATION_LIMIT, TRANSLATION_LIMIT,
-    MOTION_LIMITS, MOTION_TOLERANCE)
-from table_1000.experts.grasps.checks import GAP_TOLERANCE
+from table_1000.experts.evals.asset_grasp import inventory, summarize, SHAKE_AMPLITUDE, SHAKE_SECONDS, SLIP_LIMIT, WORK_OFFSET, START_PROJECTION_TOLERANCE
+from table_1000.experts.evals.asset_grasp.results import prepare, require_mode, publish, video_seed
+from table_1000.experts.evals.asset_grasp.stability import TRANSPORT, ROTATION_LIMIT, TRANSLATION_LIMIT, MOTION_LIMITS, MOTION_TOLERANCE
+from table_1000.experts.skills.hold.checks import GAP_TOLERANCE
 from table_1000.scenes import load
 from table_1000.robots import load_robot_test
 from table_1000.sim import PHYSICS_DT, CONTROL_HZ
@@ -42,8 +40,8 @@ def worker(args, root):
                     extra_args=RT2_ARGS if cameras else ())
     evaluator = None
     try:
-        from table_1000.experts.asset_grasp import Evaluator
-        from table_1000.experts.asset_grasp.recording import Recorder, VIEWS, render
+        from table_1000.experts.evals.asset_grasp import Evaluator
+        from table_1000.experts.evals.asset_grasp.recording import Recorder, VIEWS, render
         from table_1000.sim.isaaclab.video import encode
         from table_1000.sim.isaaclab.render import configure
         if cameras:

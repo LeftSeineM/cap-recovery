@@ -9,18 +9,14 @@ import math
 import numpy as np
 
 from table_1000.experts.context import DT, ExpertFailed, Unreachable, remaining_wall, steps
-from table_1000.experts.grasps.checks import CollisionSurface
-from table_1000.experts.grasps import (BACKOFF_STEP, CONTACT_TOLERANCE, HOLD_AREA,
-                                      _grasp_area, _vertices, build_grasp_pose, grasp_candidates, translated)
+from table_1000.experts.skills.hold.checks import CollisionSurface
+from table_1000.experts.skills.hold.frames import BACKOFF_STEP, CONTACT_TOLERANCE, HOLD_AREA, _grasp_area, _vertices, build_grasp_pose, grasp_candidates, translated
 from table_1000.experts.skills.common import APPROACH, IK_ATTEMPTS
-from table_1000.experts.skills.grasping import MAX_IK, MAX_REGRASPS
+from table_1000.experts.skills.hold.pick import MAX_IK, MAX_REGRASPS
 from table_1000.scenes.geometry import transform_points
 from table_1000.experts.solver import ARRIVAL_TOLERANCE, GRIPPER_TIME, PlanningFailed
-from table_1000.experts.pressure import (PressureLoad, correction_path, material_motion,
-                                        same_pressure_contact)
-from table_1000.experts.thin_objects import (ExposedSection, classify, exposed_section, landing, overhang_depth,
-                                          supported_overhangs, support_polygon, supported_point, swept_obstacle,
-                                          swept_obstacles, table_edges)
+from table_1000.experts.skills.push.pressure import PressureLoad, correction_path, material_motion, same_pressure_contact
+from table_1000.experts.skills.hold.sections import ExposedSection, classify, exposed_section, landing, overhang_depth, supported_overhangs, support_polygon, supported_point, swept_obstacle, swept_obstacles, table_edges
 
 
 class PreparationSearch:

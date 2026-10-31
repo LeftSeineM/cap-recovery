@@ -5,7 +5,7 @@ import mplib
 import numpy as np
 
 from table_1000.experts.solver import MotionSolver
-from table_1000.experts.trace import planner_state, restore
+from table_1000.experts.audit.trace import planner_state, restore
 from table_1000.planning.world import PlanningScene, box_object
 from table_1000.robots.planning_model import write_planning_urdf, write_srdf
 from tests.planning.test_model_world import robot

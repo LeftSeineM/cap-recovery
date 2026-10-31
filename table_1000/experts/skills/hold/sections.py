@@ -8,7 +8,7 @@ from weakref import WeakKeyDictionary
 import numpy as np
 from scipy.spatial import ConvexHull, QhullError
 
-from table_1000.experts.grasps import Box, SUPPORT_CLEARANCE, oriented_bounds
+from table_1000.experts.skills.hold.frames import Box, SUPPORT_CLEARANCE, oriented_bounds
 
 
 def box_extents(points):
@@ -223,7 +223,7 @@ def supported_point(point, polygon):
 
 @lru_cache(maxsize=64)
 def _section_surface(pieces):
-    from table_1000.experts.grasps.checks import CollisionSurface
+    from table_1000.experts.skills.hold.checks import CollisionSurface
     return CollisionSurface([(np.eye(4), 'convex', np.asarray(vertices)) for vertices in pieces])
 
 
@@ -290,7 +290,7 @@ class ExposedSection:
         return low, high
 
     def _close_cached(self, transform, tcp, hand, open_gap, iterations, check_area, *, contact_layer=False):
-        from table_1000.experts.grasps import _close_uncached
+        from table_1000.experts.skills.hold.frames import _close_uncached
         # A whole mode can visit more than 1024 closures before another mode
         # revisits the same section. Keep their working sets separate: unrelated
         # depths must not evict a section's reusable fingertip/pad closures.

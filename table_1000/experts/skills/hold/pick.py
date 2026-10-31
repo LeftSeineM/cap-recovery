@@ -7,14 +7,13 @@ import numpy as np
 from mplib.collision_detection import fcl
 
 from table_1000.experts.context import DT, Unreachable, remaining_wall
-from table_1000.experts.grasps import (MIN_HOLD_AREA, SUPPORT_CLEARANCE, _closing_surface, _grasp_area, contact_resistance, fitted, grasp_candidates,
-                                       merge_part_heads, standoff, translated)
-from table_1000.experts.grasps.checks import CollisionSurface, closure
+from table_1000.experts.skills.hold.frames import MIN_HOLD_AREA, SUPPORT_CLEARANCE, _closing_surface, _grasp_area, contact_resistance, fitted, grasp_candidates, merge_part_heads, standoff, translated
+from table_1000.experts.skills.hold.checks import CollisionSurface, closure
 from table_1000.planning.world import geometry, pose
 from table_1000.experts.skills.common import (APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, ROOM_PLACES, SUPPORT_DISTANCE,
                                               Target, Unmet, collisions, normalized, planning_object, upright_need)
 from table_1000.experts.solver import PlanningFailed
-from table_1000.experts.problems import decision, mark
+from table_1000.experts.audit.problems import decision, mark
 
 LIFT = .10              # m, pick's lift
 HELD_TOLERANCE = .005   # m the closed gap may fall short of the planned contact gap
@@ -81,7 +80,7 @@ class Grasping:
         """The :class:`Target` of scene object ``obj`` (an asset, or a primitive with ``shape``):
         ``part`` (a part or body name, default all of it), shaped in the frame of ``body`` (default
         the first body of the part) by a cylinder where it is round, else its collision box (see
-        :func:`~table_1000.experts.grasps.fitted`), or by ``shape`` at ``offset`` there."""
+        :func:`~table_1000.experts.skills.hold.frames.fitted`), or by ``shape`` at ``offset`` there."""
         ctx = self.ctx
         offset = np.eye(4) if offset is None else np.asarray(offset, dtype=float)
         if obj not in ctx.scene.OBJECTS:

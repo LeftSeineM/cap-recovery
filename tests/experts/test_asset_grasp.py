@@ -4,7 +4,7 @@ import types
 import numpy as np
 import pytest
 
-from table_1000.experts.asset_grasp import displacement, inventory, summarize
+from table_1000.experts.evals.asset_grasp import displacement, inventory, summarize
 from table_1000.experts.skills.common import Target
 
 
@@ -57,7 +57,7 @@ def test_lift_without_drop_and_strict_stability_are_separate_metrics():
 
 
 def test_floor_pickup_after_preparation_fall_is_not_a_table_lift():
-    from table_1000.experts.asset_grasp import lift_transport_success
+    from table_1000.experts.evals.asset_grasp import lift_transport_success
     settled, lifted = np.eye(4), np.eye(4)
     settled[2, 3], lifted[2, 3] = .755, .102
     report = {'status': 'success', 'settled_pose': settled.tolist(),
@@ -80,7 +80,7 @@ def test_only_unreachable_transport_is_excluded_from_acceptance_denominator():
 
 
 def test_closure_table_uses_actual_measurement_and_separates_unknown_truth():
-    from table_1000.experts.asset_grasp import closure_statistics
+    from table_1000.experts.evals.asset_grasp import closure_statistics
     def report(seed, predicted, status, **kwargs):
         return {'seed': seed, 'pick': {'closure_check': {'held': predicted, 'reasons': []}},
                 'status': status, **kwargs}
@@ -102,7 +102,7 @@ def test_failed_closure_before_losing_reach_is_a_physical_failure():
 
 
 def test_relocation_drop_and_excess_strength_stay_in_denominator():
-    from table_1000.experts.asset_grasp import grasp_family
+    from table_1000.experts.evals.asset_grasp import grasp_family
     dropped = {'seed': 0, 'status': 'failed', 'failure': {'reason': 'dropped'},
         'settled_pose': np.eye(4).tolist(),
         'pick': {'grasp': {'pose': np.eye(4).tolist()}, 'closure_check': {'held': True, 'reasons': []}},
@@ -117,7 +117,7 @@ def test_relocation_drop_and_excess_strength_stay_in_denominator():
 
 def test_comparison_pairs_requested_seeds_with_a_larger_baseline(tmp_path):
     import json
-    from table_1000.experts.asset_grasp.comparison import compare
+    from table_1000.experts.evals.asset_grasp.comparison import compare
     asset = 'objects/cup/000000'
     for name, seeds in [('old', range(3)), ('new', [1])]:
         root = tmp_path / name
@@ -142,8 +142,8 @@ def test_comparison_pairs_requested_seeds_with_a_larger_baseline(tmp_path):
 
 
 def test_hollow_assembly_tries_real_parts_before_filled_bounding_box():
-    from table_1000.experts.asset_grasp import targets
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.evals.asset_grasp import targets
+    from table_1000.experts.skills.hold.frames import Box
     names = ('ring', 'small', 'large')
     geometry = types.SimpleNamespace(
         shapes=[],
@@ -158,8 +158,8 @@ def test_hollow_assembly_tries_real_parts_before_filled_bounding_box():
 
 
 def test_diagonal_thin_part_keeps_its_actual_width():
-    from table_1000.experts.skills.targets import oriented_shape
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.targets import oriented_shape
+    from table_1000.experts.skills.hold.frames import Box
     from scipy.spatial.transform import Rotation
     rotation = Rotation.from_euler('z', 30, degrees=True).as_matrix()
     points = Box((.04, .004, .002)).points() @ rotation.T
@@ -170,7 +170,7 @@ def test_diagonal_thin_part_keeps_its_actual_width():
 
 
 def test_placement_uses_ten_cm_square_and_full_yaw(monkeypatch):
-    from table_1000.experts import asset_grasp
+    from table_1000.experts.evals import asset_grasp
     class Layout:
         def __init__(self, *args):
             pass
@@ -188,7 +188,7 @@ def test_placement_uses_ten_cm_square_and_full_yaw(monkeypatch):
 
 
 def test_grasp_family_does_not_change_with_world_yaw():
-    from table_1000.experts.asset_grasp import grasp_family
+    from table_1000.experts.evals.asset_grasp import grasp_family
     body = np.eye(4)
     pose = np.eye(4)
     report = {'pick': {'arm': 'right', 'grasp': {'pose': pose.tolist()}}, 'settled_pose': body.tolist()}
@@ -203,7 +203,7 @@ def test_grasp_family_does_not_change_with_world_yaw():
 
 
 def test_unexecuted_transport_is_not_a_grasp_preference_failure():
-    from table_1000.experts.asset_grasp import grasp_family
+    from table_1000.experts.evals.asset_grasp import grasp_family
     grasp = {'pick': {'grasp': {'pose': np.eye(4).tolist()}}, 'settled_pose': np.eye(4).tolist()}
     reports = [dict(grasp, status='failed', lift={'rise_m': .1},
                     failure={'reason': 'transport motion unreachable'}),
@@ -217,7 +217,7 @@ def test_unexecuted_transport_is_not_a_grasp_preference_failure():
 
 
 def test_shake_samples_transient_slip_and_executes_full_wrist_motion():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     model = types.SimpleNamespace(q=np.zeros(1), limits=np.array([[-2., 2.]]), arm_indices=lambda arm: [0])
     evaluator = Evaluator.__new__(Evaluator)
     evaluator.model = model
@@ -249,9 +249,9 @@ def test_shake_samples_transient_slip_and_executes_full_wrist_motion():
 @pytest.mark.parametrize('excluded', [(), (0,)])
 @pytest.mark.parametrize('thin', [False, True])
 def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thin, excluded):
-    from table_1000.experts import asset_grasp
+    from table_1000.experts.evals import asset_grasp
     from table_1000.experts.context import ExpertFailed
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.frames import Box
     pose = np.eye(4)
     attempts, released = [], []
     box = Box((.02, .03, .04))
@@ -304,9 +304,9 @@ def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thi
 
 
 def test_thin_search_exhaustion_ends_acceptance_without_restarting_on_another_patch(monkeypatch):
-    from table_1000.experts import asset_grasp
+    from table_1000.experts.evals import asset_grasp
     from table_1000.experts.context import ExpertFailed
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.frames import Box
     import pytest
     box = Box((.02, .01, .001))
     candidates = [Target('object', [name], 'object:body', box, np.eye(4), box.points())
@@ -326,9 +326,9 @@ def test_thin_search_exhaustion_ends_acceptance_without_restarting_on_another_pa
 
 def test_whole_envelope_is_only_a_planning_fallback():
     import pytest
-    from table_1000.experts.asset_grasp import pick, target_groups
+    from table_1000.experts.evals.asset_grasp import pick, target_groups
     from table_1000.experts.context import ExpertFailed
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.frames import Box
     box = Box((.02,) * 3)
     parts = [Target('object', [name], 'object:body', box, np.eye(4), box.points(), fallback=fallback)
              for name, fallback in [('whole', True), ('part_a', False), ('part_b', False)]]
@@ -345,8 +345,8 @@ def test_whole_envelope_is_only_a_planning_fallback():
 
 
 def test_solid_whole_envelope_also_follows_authored_parts(monkeypatch):
-    from table_1000.experts import asset_grasp
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.evals import asset_grasp
+    from table_1000.experts.skills.hold.frames import Box
     box = Box((.02,) * 3)
     geometry = types.SimpleNamespace(solid=lambda part, **kw: True,
         parts=lambda: [('body', 'body.a'), ('body', 'body.b')], shapes=[], points=lambda *args: box.points())
@@ -354,14 +354,14 @@ def test_solid_whole_envelope_also_follows_authored_parts(monkeypatch):
         names = ['object:body.a', 'object:body.b'] if part is None else ['object:' + part]
         return Target(obj, names, 'object:body', box, np.eye(4), box.points())
     skill = types.SimpleNamespace(ctx=types.SimpleNamespace(geometry={'object': geometry}), target=target)
-    monkeypatch.setattr('table_1000.experts.skills.targets.oriented_shape', lambda points: (box, np.eye(4)))
+    monkeypatch.setattr('table_1000.experts.skills.hold.targets.oriented_shape', lambda points: (box, np.eye(4)))
     groups = asset_grasp.target_groups(list(asset_grasp.targets(skill)))
     assert [[t.names for t in group] for group in groups] == [
         [['object:body.a'], ['object:body.b']], [['object:body.a', 'object:body.b']]]
 
 
 def test_shake_search_restarts_at_next_target_and_preserves_failures():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     evaluator.collect_preferences = True
     calls = []
@@ -383,7 +383,7 @@ def test_shake_search_restarts_at_next_target_and_preserves_failures():
 
 
 def test_shake_search_stops_when_geometric_targets_are_exhausted():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     evaluator.collect_preferences = True
     evaluator._attempt = lambda *args: {'status': 'failed', 'hold': {'held': False},
@@ -393,7 +393,7 @@ def test_shake_search_stops_when_geometric_targets_are_exhausted():
 
 
 def test_later_unreachable_target_does_not_count_as_initially_unreachable():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     evaluator.collect_preferences = True
     def attempt(seed, center, size, video, excluded):
@@ -412,7 +412,7 @@ def test_later_unreachable_target_does_not_count_as_initially_unreachable():
 
 
 def test_default_trial_stops_after_first_hold_without_preference_retries():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     evaluator.collect_preferences = False
     calls = []
@@ -430,7 +430,7 @@ def test_default_trial_stops_after_first_hold_without_preference_retries():
 
 def test_comparison_self_uses_same_assessed_denominator_on_both_sides(tmp_path):
     import json
-    from table_1000.experts.asset_grasp.comparison import compare
+    from table_1000.experts.evals.asset_grasp.comparison import compare
     asset = 'objects/keyboard/000000'
     directory = tmp_path / asset / 'trials'
     directory.mkdir(parents=True)

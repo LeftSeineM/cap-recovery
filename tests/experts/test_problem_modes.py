@@ -8,8 +8,8 @@ import pytest
 
 from table_1000.experts.generate import Generator
 from table_1000.experts.context import ExpertFailed
-from table_1000.experts.problems import Problems, decision, mark
-from table_1000.experts.trace import traced
+from table_1000.experts.audit.problems import Problems, decision, mark
+from table_1000.experts.audit.trace import traced
 from table_1000.robots import load_spec
 from table_1000.robots.kinematics import RobotModel
 

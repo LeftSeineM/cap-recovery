@@ -4,15 +4,15 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.asset_grasp.stability import TRANSPORT, classify, is_dropped, metrics, motion
-from table_1000.experts.grasps import Box
+from table_1000.experts.evals.asset_grasp.stability import TRANSPORT, classify, is_dropped, metrics, motion
+from table_1000.experts.skills.hold.frames import Box
 
 
 @pytest.fixture(autouse=True)
 def geometric_preflight(monkeypatch):
     # These fake IK models test reachability and execution boundaries. The real
     # TOPPRA/FK constraints have their own regression below.
-    import table_1000.experts.asset_grasp as evaluation
+    import table_1000.experts.evals.asset_grasp as evaluation
     def stroke(model, arm, result, excursion, **kwargs):
         rows = np.asarray(result['position'])
         lift = np.asarray(result['lift'])
@@ -75,7 +75,7 @@ def test_measured_derivatives():
 
 
 def test_transport_does_not_reset_command_to_lagging_measurement_at_segment_boundary():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     model = types.SimpleNamespace(q=np.array([.1, .1]), limits=np.array([[-3., 3.], [-3., 3.]]),
              arm_indices=lambda arm: [0], lift_indices=lambda: [1])
@@ -107,7 +107,7 @@ def test_transport_does_not_reset_command_to_lagging_measurement_at_segment_boun
 
 
 def test_transport_rejects_local_ik_failure_instead_of_switching_joint_branch():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     model = types.SimpleNamespace(q=np.zeros(2), limits=np.array([[-3., 3.], [-3., 3.]]),
               arm_indices=lambda arm: [0], lift_indices=lambda: [1])
@@ -131,7 +131,7 @@ def test_transport_rejects_local_ik_failure_instead_of_switching_joint_branch():
 
 
 def test_preflight_reverses_direction_and_checks_up_before_any_execution():
-    from table_1000.experts.asset_grasp import transport_plan
+    from table_1000.experts.evals.asset_grasp import transport_plan
     origin = np.eye(4)
     origin[1, 3] = -.12
     calls = []
@@ -154,7 +154,7 @@ def test_preflight_reverses_direction_and_checks_up_before_any_execution():
 
 
 def test_preflight_discards_whole_choice_when_later_segment_fails():
-    from table_1000.experts.asset_grasp import transport_plan
+    from table_1000.experts.evals.asset_grasp import transport_plan
     model = types.SimpleNamespace(q=np.zeros(2), limits=np.array([[-3., 3.], [-3., 3.]]),
               arm_indices=lambda arm: [0], lift_indices=lambda: [1])
     calls = []
@@ -169,7 +169,7 @@ def test_preflight_discards_whole_choice_when_later_segment_fails():
 
 
 def test_preflight_projects_small_start_overshoot_and_its_tcp_without_changing_limits():
-    from table_1000.experts.asset_grasp import transport_plan
+    from table_1000.experts.evals.asset_grasp import transport_plan
     measured = np.array([3.0002, 0.])
     limits = np.array([[-3., 3.], [-3., 3.]])
     origin = np.eye(4)
@@ -196,7 +196,7 @@ def test_preflight_projects_small_start_overshoot_and_its_tcp_without_changing_l
 
 
 def test_preflight_does_not_project_a_start_outside_the_tracking_budget():
-    from table_1000.experts.asset_grasp import transport_plan
+    from table_1000.experts.evals.asset_grasp import transport_plan
     model = types.SimpleNamespace(q=np.array([3.002, 0.]), limits=np.array([[-3., 3.], [-3., 3.]]),
         arm_indices=lambda arm: [0], lift_indices=lambda: [1],
         ik=lambda *a, **k: pytest.fail('an invalid measured start must be rejected before IK'))
@@ -206,7 +206,7 @@ def test_preflight_does_not_project_a_start_outside_the_tracking_budget():
 
 
 def test_preflight_rejects_interior_hard_stop_despite_safe_start():
-    from table_1000.experts.asset_grasp import transport_plan
+    from table_1000.experts.evals.asset_grasp import transport_plan
     model = types.SimpleNamespace(q=np.zeros(2), limits=np.array([[-1.01, 1.01], [-3., 3.]]),
         arm_indices=lambda arm: [0], lift_indices=lambda: [1],
         ik=lambda arm, pose, start, **kw: ('Success', np.array([
@@ -221,7 +221,7 @@ def test_preflight_rejects_interior_hard_stop_despite_safe_start():
 
 
 def test_transport_reference_preserves_other_arm_and_closed_fingers(monkeypatch):
-    import table_1000.experts.asset_grasp as evaluation
+    import table_1000.experts.evals.asset_grasp as evaluation
     evaluator = evaluation.Evaluator.__new__(evaluation.Evaluator)
     measured = np.array([1., 2., 3., 4., 5.])
     evaluator.model = types.SimpleNamespace(q=measured.copy(), arm_indices=lambda arm: [0, 1],
@@ -239,7 +239,7 @@ def test_transport_reference_preserves_other_arm_and_closed_fingers(monkeypatch)
 
 @pytest.mark.parametrize('slip,planning_failure', [(0., False), (.006, False), (.06, True), (0., 'tracking')])
 def test_transport_relocation_checks_grip_without_resetting_reference(monkeypatch, slip, planning_failure):
-    import table_1000.experts.asset_grasp as evaluation
+    import table_1000.experts.evals.asset_grasp as evaluation
     from table_1000.experts.solver import PlanningFailed
     evaluator = evaluation.Evaluator.__new__(evaluation.Evaluator)
     evaluator.model = types.SimpleNamespace(q=np.zeros(2), joints=['arm', 'lift'])
@@ -287,9 +287,9 @@ def test_transport_relocation_checks_grip_without_resetting_reference(monkeypatc
 
 @pytest.mark.parametrize('status', ['Success', 'IK Failed'])
 def test_transport_reference_prefers_nominal_work_height_then_declared_pose(monkeypatch, status):
-    import table_1000.experts.asset_grasp as evaluation
+    import table_1000.experts.evals.asset_grasp as evaluation
     from table_1000.experts.skills.common import IK_ATTEMPTS
-    from table_1000.experts.skills.grasping import LIFT
+    from table_1000.experts.skills.hold.pick import LIFT
     evaluator = evaluation.Evaluator.__new__(evaluation.Evaluator)
     evaluator.center = np.array([.5, -.15])
     evaluator.settings = types.SimpleNamespace(ROBOT={'keyframe': 'ready'})
@@ -322,8 +322,8 @@ def test_transport_reference_prefers_nominal_work_height_then_declared_pose(monk
 
 def test_retimed_ik_jitter_respects_joint_and_tcp_envelopes():
     import mplib
-    from table_1000.experts.asset_grasp.transport import retime
-    from table_1000.experts.asset_grasp.stability import MOTION_LIMITS
+    from table_1000.experts.evals.asset_grasp.transport import retime
+    from table_1000.experts.evals.asset_grasp.stability import MOTION_LIMITS
     planner = types.SimpleNamespace(joint_vel_limits=np.array([.3, 1.]),
                                     joint_acc_limits=np.array([.6, 2.]))
     planner.TOPP = types.MethodType(mplib.Planner.TOPP, planner)
@@ -350,7 +350,7 @@ def test_retimed_ik_jitter_respects_joint_and_tcp_envelopes():
 
 
 def test_motion_report_records_boundary_spike_without_acceptance_gate():
-    from table_1000.experts.asset_grasp.stability import motion_report
+    from table_1000.experts.evals.asset_grasp.stability import motion_report
     trace = []
     for x, segment in [(0., 'relocation'), (0., 'relocation'), (.02, 'lateral'), (.02, 'lateral')]:
         pose = np.eye(4)
@@ -362,7 +362,7 @@ def test_motion_report_records_boundary_spike_without_acceptance_gate():
 
 
 def test_transport_entry_keeps_loaded_drive_targets():
-    from table_1000.experts.asset_grasp import Evaluator
+    from table_1000.experts.evals.asset_grasp import Evaluator
     evaluator = Evaluator.__new__(Evaluator)
     evaluator.model = types.SimpleNamespace(q=np.array([.09, .19, .3]),
         arm_indices=lambda arm: [0], lift_indices=lambda: [1])
@@ -373,7 +373,7 @@ def test_transport_entry_keeps_loaded_drive_targets():
 
 
 def test_transport_preflight_rejects_carried_object_collision_and_tries_other_wrist_side():
-    from table_1000.experts.asset_grasp import transport_plan
+    from table_1000.experts.evals.asset_grasp import transport_plan
     model = types.SimpleNamespace(q=np.zeros(2), limits=np.array([[-3., 3.], [-3., 3.]]),
         arm_indices=lambda arm: [0], lift_indices=lambda: [1],
         ik=lambda arm, pose, start, **kw: ('Success', np.array([
@@ -391,8 +391,8 @@ def test_transport_preflight_rejects_carried_object_collision_and_tries_other_wr
 
 @pytest.mark.parametrize('angular', [False, True])
 def test_toppra_stroke_uses_whole_arm_and_keeps_lift_fixed(angular):
-    from table_1000.experts.asset_grasp.transport import retime_stroke
-    from table_1000.experts.asset_grasp.stability import MOTION_LIMITS
+    from table_1000.experts.evals.asset_grasp.transport import retime_stroke
+    from table_1000.experts.evals.asset_grasp.stability import MOTION_LIMITS
     # Two joints contribute equally; neither alone reaches the TCP envelope.
     scale = 1. if angular else .5
     def tcp(arm, q, world):
@@ -424,7 +424,7 @@ def test_toppra_stroke_uses_whole_arm_and_keeps_lift_fixed(angular):
 
 
 def test_coupled_twist_uses_whole_arm_without_freeing_lift():
-    from table_1000.experts.asset_grasp.transport import coupled_twist
+    from table_1000.experts.evals.asset_grasp.transport import coupled_twist
     initial = np.array([.4, 0., 0.])
     def tcp(arm, q, **kwargs):
         pose = np.eye(4)

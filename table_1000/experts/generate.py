@@ -236,12 +236,12 @@ class Generator:
                                    else seed + 1 + 1_000_003 * (first - 1))   # OMPL rejects 0
         ctx = Context(self.env, self.model, self.scene, self.assets, np.random.default_rng(streams), start=start,
                       only=self.steps)
-        from table_1000.experts.trace import CallTrace, replay, restore, encode
+        from table_1000.experts.audit.trace import CallTrace, replay, restore, encode
         ctx.trace = CallTrace(ctx, seed, attempt, repeat)
         ctx.initial_state = state
         ctx.skill_attempts = self.skill_attempts
         ctx.archive_retry = lambda control, retry, failure: self.archive_retry(ctx, control, retry, failure, repeat)
-        from table_1000.experts.problems import Problems
+        from table_1000.experts.audit.problems import Problems
         if self.problems != 'none' and not getattr(self.expert, 'human', False):
             ctx.trace.problems = Problems(ctx)
             ctx.trace.problems.install()

@@ -1,7 +1,7 @@
 """Restore a retry callback's physical and expert state, retaining failed attempts separately."""
 from copy import deepcopy
 import numpy as np
-from table_1000.experts.trace import encode, decode, planner_state, restore
+from table_1000.experts.audit.trace import encode, decode, planner_state, restore
 
 
 def copy_recorded(tree):

@@ -6,8 +6,8 @@ import sys
 import numpy as np
 
 from table_1000.experts.context import ExpertFailed, Unreachable
-from table_1000.experts.grasps import build_grasp_pose, translated
-from table_1000.experts.pressure import PressureLoad
+from table_1000.experts.skills.hold.frames import build_grasp_pose, translated
+from table_1000.experts.skills.push.pressure import PressureLoad
 from table_1000.experts.skills.common import APPROACH
 from table_1000.experts.solver import PlanningFailed
 
@@ -24,7 +24,7 @@ class Stability:
     """
 
     def __init__(self, ctx, obj, joint):
-        from table_1000.experts.skills.semantic import Joint
+        from table_1000.experts.skills.drawer.joints import Joint
         self.ctx, self.obj, self.joint = ctx, obj, joint
         self.start = ctx.pose(obj, joint.parent).copy()
         self.failed = False
@@ -33,7 +33,7 @@ class Stability:
         self.peak = dict(translation_m=0., rotation_deg=0., other_openings_m={j.name: 0. for j in self.others})
 
     def sample(self, ctx, fail=True):
-        from table_1000.experts.skills.semantic import opening
+        from table_1000.experts.skills.drawer.joints import opening
         pose = ctx.pose(self.obj, self.joint.parent)
         shift = float(np.linalg.norm(pose[:3, 3] - self.start[:3, 3]))
         angle = float(np.degrees(np.arccos(np.clip((np.trace(pose[:3, :3] @ self.start[:3, :3].T) - 1) / 2, -1., 1.))))
@@ -49,7 +49,7 @@ class Stability:
 
 def roof_contacts(ctx, obj, body):
     """Top-facing convex-piece centers, on actual housing material, not its box."""
-    from table_1000.experts.skills.semantic import asset_shapes, cast
+    from table_1000.experts.world.geometry import asset_shapes, cast
     poses = {name: ctx.pose(obj, name) for name in ctx.geometry[obj].bodies}
     shapes = [shape for shape in asset_shapes(obj, ctx.geometry[obj], poses) if shape.body == body]
     high = max(shape.points[:, 2].max() for shape in shapes)
@@ -121,8 +121,8 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
                         1., lambda: contacts.time)
     target = s.target(obj, joint.handle)
     direction = joint.direction(ctx.pose(obj, joint.child))
-    from table_1000.experts.skills.motion import PUSH_GAP
-    from table_1000.experts.skills.semantic import opening
+    from table_1000.experts.skills.push.motion import PUSH_GAP
+    from table_1000.experts.skills.drawer.joints import opening
     if amount is None:
         push = -direction
         pushes = [[translated(contact, -push * PUSH_GAP), contact,
@@ -187,7 +187,7 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
                 actual, old_braced = s.model.q.copy(), s.braced
                 s.model.q, s.braced = q, True
                 try:
-                    from table_1000.experts.skills.semantic import opening
+                    from table_1000.experts.skills.drawer.joints import opening
                     if amount is None:
                         feasible = None
                         s.solvers[active].allow([name for name, part in s.solvers[active].world.objects.items()

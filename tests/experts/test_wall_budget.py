@@ -6,13 +6,13 @@ import pytest
 
 from table_1000.experts import context
 from table_1000.experts.context import WallBudgetExceeded
-from table_1000.experts.problems import Problems, decision
+from table_1000.experts.audit.problems import Problems, decision
 from table_1000.experts.solver import MotionSolver
 
 
 @pytest.mark.parametrize('angle_probe', [False, True])
 def test_budget_expires_inside_contact_candidate_screening(monkeypatch, angle_probe):
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     from tests.experts.test_grasp_geometry_cache import hand
     now = [0.]
     monkeypatch.setattr(context, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
@@ -35,7 +35,7 @@ def test_budget_expires_inside_contact_candidate_screening(monkeypatch, angle_pr
 
 
 def test_budget_expires_during_occupancy_ranking_before_contact_queries(monkeypatch):
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     from tests.experts.test_grasp_geometry_cache import hand
     now = [0.]
     monkeypatch.setattr(context, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
@@ -79,7 +79,7 @@ def test_base_screening_stops_between_native_branches(monkeypatch):
 
 
 def test_placement_screening_stops_between_release_branches(monkeypatch):
-    from table_1000.experts.skills.placing import Placing
+    from table_1000.experts.skills.place.strict import Placing
     now = [0.]
     monkeypatch.setattr(context, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
     skill = Placing()
@@ -100,7 +100,7 @@ def test_placement_screening_stops_between_release_branches(monkeypatch):
 
 
 def test_insertion_channel_expiry_does_not_cache_partial_geometry(monkeypatch):
-    from table_1000.experts.skills import placing
+    from table_1000.experts.skills.place import strict as placing
     now = [0.]
     monkeypatch.setattr(context, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
     skill = placing.Placing()
@@ -123,7 +123,7 @@ def test_insertion_channel_expiry_does_not_cache_partial_geometry(monkeypatch):
 
 
 def test_flat_opening_stops_between_fcl_queries_without_caching_a_verdict(monkeypatch):
-    from table_1000.experts.skills import flat_release, placing
+    from table_1000.experts.skills.place import flat as flat_release, strict as placing
     from tests.experts.test_flat_release import box, hand, obstacle
     now = [0.]
     monkeypatch.setattr(context, 'time', SimpleNamespace(perf_counter=lambda: now[0]))

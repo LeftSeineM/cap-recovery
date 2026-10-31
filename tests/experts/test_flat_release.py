@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from table_1000.experts.skills.flat_release import FlatReleaseGeometry
-from table_1000.experts.skills.placing import convex_keepout
+from table_1000.experts.skills.place.flat import FlatReleaseGeometry
+from table_1000.experts.skills.place.strict import convex_keepout
 
 
 def box(size, centre=(0.,0.,0.)):

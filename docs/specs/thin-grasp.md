@@ -1,6 +1,6 @@
 # 平放薄物体抓取
 
-专家 `pick` 与资产抓取测试共用薄物体路线。分类与悬出截面见 [`thin_objects.py`](../../table_1000/experts/thin_objects.py)，移边、闭合和抬升见 [`skills/thin.py`](../../table_1000/experts/skills/thin.py)，技能用法见 [`skills`](../../table_1000/experts/skills/__init__.py) 模块说明。
+专家 `pick` 与资产抓取测试共用薄物体路线。分类与悬出截面见 [`skills/hold/sections.py`](../../table_1000/experts/skills/hold/sections.py)，移边、闭合和抬升见 [`skills/hold/thin.py`](../../table_1000/experts/skills/hold/thin.py)，技能用法见 [`skills`](../../table_1000/experts/skills/__init__.py) 模块说明。
 
 ## 路线
 

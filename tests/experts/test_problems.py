@@ -3,17 +3,17 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from table_1000.experts.problems import Offline, Problems, decision, load, mark
+from table_1000.experts.audit.problems import Offline, Problems, decision, load, mark
 from table_1000.experts.solver import MotionSolver
-from table_1000.experts.trace import decode
+from table_1000.experts.audit.trace import decode
 from table_1000.robots import load_spec
 from table_1000.robots.kinematics import RobotModel
 
 
 def test_flat_put_down_records_and_restores_native_release_hulls(tmp_path):
     """Problems recording must not abort flat Place before its first motion."""
-    from table_1000.experts.skills.flat_release import FlatReleaseGeometry
-    from table_1000.experts.skills.placing import Placing, convex_keepout
+    from table_1000.experts.skills.place.flat import FlatReleaseGeometry
+    from table_1000.experts.skills.place.strict import Placing, convex_keepout
     ctx = SimpleNamespace(spec=SimpleNamespace(name='fake'), trace=SimpleNamespace(stack=[4]))
     record = Problems(ctx)
     ctx.trace.problems = record

@@ -1,5 +1,7 @@
 """Round support floors and nondegenerate prisms encountered in scene 000100."""
 
+from table_1000.experts.world import geometry as world_geometry
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,19 +10,19 @@ import numpy as np
 import pytest
 import trimesh
 
-from table_1000.experts.skills.targets import oriented_shape
-from table_1000.experts.grasps import Box, Cylinder, fitted, oriented_bounds
+from table_1000.experts.skills.hold.targets import oriented_shape
+from table_1000.experts.skills.hold.frames import Box, Cylinder, fitted, oriented_bounds
 from table_1000.experts.skills import semantic
-from table_1000.experts.skills.placing import Placing
-from table_1000.experts.thin_objects import box_extents
+from table_1000.experts.skills.place.strict import Placing
+from table_1000.experts.skills.hold.sections import box_extents
 
 
 def test_round_floor_does_not_keep_out_the_table_below_it():
     angle = np.arange(32) * 2 * np.pi / 32
     points = np.array([[.1 * np.cos(a), .1 * np.sin(a), z] for z in (.70, .71) for a in angle])
-    floor = semantic.Shape('jar', 'jar', 'jar.floor', np.eye(4), points)
+    floor = world_geometry.Shape('jar', 'jar', 'jar.floor', np.eye(4), points)
     table = {'size': (1., .8), 'height': .7, 'top_thickness': .03, 'center': (0., 0.)}
-    region, blocked = semantic.support_region([semantic.table_shape(table), floor], 'jar',
+    region, blocked = world_geometry.support_region([world_geometry.table_shape(table), floor], 'jar',
                                                floor=True, headroom=.1)
     assert region[0][2, 3] == pytest.approx(.71)
     assert not any(np.allclose(low[:2], [-.5, -.4]) for _, low, _ in blocked)
@@ -31,7 +33,7 @@ def test_round_floor_does_not_keep_out_the_table_below_it():
     assert candidates
     for pose, _ in candidates:
         footprint = target.points @ pose[:3, :3].T + pose[:3, 3]
-        assert np.linalg.norm(footprint[:, :2], axis=1).max() < .1 + semantic.SUPPORT_STEP
+        assert np.linalg.norm(footprint[:, :2], axis=1).max() < .1 + world_geometry.SUPPORT_STEP
 
 
 @pytest.mark.parametrize('points', [

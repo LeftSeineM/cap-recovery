@@ -34,7 +34,7 @@ from table_1000.common.timing import WallProfile, timed
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.trace import frame
+from table_1000.experts.audit.trace import frame
 from table_1000.scenes.geometry import AssetGeometry
 from table_1000.sim import CONTROL_HZ
 

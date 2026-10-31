@@ -1,6 +1,6 @@
 # 资产抓取测试
 
-测试单个资产能否被专家第一次抓起并在持物动作中握稳。每个环境只放一个待测资产，用机器人验收的桌子和工作点，抓取候选、闭合检查和运动规划与专家共用。入口为 `scripts/experts/eval_asset_grasp.py`，实现见 [`asset_grasp`](../../table_1000/experts/asset_grasp/__init__.py)；共用的抓取策略见 [`grasps`](../../table_1000/experts/grasps/__init__.py) 与 [`skills/grasping.py`](../../table_1000/experts/skills/grasping.py)。
+测试单个资产能否被专家第一次抓起并在持物动作中握稳。每个环境只放一个待测资产，用机器人验收的桌子和工作点，抓取候选、闭合检查和运动规划与专家共用。入口为 `scripts/experts/eval_asset_grasp.py`，实现见 [`evals/asset_grasp`](../../table_1000/experts/evals/asset_grasp/__init__.py)；共用的抓取策略见 [`skills/hold/frames.py`](../../table_1000/experts/skills/hold/frames.py) 与 [`skills/hold/pick.py`](../../table_1000/experts/skills/hold/pick.py)。
 
 ## 协议
 

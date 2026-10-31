@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from table_1000.experts.context import Unreachable
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.frames import Box
 from mplib.collision_detection import fcl
 from table_1000.planning.world import PlanningObject, geometry, pose as fcl_pose
 

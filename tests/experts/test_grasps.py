@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from table_1000.experts.grasps import Box, Cylinder, build_grasp_pose, compute_grasp_info_by_obb, fitted, lengthwise
+from table_1000.experts.skills.hold.frames import Box, Cylinder, build_grasp_pose, compute_grasp_info_by_obb, fitted, lengthwise
 
 
 def test_grasp_pose_axes():
@@ -55,7 +55,7 @@ def test_fitted_takes_a_polygonal_barrel_for_a_cylinder_and_a_rounded_square_for
 def test_consumer_angle_limit_preserves_the_filtered_cost_order(monkeypatch, limit):
     pytest.importorskip('mplib')
     import types
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     preferred = np.array([0., 0., -1.])
     def placed(shape, transform, target, pose, hand, *args):
         angle = np.arccos(np.clip(pose[:3, 0] @ preferred, -1., 1.))
@@ -79,7 +79,7 @@ def test_consumer_angle_limit_preserves_the_filtered_cost_order(monkeypatch, lim
 def test_wrist_rotation_reorders_existing_poses_without_changing_contact_tests(monkeypatch):
     pytest.importorskip('mplib')
     import types
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     calls = []
     def placed(shape, transform, target, pose, hand, *args):
         calls.append(pose.tobytes())
@@ -107,7 +107,7 @@ def test_wrist_rotation_reorders_existing_poses_without_changing_contact_tests(m
 def test_reference_closing_parallel_to_requested_approach_is_finite(monkeypatch):
     pytest.importorskip('mplib')
     import types
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     monkeypatch.setattr(grasps, '_placed', lambda shape, transform, target, pose, *args:
                         (pose, 0., .02, np.zeros(3), grasps.HOLD_AREA))
     hand = types.SimpleNamespace(max_gap=.2, opening_clearance=.01, radius=lambda: .1,
@@ -121,7 +121,7 @@ def test_reference_closing_parallel_to_requested_approach_is_finite(monkeypatch)
 def test_wrist_bound_does_not_place_expensive_flips_before_the_first_choice(monkeypatch):
     pytest.importorskip('mplib')
     import types
-    from table_1000.experts import grasps
+    from table_1000.experts.skills.hold import frames as grasps
     calls = []
     def placed(shape, transform, target, pose, *args):
         calls.append(pose[:3, :3])
@@ -144,7 +144,7 @@ def test_hand_collision_geometry_is_shared_without_sharing_opening_poses(monkeyp
     pytest.importorskip('mplib')
     import types
     from mplib.collision_detection import fcl
-    from table_1000.experts.grasps import Hand
+    from table_1000.experts.skills.hold.frames import Hand
     from table_1000.planning import world
     made, original = [], world.geometry
     def geometry(kind, data):

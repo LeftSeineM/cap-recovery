@@ -4,9 +4,9 @@ from collections import OrderedDict
 
 import numpy as np
 from scipy.spatial import ConvexHull
-from table_1000.experts.grasps._surface_query import intervals, possible_pieces
+from table_1000.experts.skills.hold.surface import intervals, possible_pieces
 
-from table_1000.experts.grasps import CONTACT_TOLERANCE, _close
+from table_1000.experts.skills.hold.frames import CONTACT_TOLERANCE, _close
 
 # Two contacting surfaces may each penetrate CONTACT_TOLERANCE; Hand's FK
 # cache and the closure bisection each resolve at most 0.5 mm of total gap.
@@ -86,7 +86,7 @@ class CollisionSurface:
         FCL check, especially for a whole-body expert target.
         """
         from mplib.collision_detection import fcl
-        from table_1000.experts.grasps import Box
+        from table_1000.experts.skills.hold.frames import Box
         from table_1000.planning.world import geometry, pose
         key = repr(enclosing)
         if not hasattr(self, '_collision_objects'):

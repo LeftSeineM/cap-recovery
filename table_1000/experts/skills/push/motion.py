@@ -1,14 +1,16 @@
 """Straight moves (dragging a jointed part), push and release."""
 
+from table_1000.experts.world import geometry as world_geometry
+
 import numpy as np
 from mplib.collision_detection import fcl
 
 from table_1000.experts.context import Unreachable, steps
-from table_1000.experts.grasps import standoff, translated
+from table_1000.experts.skills.hold.frames import standoff, translated
 from table_1000.experts.skills.common import (CANDIDATE_PLANS, IK_ATTEMPTS, RETREATS, ROOM_PLACES, SUPPORT_DISTANCE,
                                               collisions, normalized)
 from table_1000.experts.solver import PlanningFailed, note_torso
-from table_1000.experts.problems import decision, mark
+from table_1000.experts.audit.problems import decision, mark
 
 PARTIALS = (.75, .5, .25)     # fractions of a straight move tried when all of it does not plan
 SHORT_RETREAT = .02     # m back along the approach that takes the fingers off what they held
@@ -73,7 +75,7 @@ class Motion:
         points = self.ctx.geometry[drag[0]].points(drag[1], drag[1])
         bottom = (points @ pose[:3, :3].T + pose[:3, 3])[:, 2].min()
         objects = {obj for obj in objects
-                   if semantic.object_points(self.ctx, obj)[:, 2].min() >= bottom - SUPPORT_DISTANCE}
+                   if world_geometry.object_points(self.ctx, obj)[:, 2].min() >= bottom - SUPPORT_DISTANCE}
         riders = [name for name in world.objects
                   if ':' in name and name.split(':')[0] in objects and not attached(name)]
         carried = names + riders
@@ -264,7 +266,7 @@ class Motion:
     def _push_braced(self, arm, target, displacement):
         """Stop pushing a supported drawer at its measured closed end."""
         # semantic imports skills, whose Motion mixin is still being initialized at module load.
-        from table_1000.experts.skills.semantic import CLOSED, Joint, opening
+        from table_1000.experts.skills.drawer.joints import CLOSED, Joint, opening
 
         ctx = self.ctx
         child = target.body.split(':', 1)[1]

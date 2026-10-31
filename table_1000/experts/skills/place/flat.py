@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from mplib.collision_detection import fcl
 
-from table_1000.experts.grasps import _vertices
+from table_1000.experts.skills.hold.frames import _vertices
 from table_1000.planning.world import pose
 from table_1000.experts.skills.common import convex_keepout
 

@@ -1,6 +1,6 @@
 # 专家规范
 
-场景的专家程序怎么写，以及专家运行时的语义。专家由大模型按本规范编写（code as policy），也可以由人或 agent 交互操作后导出。接口和技能的细节以代码为准：`ctx` 见 [`context.py`](../../table_1000/experts/context.py)，原子技能见 [`skills`](../../table_1000/experts/skills/__init__.py)，语义技能见 [`skills/semantic.py`](../../table_1000/experts/skills/semantic.py)，动作链见 [`skills/chain.py`](../../table_1000/experts/skills/chain.py)，模块说明里有完整的行为描述。生成的数据见[专家数据](expert-data.md)。示例：[场景 000002](../../asset_sources/scenes/000002/experts/x1pro_rm001/0000.py)。
+场景的专家程序怎么写，以及专家运行时的语义。专家由大模型按本规范编写（code as policy），也可以由人或 agent 交互操作后导出。接口和技能的细节以代码为准：`ctx` 见 [`context.py`](../../table_1000/experts/context.py)，原子技能见 [`skills`](../../table_1000/experts/skills/__init__.py)，语义技能见 [`skills/semantic.py`](../../table_1000/experts/skills/semantic.py)，动作链见 [`skills/chain.py`](../../table_1000/experts/skills/chain.py)，模块说明里有完整的行为描述。技能实现按功能分目录：`skills/hold/`（抓取、换手、薄物体）、`skills/place/`（放置与释放）、`skills/drawer/`（关节测量与扶柜）、`skills/push/`（推、拖与摆正）；场景几何查询在 `world/`，调用与求解记录在 `audit/`，资产抓取评测在 `evals/`。生成的数据见[专家数据](expert-data.md)。示例：[场景 000002](../../asset_sources/scenes/000002/experts/x1pro_rm001/0000.py)。
 
 ## 文件与适用范围
 
@@ -59,7 +59,7 @@
 
 ## 放置放宽与桌面操作
 
-技能层在原有检查不变的前提下提供下面几种行为，参数与细节见各模块说明（[`low_release.py`](../../table_1000/experts/skills/low_release.py)、[`bracing.py`](../../table_1000/experts/skills/bracing.py)、[`squaring.py`](../../table_1000/experts/skills/squaring.py)）：
+技能层在原有检查不变的前提下提供下面几种行为，参数与细节见各模块说明（[`place/low.py`](../../table_1000/experts/skills/place/low.py)、[`drawer/bracing.py`](../../table_1000/experts/skills/drawer/bracing.py)、[`push/squaring.py`](../../table_1000/experts/skills/push/squaring.py)）：
 
 - **低处释放**：严格放置（物体送到最终位姿附近再松手）没有候选或无解时，`place` 改为从容器底面上方松手、让物体落下。落差（物体最低点到实测底面）不超过资产的 `max_drop_m`（缺省 0.15 m，见[建模](modeling.md)），松手前实测复核；容器已有内容物、下落途中可能碰到其他物体、或张开手指会碰到周围时不松手。之后仍按原目标谓词（在容器内、直立、最高点）验收。`flat` 放置不走这条路径。
 - **扶柜开关抽屉**：`open`/`close` 加 `brace=True` 时，另一只空手压住柜体顶面再拉或推，全程检查柜体位移 ≤ 5 mm、转角 ≤ 2°、其他抽屉被带出 ≤ 5 mm，超限即失败。两只手都要空。

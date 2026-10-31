@@ -9,7 +9,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 
 from table_1000.sim import CONTROL_HZ
-from table_1000.experts.asset_grasp.stability import MOTION_LIMITS, MOTION_TOLERANCE, motion
+from table_1000.experts.evals.asset_grasp.stability import MOTION_LIMITS, MOTION_TOLERANCE, motion
 from table_1000.experts.solver import PlanningFailed
 
 

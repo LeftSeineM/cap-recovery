@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 
 from table_1000.experts.context import ExpertFailed, Unreachable
-from table_1000.experts.grasps import Box, Cylinder
+from table_1000.experts.skills.hold.frames import Box, Cylinder
 from table_1000.experts.skills.common import Target
-from table_1000.experts.trace import CallTrace, decode, encode, frame, select_frame, snapshot_state, traced, restore, replay
+from table_1000.experts.audit.trace import CallTrace, decode, encode, frame, select_frame, snapshot_state, traced, restore, replay
 
 
 def context(seed=4, repeat=0):
@@ -89,7 +89,7 @@ def test_numpy_target_and_shape_roundtrip():
 
 
 def test_inhand_roundtrip_keeps_frozen_candidates_and_cached_verdicts():
-    from table_1000.experts.skills.placing import Placing
+    from table_1000.experts.skills.place.strict import Placing
     ctx = context()
     ctx.requirements = []
     skill = Placing()
@@ -138,7 +138,7 @@ def test_restore_held_attachments_permissions_and_rng(monkeypatch):
 
 
 def test_restore_preserves_planning_obstacles_before_skill_sync():
-    from table_1000.experts.trace import planner_state
+    from table_1000.experts.audit.trace import planner_state
     ctx = context()
     # A live scene may already have advanced; the planner still sees its last
     # sync. Rebuilding only from live poses would change the first IK decision.

@@ -1,12 +1,14 @@
 """Closed-loop tabletop alignment using existing collision-checked pushes."""
 
+from table_1000.experts.world import geometry as world_geometry
+
 from contextlib import contextmanager
 from itertools import combinations
 
 import numpy as np
 from scipy.spatial import ConvexHull
 
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.frames import Box
 from table_1000.experts.skills import semantic
 
 
@@ -96,7 +98,7 @@ def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
         angle = 0. if yaw is None else yaw_error(yaw, np.arctan2(pose[1, 0], pose[0, 0]))
         error = dict(position_m=float(np.linalg.norm(delta)), yaw_rad=angle)
         ctx.note('table squaring measured', obj=obj, round=iteration, **error)
-        points = semantic.object_points(ctx, obj)
+        points = world_geometry.object_points(ctx, obj)
         semantic.require(ctx, abs(points[:, 2].min() - ctx.scene.TABLE['height']) <= .01,
                          'table squaring needs table support', obj=obj)
         if error['position_m'] <= position_tolerance and abs(angle) <= angle_tolerance:

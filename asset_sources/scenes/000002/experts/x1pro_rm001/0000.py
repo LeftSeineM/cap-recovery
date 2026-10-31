@@ -8,6 +8,10 @@ geometry and joints) and the atomic ones under them; which arm, and where the
 base stands, the skills choose.
 """
 
+from table_1000.experts.skills.drawer import joints as drawer_joints
+from table_1000.experts.skills.place import regions
+from table_1000.experts.world import geometry as world_geometry
+
 ROBOT = 'x1pro_rm001'
 SCOPE = {0: None}
 SOURCE = 'hand'
@@ -39,8 +43,8 @@ def aside(ctx):
 
 def clear(ctx):
     """Keep-out rectangles of the cabinet and its drawers' pull-out space, grown by CLEAR."""
-    return [semantic.body_box(ctx, 'cabinet', 'cabinet.housing', CLEAR),
-            *(semantic.travel(ctx, 'cabinet', drawer, CLEAR) for drawer in (TOP, BOTTOM))]
+    return [world_geometry.body_box(ctx, 'cabinet', 'cabinet.housing', CLEAR),
+            *(drawer_joints.travel(ctx, 'cabinet', drawer, CLEAR) for drawer in (TOP, BOTTOM))]
 
 
 def pick_approach(ctx):
@@ -57,7 +61,7 @@ def into_bottom_drawer(ctx):
     """Pick the pen up from the table and put it into the bottom drawer, held as that needs."""
     skills.chain(ctx, [skills.Pick('pen', approach=pick_approach(ctx), max_angle=PICK_ANGLES,
                                    instruction='pick up the pen from the table'),
-                       skills.Place('pen', semantic.inside_region('pen', 'cabinet', 'cabinet.drawer3'),
+                       skills.Place('pen', regions.inside_region('pen', 'cabinet', 'cabinet.drawer3'),
                                     instruction='put the pen into the bottom drawer')])
 
 
@@ -76,7 +80,7 @@ def opened(drawer):
 
 def reopened(drawer, instruction):
     """Subtask ``instruction`` opening ``drawer`` again if it was pushed (part way) shut; nothing if not."""
-    return lambda ctx: semantic.is_open(ctx, 'cabinet', drawer, OPENING) or subtask(instruction, opened(drawer))(ctx)
+    return lambda ctx: drawer_joints.is_open(ctx, 'cabinet', drawer, OPENING) or subtask(instruction, opened(drawer))(ctx)
 
 
 def closed(drawer):
@@ -84,11 +88,11 @@ def closed(drawer):
 
 
 def is_open(drawer):
-    return lambda ctx: semantic.require(ctx, semantic.is_open(ctx, 'cabinet', drawer, OPENING), 'drawer not opened')
+    return lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'cabinet', drawer, OPENING), 'drawer not opened')
 
 
 def is_closed(drawer):
-    return lambda ctx: semantic.require(ctx, semantic.is_closed(ctx, 'cabinet', drawer), 'drawer not closed')
+    return lambda ctx: semantic.require(ctx, drawer_joints.is_closed(ctx, 'cabinet', drawer), 'drawer not closed')
 
 
 def take_out(ctx):

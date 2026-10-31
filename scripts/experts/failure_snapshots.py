@@ -57,7 +57,7 @@ def main(argv=None):
                 continue
             length = int(group.attrs['num_samples'])
             if report.get('call_trace'):
-                from table_1000.experts.trace import snapshot_state
+                from table_1000.experts.audit.trace import snapshot_state
                 if args.before:
                     parser.error('--before is for legacy scene-only snapshots; use --frame for traced episodes')
                 scene_state, snapshot = snapshot_state(batch, report, args.frame)

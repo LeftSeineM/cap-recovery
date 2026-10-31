@@ -311,9 +311,9 @@ def test_joined_failure_keeps_traces_entry_state_and_offline_problems(tmp_path, 
     from scripts.experts.failure_snapshots import main as snapshots
     from scripts.experts.resolve import main as resolve
     from scripts.scenes.join_steps import main as join
-    from table_1000.experts.problems import Problems
+    from table_1000.experts.audit.problems import Problems
     from table_1000.experts.solver import MotionSolver
-    from table_1000.experts.trace import CallTrace, frame, read_trace, snapshot_state
+    from table_1000.experts.audit.trace import CallTrace, frame, read_trace, snapshot_state
     from table_1000.robots import load_spec
     from table_1000.robots.kinematics import RobotModel
 

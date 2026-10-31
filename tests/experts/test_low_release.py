@@ -1,4 +1,6 @@
 """A bounded gravity fallback cannot generate high drops or spill carried contents."""
+from table_1000.experts.world import geometry as world_geometry
+
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,7 +9,7 @@ import pytest
 from table_1000.experts.context import ExpertFailed, Unreachable
 from table_1000.experts.skills.chain import InHand
 from table_1000.experts.skills.common import Target, upright_need
-from table_1000.experts.skills.placing import Placing
+from table_1000.experts.skills.place.strict import Placing
 from table_1000.scenes.geometry import AssetGeometry
 
 
@@ -24,8 +26,8 @@ def setup_release(monkeypatch, limit=.05):
         poses=lambda: {'tool:body':frame}, env=SimpleNamespace(center_of_mass=lambda body:np.array([[0.,0.,.075]])))
     skill.placements = lambda *a, **kw: [(frame, np.zeros(3))]
     shapes = []
-    monkeypatch.setattr(semantic, 'scene_shapes', lambda *a, **kw: shapes)
-    monkeypatch.setattr(semantic, 'support_region', lambda *a, **kw: ((frame,[-.15,-.15],[.15,.15]), []))
+    monkeypatch.setattr(world_geometry, 'scene_shapes', lambda *a, **kw: shapes)
+    monkeypatch.setattr(world_geometry, 'support_region', lambda *a, **kw: ((frame,[-.15,-.15],[.15,.15]), []))
     return skill, target, region, shapes
 
 
@@ -312,7 +314,7 @@ def test_live_contents_are_protected_even_when_part_pick_registered_no_riders(mo
 
 @pytest.mark.parametrize('convex,container', [(True, False), (False, False), (False, True)])
 def test_hanging_release_requests_end_grasps_for_slender_noncontainers(monkeypatch, convex, container):
-    from table_1000.experts.skills import targets
+    from table_1000.experts.skills.hold import targets
     skill, _, region, _ = setup_release(monkeypatch)
     skill.ctx.geometry['tool'].solid = lambda *args, **kwargs: convex
     monkeypatch.setattr(targets, 'rim_sections', lambda s, obj, target, geometry: setattr(target, 'container', container))

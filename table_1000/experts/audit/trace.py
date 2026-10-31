@@ -76,7 +76,7 @@ def decode(value, ctx=None):
     if kind == 'InHand':
         return ctx.skills().restore_need(decode(value['value'], ctx))
     if kind == 'FlatReleaseGeometry':
-        from table_1000.experts.skills.flat_release import FlatReleaseGeometry
+        from table_1000.experts.skills.place.flat import FlatReleaseGeometry
         arguments = decode(value['value'], ctx)
         arguments['blocked_by'] = set(arguments['blocked_by'])
         return FlatReleaseGeometry(**arguments)
@@ -88,7 +88,7 @@ def decode(value, ctx=None):
                   for shape in arguments['shapes']]
         return fcl.FCLObject(arguments['name'], pose(arguments['pose']), shapes,
                              [pose(shape['pose']) for shape in arguments['shapes']])
-    from table_1000.experts.grasps import Box, Cylinder
+    from table_1000.experts.skills.hold.frames import Box, Cylinder
     from table_1000.experts.skills.common import Target
     return {'Box': Box, 'Cylinder': Cylinder, 'Target': Target}[kind](**decode(value['value'], ctx))
 

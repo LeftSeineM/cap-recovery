@@ -11,14 +11,14 @@ from dataclasses import replace
 import numpy as np
 
 from table_1000.experts.context import Unreachable, remaining_wall
-from table_1000.experts.problems import decision, mark
+from table_1000.experts.audit.problems import decision, mark
 from table_1000.experts.skills.chain import InHand
 
 
 class LowRelease:
     def release_floor(self, region):
         """The target container's floor in the current observed scene."""
-        from table_1000.experts.skills.semantic import scene_shapes, selects, support_region
+        from table_1000.experts.world.geometry import scene_shapes, selects, support_region
         metadata = region[3] if len(region) > 3 else {}
         container, part = metadata.get('release_container'), metadata.get('release_part')
         if not container:
@@ -27,8 +27,8 @@ class LowRelease:
         return support_region(walls, container, part, floor=True)[0]
 
     def low_release_options(self, target, region, near, keep_out, step, margin):
-        from table_1000.experts.skills.semantic import scene_shapes, selects, support_region
-        from table_1000.experts.skills.placing import MAX_PLACE_IK
+        from table_1000.experts.world.geometry import scene_shapes, selects, support_region
+        from table_1000.experts.skills.place.strict import MAX_PLACE_IK
         metadata = region[3] if len(region) > 3 else {}
         container = metadata.get('release_container')
         if not container or metadata.get('release_support') is not None:
@@ -123,7 +123,7 @@ class LowRelease:
         if not geometry.solid(None, narrow=0.):
             # Nonconvex tools are not containers. Use the same cavity test as
             # ordinary pickup instead of equating a nonconvex hull with one.
-            from table_1000.experts.skills.targets import rim_sections
+            from table_1000.experts.skills.hold.targets import rim_sections
             rim_sections(self, need.obj, target, geometry)
         options = self.low_release_options(target, region, np.asarray(origin['near'])[:3],
                                             origin['keep_out'], origin['step'], origin['margin'])

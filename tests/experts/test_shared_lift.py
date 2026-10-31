@@ -60,7 +60,7 @@ def test_blocked_small_shared_lift_retracts_then_replans():
 
 
 def test_contact_preview_keeps_ready_phase_except_after_missed_grasp():
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     skill = Grasping()
     skill.ctx = SimpleNamespace()
     skill.braced = False

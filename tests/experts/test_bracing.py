@@ -1,5 +1,7 @@
 """Drawer stability is a path invariant, including other drawers and retreat."""
 
+from table_1000.experts.skills.drawer import joints as drawer_joints
+
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,7 +10,7 @@ from scipy.spatial.transform import Rotation
 
 from table_1000.experts.context import ExpertFailed
 from table_1000.experts.skills import semantic
-from table_1000.experts.skills.bracing import Stability, roof_contacts, stability
+from table_1000.experts.skills.drawer.bracing import Stability, roof_contacts, stability
 
 
 @pytest.fixture
@@ -20,8 +22,8 @@ def cabinet(monkeypatch):
         raise ExpertFailed(None, reason, **details)
     ctx = SimpleNamespace(pose=lambda *a: pose, observers=[], note=lambda *a, **kw: notes.append((a, kw)),
                           fail=fail, geometry={'cab': SimpleNamespace(joints={n: {'type': 'SLIDER'} for n in joints})})
-    monkeypatch.setattr(semantic.Joint, 'of', lambda g, n: joints[n])
-    monkeypatch.setattr(semantic, 'opening', lambda c, o, n: gaps[n])
+    monkeypatch.setattr(drawer_joints.Joint, 'of', lambda g, n: joints[n])
+    monkeypatch.setattr(drawer_joints, 'opening', lambda c, o, n: gaps[n])
     return ctx, joints, pose, gaps, notes
 
 
@@ -69,7 +71,7 @@ def test_other_drawer_already_open_fails_at_entry(cabinet):
 @pytest.mark.parametrize('operation', ['open', 'close'])
 def test_bracing_with_a_busy_hand_fails_before_motion(cabinet, monkeypatch, operation):
     ctx, joints, pose, gaps, notes = cabinet
-    monkeypatch.setattr(semantic, 'slider', lambda *a: joints['top'])
+    monkeypatch.setattr(drawer_joints, 'slider', lambda *a: joints['top'])
     ctx.skills = lambda: SimpleNamespace(held={'left': object()}, arms=['left', 'right'])
     arguments = (.16,) if operation == 'open' else ()
     with pytest.raises(ValueError, match='place held objects first'):
@@ -112,13 +114,13 @@ def test_support_hand_cannot_be_stowed_during_active_motion(arms):
 
 @pytest.mark.parametrize('outcome', ['completed', 'closed', 'failed'])
 def test_braced_push_removes_only_its_observer_before_holding(monkeypatch, outcome):
-    from table_1000.experts.skills.motion import Motion
+    from table_1000.experts.skills.push.motion import Motion
     from table_1000.experts.solver import PlanningFailed
 
     joint = SimpleNamespace(child='drawer', kind='SLIDER', name='slide')
-    monkeypatch.setattr(semantic.Joint, 'of', lambda *a: joint)
+    monkeypatch.setattr(drawer_joints.Joint, 'of', lambda *a: joint)
     gap = [.01]
-    monkeypatch.setattr(semantic, 'opening', lambda *a: gap[0])
+    monkeypatch.setattr(drawer_joints, 'opening', lambda *a: gap[0])
     events = []
     sentinel = lambda context: None
     observers = [sentinel]
@@ -143,7 +145,7 @@ def test_braced_push_removes_only_its_observer_before_holding(monkeypatch, outco
         assert len(observers) == 2
         observers[-1](motion.ctx)  # Still open: do not stop before the measured threshold.
         if outcome == 'closed':
-            gap[0] = semantic.CLOSED / 2
+            gap[0] = drawer_joints.CLOSED / 2
             observers[-1](motion.ctx)
             pytest.fail('the measured closed end must interrupt motion')
         if outcome == 'failed':
@@ -174,7 +176,7 @@ def test_assignment_falls_back_only_before_the_drawer_action(monkeypatch, failur
     from contextlib import contextmanager
     from table_1000.experts.context import Unreachable
     from table_1000.experts.solver import PlanningFailed
-    from table_1000.experts.skills import bracing
+    from table_1000.experts.skills.drawer import bracing
     failure_class = Unreachable if failure_kind == 'unreachable' else PlanningFailed
     attempts = []
     @contextmanager
@@ -198,7 +200,7 @@ def test_assignment_falls_back_only_before_the_drawer_action(monkeypatch, failur
 def test_both_hand_assignments_are_checked_before_relocating(monkeypatch):
     from contextlib import contextmanager
     from table_1000.experts.context import Unreachable
-    from table_1000.experts.skills import bracing
+    from table_1000.experts.skills.drawer import bracing
     attempts = []
     @contextmanager
     def support(ctx, obj, joint, active, amount, *, relocate):
@@ -214,7 +216,7 @@ def test_both_hand_assignments_are_checked_before_relocating(monkeypatch):
 
 
 def test_oriented_release_detaches_overlapping_whole_and_carried_names_once():
-    from table_1000.experts.skills.motion import Motion
+    from table_1000.experts.skills.push.motion import Motion
     detached = []
     def detach(name):
         assert name not in detached
@@ -232,7 +234,7 @@ def test_oriented_release_detaches_overlapping_whole_and_carried_names_once():
 
 
 def test_gravity_release_waits_and_reobserves_after_detachment_before_exit():
-    from table_1000.experts.skills.motion import Motion
+    from table_1000.experts.skills.push.motion import Motion
     events = []
     solver = SimpleNamespace(open_gripper=lambda _: events.append('open'),
         detach=lambda _: events.append('detach'), sync=lambda: events.append('observe'),
@@ -249,7 +251,7 @@ def test_gravity_release_waits_and_reobserves_after_detachment_before_exit():
 
 @pytest.mark.parametrize('withdrawal_fails', [False, True])
 def test_release_revokes_finger_contacts_for_every_carried_part_and_payload(withdrawal_fails):
-    from table_1000.experts.skills.motion import Motion
+    from table_1000.experts.skills.push.motion import Motion
     from table_1000.experts.solver import PlanningFailed
     allowed = {'body', 'wall', 'pen', 'support'}
     def withdraw(*args):

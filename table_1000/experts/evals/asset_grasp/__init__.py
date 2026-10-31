@@ -21,10 +21,10 @@ from scipy.spatial.transform import Rotation
 
 from table_1000.scenes.layout import Layout
 from table_1000.sim import CONTROL_HZ
-from table_1000.experts.asset_grasp.stability import (TRANSPORT, classify, is_dropped, metrics, motion_report)
-from table_1000.experts.asset_grasp.transport import coupled_twist, retime, retime_stroke
+from table_1000.experts.evals.asset_grasp.stability import TRANSPORT, classify, is_dropped, metrics, motion_report
+from table_1000.experts.evals.asset_grasp.transport import coupled_twist, retime, retime_stroke
 from table_1000.experts.solver import PlanningFailed
-from table_1000.experts.skills.targets import targets, target_groups
+from table_1000.experts.skills.hold.targets import targets, target_groups
 
 REGION_SIZE = .10
 WORK_OFFSET = (.05, 0.)  # keep the near edge of the square clear of the folded-arm workspace
@@ -462,7 +462,7 @@ class Evaluator:
         choices = []
         if ctx is not None:
             from table_1000.experts.skills.common import IK_ATTEMPTS
-            from table_1000.experts.skills.grasping import LIFT
+            from table_1000.experts.skills.hold.pick import LIFT
             origin = ctx.tcp(arm).copy()
             origin[:2, 3] = self.center
             origin[2, 3] = np.asarray(ctx.skills().held[arm]['grasp']['pose'])[2, 3] + LIFT

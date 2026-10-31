@@ -6,10 +6,10 @@ import pytest
 
 from table_1000.experts import skills
 from table_1000.experts.context import Unreachable
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.frames import Box
 from table_1000.experts.skills.common import Target
-from table_1000.experts.skills.targets import targets, target_groups
-from table_1000.experts.skills.targets import rim_sections
+from table_1000.experts.skills.hold.targets import targets, target_groups
+from table_1000.experts.skills.hold.targets import rim_sections
 
 
 def test_named_object_enumeration_matches_asset_alias_and_explicit_override():
@@ -159,7 +159,7 @@ def test_closed_narrow_tube_keeps_ordinary_targets_while_wide_box_is_a_container
 
 
 def test_plate_pick_preserves_chain_unmet_before_preparing_an_edge():
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     from table_1000.experts.skills.common import Unmet
     skill = Grasping()
     skill.ctx = SimpleNamespace()
@@ -177,7 +177,7 @@ def test_plate_pick_preserves_chain_unmet_before_preparing_an_edge():
 @pytest.mark.parametrize('reason,expected', [('no reachable grasp', ['whole', 'wall']),
                                            ('tracking', ['whole'])])
 def test_closed_body_uses_exterior_parts_only_after_unreachable_envelope(reason, expected):
-    from table_1000.experts.asset_grasp import pick
+    from table_1000.experts.evals.asset_grasp import pick
     from table_1000.experts.context import ExpertFailed
     box = Box((.02,) * 3)
     whole = Target('object', ['whole'], 'object:body', box, np.eye(4), box.points(),

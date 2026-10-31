@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from table_1000.experts.trace import decode, encode
+from table_1000.experts.audit.trace import decode, encode
 from table_1000.experts.context import remaining_wall
 
 
@@ -374,7 +374,7 @@ class Offline:
         """
         import mplib.pymp
         from table_1000.experts.context import ExpertFailed, DT
-        from table_1000.experts.grasps import Hand
+        from table_1000.experts.skills.hold.frames import Hand
         from table_1000.experts.skills import Skills
         from scipy.spatial.transform import Rotation
         entry = self.document['decisions'][number]

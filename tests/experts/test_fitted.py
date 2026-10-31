@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from table_1000.experts.grasps import Box, Cylinder, fitted
+from table_1000.experts.skills.hold.frames import Box, Cylinder, fitted
 
 
 def prism(sides, radius, length, axis):

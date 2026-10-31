@@ -1,8 +1,8 @@
 """Compiled collision queries retain the authored halfspace intersection rules."""
 import numpy as np
 import pytest
-from table_1000.experts.grasps.checks import CollisionSurface, PARALLEL_PLANE_TOLERANCE
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.checks import CollisionSurface, PARALLEL_PLANE_TOLERANCE
+from table_1000.experts.skills.hold.frames import Box
 
 
 def reference(surface, origins, direction):
@@ -97,7 +97,7 @@ def test_span_views_and_contact_subsets_keep_independent_query_semantics():
 
 def test_full_candidate_stream_matches_numpy_query(monkeypatch):
     from test_grasp_geometry_cache import hand
-    from table_1000.experts.grasps import Cylinder, grasp_candidates
+    from table_1000.experts.skills.hold.frames import Cylinder, grasp_candidates
 
     for shape in (Box((.02, .02, .04)), Cylinder(.012, .04)):
         surface = CollisionSurface([(np.eye(4), 'convex', shape.points())])

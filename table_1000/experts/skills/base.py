@@ -11,7 +11,7 @@ from scipy.spatial.transform import Rotation
 from table_1000.experts.context import DT, remaining_wall, steps
 from table_1000.experts.skills.common import IK_ATTEMPTS, collisions
 from table_1000.experts.solver import PlanningFailed
-from table_1000.experts.problems import decision, mark
+from table_1000.experts.audit.problems import decision, mark
 
 # The base drives at most BASE_SPEED (m/s) and turns at most BASE_TURN (rad/s), proportionally to the
 # error (BASE_GAIN) until within BASE_TOLERANCE (m, rad), then settles for BASE_SETTLE s.

@@ -121,7 +121,7 @@ retry、chain 和 Pick / Place / Handover action 也记录为控制帧；动作�
 
 `run_expert.py --problems {failed,all,none}` 控制保存范围，默认 `failed`：运行中照常记录，结束为失败或程序错误时保存 `problems/<seed>[-<r>].json.gz`，报告的 `solve_trace` 指向它；成功时不写文件，`solve_trace` 为 null。`all` 保存所有运行；`none` 关闭记录及额外 IK 诊断。repeats 和帧重跑按每次运行自己的结果判断；`calls/` 在三种模式下都保存。人工遥操不记录求解问题，`solve_trace` 始终为 null。
 
-记录包含技能帧内的决策树、候选和它们被淘汰的关卡（`stage`），以及每次 IK、直线规划、RRTConnect 的完整输入（机器人配置、目标、预算、当时的规划世界）与结果。以 `frame` 关联调用帧；结构见 [`problems.py`](../../table_1000/experts/problems.py) 的说明。
+记录包含技能帧内的决策树、候选和它们被淘汰的关卡（`stage`），以及每次 IK、直线规划、RRTConnect 的完整输入（机器人配置、目标、预算、当时的规划世界）与结果。以 `frame` 关联调用帧；结构见 [`audit/problems.py`](../../table_1000/experts/audit/problems.py) 的说明。
 
 ## 离线重解
 

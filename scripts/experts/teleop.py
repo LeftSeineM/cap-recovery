@@ -298,7 +298,7 @@ def run(args, argv):
             index = max(int(case['step_at']), int(case['failure_at']) - 1 - round(back_s * CONTROL_HZ))
             report = json.loads((Path(case['batch']) / 'episodes' / f'{seed}.json').read_text())
             if report.get('call_trace') and not back_s:
-                from table_1000.experts.trace import snapshot_state
+                from table_1000.experts.audit.trace import snapshot_state
                 initial, snapshot = snapshot_state(case['batch'], report)
                 index = snapshot['frame']['enter'] - 1
             else:

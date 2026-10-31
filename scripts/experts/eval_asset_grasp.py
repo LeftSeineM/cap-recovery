@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 def main(argv=None):
     from table_1000.common.batch import add_arguments, job_count
-    from table_1000.experts.asset_grasp.runner import run, worker
+    from table_1000.experts.evals.asset_grasp.runner import run, worker
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', type=Path,
                         help='test profile: scene asset list, exclusions, robot and trials (configs/asset_grasp_*.py)')
@@ -55,7 +55,7 @@ def main(argv=None):
 
 def render_main(argv):
     from table_1000.common.batch import add_arguments, job_count
-    from table_1000.experts.asset_grasp.runner import render_run
+    from table_1000.experts.evals.asset_grasp.runner import render_run
     parser = argparse.ArgumentParser(description='Render one recorded asset/seed without running physics')
     parser.add_argument('--result', type=Path, required=True)
     parser.add_argument('--seed', type=int, required=True)
@@ -68,7 +68,7 @@ def render_main(argv):
 
 if __name__ == '__main__':
     if sys.argv[1:2] == ['compare']:
-        from table_1000.experts.asset_grasp.comparison import main as compare_main
+        from table_1000.experts.evals.asset_grasp.comparison import main as compare_main
         compare_main(sys.argv[2:])
     elif sys.argv[1:2] == ['render']:
         render_main(sys.argv[2:])

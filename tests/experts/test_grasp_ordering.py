@@ -3,7 +3,7 @@ import types
 import numpy as np
 import pytest
 
-from table_1000.experts.grasps import Box, gravity_lever, pinch_normal_force
+from table_1000.experts.skills.hold.frames import Box, gravity_lever, pinch_normal_force
 from table_1000.experts.skills.common import Target
 from table_1000.robots import load_spec
 
@@ -11,7 +11,7 @@ from table_1000.robots import load_spec
 @pytest.fixture(autouse=True)
 def isolated_placement_cache(monkeypatch):
     """Ordering tests replace geometric candidates and use sentinel hands."""
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     monkeypatch.setattr(Grasping, '_grasp_placement_cache', lambda *args, **kwargs: {})
 
 
@@ -33,7 +33,7 @@ def test_closing_force_uses_existing_drive_and_pivot_virtual_work():
 
 
 def test_joint_constraint_does_not_use_free_suspension_center_or_torque():
-    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.hold.pick import Grasping
     skill = Grasping()
     target = types.SimpleNamespace(obj='object', body='object:body')
     structure = types.SimpleNamespace(articulated=False, root='body')
@@ -48,8 +48,8 @@ def test_joint_constraint_does_not_use_free_suspension_center_or_torque():
 
 
 def test_cost_sorted_candidates_do_not_stop_at_an_out_of_angle_candidate(monkeypatch):
-    import table_1000.experts.skills.grasping as grasping
-    from table_1000.experts.grasps import Grasp
+    import table_1000.experts.skills.hold.pick as grasping
+    from table_1000.experts.skills.hold.frames import Grasp
     skill = grasping.Grasping()
     skill.braced, skill.brace_seed = False, None
     skill.stow = lambda **kwargs: False
@@ -148,8 +148,8 @@ def test_cost_sorted_candidates_do_not_stop_at_an_out_of_angle_candidate(monkeyp
 
 @pytest.mark.parametrize('with_need', [False, True])
 def test_wrist_preference_requires_a_declared_next_hold(monkeypatch, with_need):
-    import table_1000.experts.skills.grasping as grasping
-    from table_1000.experts.grasps import Grasp
+    import table_1000.experts.skills.hold.pick as grasping
+    from table_1000.experts.skills.hold.frames import Grasp
     references = []
     def candidates(*args, **kwargs):
         references.append(kwargs.get('reference_rotation'))
@@ -186,8 +186,8 @@ def test_wrist_preference_requires_a_declared_next_hold(monkeypatch, with_need):
 
 
 def test_parts_merge_by_cost_before_ik_with_distinct_retry_ids(monkeypatch):
-    import table_1000.experts.skills.grasping as grasping
-    from table_1000.experts.grasps import Grasp
+    import table_1000.experts.skills.hold.pick as grasping
+    from table_1000.experts.skills.hold.frames import Grasp
     skill = grasping.Grasping()
     skill.braced, skill.brace_seed = False, None
     skill.stow = lambda **kwargs: False
@@ -215,8 +215,8 @@ def test_parts_merge_by_cost_before_ik_with_distinct_retry_ids(monkeypatch):
 
 
 def test_empty_held_lift_phase_preserves_later_part_order_and_retry_ids(monkeypatch):
-    import table_1000.experts.skills.grasping as grasping
-    from table_1000.experts.grasps import Grasp
+    import table_1000.experts.skills.hold.pick as grasping
+    from table_1000.experts.skills.hold.frames import Grasp
     skill = grasping.Grasping()
     skill.braced, skill.brace_seed = False, None
     skill.stow = lambda **kwargs: False
@@ -257,8 +257,8 @@ def test_empty_held_lift_phase_preserves_later_part_order_and_retry_ids(monkeypa
 
 @pytest.mark.parametrize('near_arm_reachable', [True, False])
 def test_part_cost_heads_are_lazy_for_unused_arm_and_phase(monkeypatch, near_arm_reachable):
-    import table_1000.experts.skills.grasping as grasping
-    from table_1000.experts.grasps import Grasp
+    import table_1000.experts.skills.hold.pick as grasping
+    from table_1000.experts.skills.hold.frames import Grasp
     skill = grasping.Grasping()
     skill.braced, skill.brace_seed = False, None
     targets = [Target('object', [str(i)], 'object:body', Box((i + 1., .02, .02)), np.eye(4), np.empty((0, 3)))
@@ -299,7 +299,7 @@ def test_part_cost_heads_are_lazy_for_unused_arm_and_phase(monkeypatch, near_arm
 
 
 def test_part_heads_preserve_internal_order_even_when_hidden_load_is_lower():
-    from table_1000.experts.grasps import Grasp, merge_part_heads
+    from table_1000.experts.skills.hold.frames import Grasp, merge_part_heads
     def grasp(cost, load, closest):
         return Grasp(np.eye(4), .04, .03, 0., cost,
                      {'load': load, 'closest_deg': closest})

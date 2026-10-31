@@ -4,13 +4,12 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.grasps import Box
+from table_1000.experts.skills.hold.frames import Box
 from table_1000.experts.context import DT
-from table_1000.experts.skills.thin import ThinPicking
+from table_1000.experts.skills.hold.thin import ThinPicking
 from table_1000.experts.skills.common import Target
-from table_1000.experts.skills.grasping import Grasping
-from table_1000.experts.thin_objects import (classify, exposed_section, landing, supported_overhangs,
-                                          swept_obstacle, table_edges)
+from table_1000.experts.skills.hold.pick import Grasping
+from table_1000.experts.skills.hold.sections import classify, exposed_section, landing, supported_overhangs, swept_obstacle, table_edges
 
 
 @pytest.fixture
@@ -195,8 +194,8 @@ def test_plate_edge_keeps_grasp_requirement_failure(flat_thin, rejected):
 
 
 def test_prepared_plate_area_uses_opposing_local_faces_with_tip_margin(flat_thin):
-    from table_1000.experts.grasps import _held_area
-    from table_1000.experts.thin_objects import ExposedSection
+    from table_1000.experts.skills.hold.frames import _held_area
+    from table_1000.experts.skills.hold.sections import ExposedSection
     skill, target, _ = flat_thin
     faces = [Box((.03, .002, .02)).points() + [0., sign * .009, 0.]
              for sign in (-1., 1.)]
@@ -364,8 +363,8 @@ def test_exposed_candidate_positions_include_solid_fragments_across_an_empty_cen
 
 
 def test_exposed_ray_cache_tracks_input_values_and_does_not_alias_results():
-    from table_1000.experts.grasps.checks import CollisionSurface
-    from table_1000.experts.thin_objects import ExposedSection
+    from table_1000.experts.skills.hold.checks import CollisionSurface
+    from table_1000.experts.skills.hold.sections import ExposedSection
     points = Box((.02, .001, .02)).points()
     section = ExposedSection(points)
     reference = CollisionSurface([(np.eye(4), 'convex', points)])
@@ -385,8 +384,8 @@ def test_exposed_ray_cache_tracks_input_values_and_does_not_alias_results():
 
 def test_exposed_closure_cache_shares_tip_geometry_but_keeps_area_checks(hand, monkeypatch):
     import copy
-    import table_1000.experts.grasps as grasps
-    from table_1000.experts.thin_objects import ExposedSection, _CLOSURES
+    import table_1000.experts.skills.hold.frames as grasps
+    from table_1000.experts.skills.hold.sections import ExposedSection, _CLOSURES
     _CLOSURES.clear()
     hand._contact_geometry_key = object()
     section = ExposedSection(Box((.02, .001, .02)).points())
@@ -426,7 +425,7 @@ def test_exposed_closure_cache_shares_tip_geometry_but_keeps_area_checks(hand, m
 
 
 def test_translation_sweep_checks_middle_without_bridging_empty_space():
-    from table_1000.experts.thin_objects import swept_obstacles
+    from table_1000.experts.skills.hold.sections import swept_obstacles
     from table_1000.planning.world import box_object
     transform = np.eye(4)
     transform[0, 3] = .5
@@ -501,7 +500,7 @@ def test_closed_loop_drag_reobserves_until_overhang_and_bounds_a_slipping_object
 
 def test_preparation_search_exhaustion_cannot_restart_via_another_mode():
     from table_1000.experts.context import ExpertFailed
-    from table_1000.experts.skills.grasping import MAX_IK
+    from table_1000.experts.skills.hold.pick import MAX_IK
     skill = ThinPicking()
     skill.arms, skill.held = ['right'], {}
     def fail(reason, **details):
@@ -596,7 +595,7 @@ def test_supported_extraction_targets_real_edge_instead_of_negative_collision_al
 
 
 def test_support_polygon_uses_low_material_instead_of_airborne_outline():
-    from table_1000.experts.thin_objects import support_polygon, supported_point
+    from table_1000.experts.skills.hold.sections import support_polygon, supported_point
     table = {'center': (.5, 0.), 'size': (1., 1.), 'height': 0.}
     foot = Box((.02, .02, .002)).points() + [.05, 0., .001]
     raised = Box((.10, .02, .002)).points() + [.07, 0., .02]
@@ -606,7 +605,7 @@ def test_support_polygon_uses_low_material_instead_of_airborne_outline():
 
 
 def test_com_support_does_not_imply_support_for_an_outboard_pressure_point():
-    from table_1000.experts.thin_objects import support_polygon, supported_point
+    from table_1000.experts.skills.hold.sections import support_polygon, supported_point
     table = {'center': (.5, 0.), 'size': (1., 1.), 'height': 0.}
     fragment = Box((.012, .008, .002)).points() + [.0001, 0., .001]
     polygon = support_polygon([fragment], table, .001)
@@ -617,7 +616,7 @@ def test_com_support_does_not_imply_support_for_an_outboard_pressure_point():
 
 def test_tip_permission_does_not_turn_edge_patch_into_interior_area(hand):
     import copy
-    from table_1000.experts.grasps import _contact_area
+    from table_1000.experts.skills.hold.frames import _contact_area
     tip = copy.copy(hand)
     tip.hold_margin = 0.
     surface = Box((.0015, .001, .016))
@@ -632,11 +631,11 @@ def test_tip_permission_does_not_turn_edge_patch_into_interior_area(hand):
 
 
 def test_observed_edge_target_uses_exposed_section_without_target_surface():
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.frames import Box
     from table_1000.experts.skills.common import Target
-    from table_1000.experts.skills.grasping import Grasping
-    from table_1000.experts.skills.thin import ThinPicking
-    from table_1000.experts.thin_objects import Edge, ExposedSection
+    from table_1000.experts.skills.hold.pick import Grasping
+    from table_1000.experts.skills.hold.thin import ThinPicking
+    from table_1000.experts.skills.hold.sections import Edge, ExposedSection
     from types import SimpleNamespace
     class Skill(ThinPicking, Grasping):
         pass
@@ -654,8 +653,8 @@ def test_observed_edge_target_uses_exposed_section_without_target_surface():
 
 
 def test_exposed_section_runs_shared_candidate_and_contact_queries(hand, monkeypatch):
-    import table_1000.experts.grasps as grasps
-    from table_1000.experts.thin_objects import ExposedSection
+    import table_1000.experts.skills.hold.frames as grasps
+    from table_1000.experts.skills.hold.sections import ExposedSection
     section = ExposedSection(Box((.02, .001, .02)).points())
     hand.radius = lambda: .1
     hand.moment_radius = lambda: .01

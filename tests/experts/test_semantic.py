@@ -1,5 +1,9 @@
 """Handles, pull directions and places to put things down, derived from asset geometry alone."""
 
+from table_1000.experts.skills.drawer import joints as drawer_joints
+from table_1000.experts.skills.place import regions
+from table_1000.experts.world import geometry as world_geometry
+
 import numpy as np
 import pytest
 
@@ -54,7 +58,7 @@ TABLE = {'size': (1., .8), 'height': .7, 'top_thickness': .03, 'center': (0., 0.
 @pytest.mark.parametrize('pull', [(0., -1., 0.), (1., 0., 0.)])
 def test_drawer_handle_and_pull_direction(pull):
     geometry = AssetGeometry(cabinet_model(pull))
-    joint = semantic.Joint.of(geometry, 'cab.drawer.slide')
+    joint = drawer_joints.Joint.of(geometry, 'cab.drawer.slide')
     assert (joint.kind, joint.parent, joint.child, joint.handle) == ('SLIDER', 'cab.housing', 'cab.drawer',
                                                                     'cab.drawer.handle')
     transform = yaw_pose(.1, .2, TABLE['height'], .4)
@@ -66,16 +70,16 @@ def test_drawer_handle_and_pull_direction(pull):
 def test_drawer_floor_out_of_the_cabinet(pull):
     """Only the part of the drawer's floor pulled out of the housing is a place to put things in."""
     geometry = AssetGeometry(cabinet_model(pull))
-    joint = semantic.Joint.of(geometry, 'cab.drawer.slide')
+    joint = drawer_joints.Joint.of(geometry, 'cab.drawer.slide')
     transform = yaw_pose(-.1, .1, TABLE['height'], .3)
-    closed = semantic.asset_shapes('cab', geometry, posed(geometry, transform, joint, 0.))
+    closed = world_geometry.asset_shapes('cab', geometry, posed(geometry, transform, joint, 0.))
     # Shut, only its front wall and handle are out of the housing: no floor (at 0.03) to put things on.
-    region, _ = semantic.support_region(closed, 'cab', 'cab.drawer', floor=True)
+    region, _ = world_geometry.support_region(closed, 'cab', 'cab.drawer', floor=True)
     assert (np.linalg.inv(transform) @ region[0])[2, 3] > .05
     poses = posed(geometry, transform, joint, .18)
-    (frame, low, high), keep_out = semantic.support_region(semantic.asset_shapes('cab', geometry, poses), 'cab',
+    (frame, low, high), keep_out = world_geometry.support_region(world_geometry.asset_shapes('cab', geometry, poses), 'cab',
                                                            'cab.drawer', floor=True)
-    step = semantic.SUPPORT_STEP
+    step = world_geometry.SUPPORT_STEP
     local = np.linalg.inv(poses['cab.drawer']) @ frame
     assert np.allclose(local[:3, :3], np.eye(3)) and local[2, 3] == pytest.approx(.01, abs=1e-6)
     # Between the side walls, from the front wall to the housing's face (0.18 out of it).
@@ -86,14 +90,14 @@ def test_drawer_floor_out_of_the_cabinet(pull):
 
 def test_table_keeps_out_what_stands_on_it():
     geometry = AssetGeometry(cabinet_model((0., -1., 0.)))
-    joint = semantic.Joint.of(geometry, 'cab.drawer.slide')
+    joint = drawer_joints.Joint.of(geometry, 'cab.drawer.slide')
     transform = yaw_pose(.2, .1, TABLE['height'], .5)
     poses = posed(geometry, transform, joint, .1)
-    shapes = [semantic.table_shape(TABLE), *semantic.asset_shapes('cab', geometry, poses)]
-    (frame, low, high), keep_out = semantic.support_region(shapes, 'table')
+    shapes = [world_geometry.table_shape(TABLE), *world_geometry.asset_shapes('cab', geometry, poses)]
+    (frame, low, high), keep_out = world_geometry.support_region(shapes, 'table')
     assert frame[2, 3] == pytest.approx(TABLE['height'])
-    assert np.allclose(high, [.5, .4], atol=semantic.SUPPORT_STEP) and np.allclose(low, [-.5, -.4],
-                                                                                 atol=semantic.SUPPORT_STEP)
+    assert np.allclose(high, [.5, .4], atol=world_geometry.SUPPORT_STEP) and np.allclose(low, [-.5, -.4],
+                                                                                 atol=world_geometry.SUPPORT_STEP)
     # The housing and the drawer pulled out of it, each by its collision box in its own frame.
     assert {tuple(np.round(f[:3, 3], 6)) for f, _, _ in keep_out} == {
         tuple(np.round(poses[body][:3, 3], 6)) for body in ('cab.housing', 'cab.drawer')}
@@ -102,9 +106,9 @@ def test_table_keeps_out_what_stands_on_it():
 
 
 def test_cast_hits_the_nearest_face():
-    shapes = [semantic.Shape('a', 'a', 'a', np.eye(4), np.array(box((0., 0., 0.), (1., 1., 1.)))),
-              semantic.Shape('b', 'b', 'b', np.eye(4), np.array(box((0., 0., 2.), (1., 1., 3.))))]
-    first, distance, normal = semantic.cast(shapes, [[.5, .5, 5.], [.5, .5, 1.5], [3., 3., 5.]], [0., 0., -1.])
+    shapes = [world_geometry.Shape('a', 'a', 'a', np.eye(4), np.array(box((0., 0., 0.), (1., 1., 1.)))),
+              world_geometry.Shape('b', 'b', 'b', np.eye(4), np.array(box((0., 0., 2.), (1., 1., 3.))))]
+    first, distance, normal = world_geometry.cast(shapes, [[.5, .5, 5.], [.5, .5, 1.5], [3., 3., 5.]], [0., 0., -1.])
     assert first.tolist() == [1, 0, -1]
     assert distance[:2] == pytest.approx([2., .5]) and distance[2] == np.inf
     assert np.allclose(normal[:2], [[0., 0., 1.]] * 2)
@@ -115,32 +119,32 @@ def test_what_hangs_high_over_a_floor_is_no_obstacle():
     comes down from lower than that (as a drawer's handle over the one below); the housing's top,
     0.07 m over the floor, still hides the part inside."""
     geometry = AssetGeometry(cabinet_model((0., -1., 0.)))
-    joint = semantic.Joint.of(geometry, 'cab.drawer.slide')
+    joint = drawer_joints.Joint.of(geometry, 'cab.drawer.slide')
     poses = posed(geometry, np.eye(4), joint, .18)
     drawer = poses['cab.drawer']
     corners = np.array(box((-.2, 0., .12), (.2, .09, .13))) @ drawer[:3, :3].T + drawer[:3, 3]
-    shapes = [*semantic.asset_shapes('cab', geometry, poses),
-              semantic.Shape('board', 'board', 'board', np.eye(4), corners)]
-    (_, low, _), keep_out = semantic.support_region(shapes, 'cab', 'cab.drawer', floor=True)
-    assert low[1] == pytest.approx(.09, abs=semantic.SUPPORT_STEP / 2 + 1e-9)
-    (_, low, high), keep_out = semantic.support_region(shapes, 'cab', 'cab.drawer', floor=True, headroom=.09)
-    assert np.allclose([low[1], high[1]], [0., .18], atol=semantic.SUPPORT_STEP / 2 + 1e-9) and keep_out == []
+    shapes = [*world_geometry.asset_shapes('cab', geometry, poses),
+              world_geometry.Shape('board', 'board', 'board', np.eye(4), corners)]
+    (_, low, _), keep_out = world_geometry.support_region(shapes, 'cab', 'cab.drawer', floor=True)
+    assert low[1] == pytest.approx(.09, abs=world_geometry.SUPPORT_STEP / 2 + 1e-9)
+    (_, low, high), keep_out = world_geometry.support_region(shapes, 'cab', 'cab.drawer', floor=True, headroom=.09)
+    assert np.allclose([low[1], high[1]], [0., .18], atol=world_geometry.SUPPORT_STEP / 2 + 1e-9) and keep_out == []
 
 
 def test_put_on_keeps_room_at_the_edges():
     """On the table, an object stays EDGE inside its edges (fingers reach past it when picking it up)."""
-    region, _ = semantic.support_region([semantic.table_shape(TABLE)], 'table')
-    frame, low, high = semantic.around(semantic.inset(region, semantic.EDGE), [0., -.3, TABLE['height']])
-    assert np.allclose(low, [-.3, -.4 + semantic.EDGE], atol=semantic.SUPPORT_STEP)
-    assert np.allclose(high, [.3, 0.], atol=semantic.SUPPORT_STEP)
+    region, _ = world_geometry.support_region([world_geometry.table_shape(TABLE)], 'table')
+    frame, low, high = regions.around(regions.inset(region, regions.EDGE), [0., -.3, TABLE['height']])
+    assert np.allclose(low, [-.3, -.4 + regions.EDGE], atol=world_geometry.SUPPORT_STEP)
+    assert np.allclose(high, [.3, 0.], atol=world_geometry.SUPPORT_STEP)
 
 
 def test_near_off_the_surface_takes_its_nearest_part():
     """A near point off the table (the robot turned away) still leaves room: its nearest corner."""
-    region, _ = semantic.support_region([semantic.table_shape(TABLE)], 'table')
-    _, low, high = semantic.around(semantic.inset(region, semantic.EDGE), [-.9, -.7, TABLE['height']])
-    corner = np.array([-.5, -.4]) + semantic.EDGE
-    assert np.allclose(low, corner, atol=semantic.SUPPORT_STEP)
-    assert np.allclose(high, corner + semantic.NEAR, atol=semantic.SUPPORT_STEP)
-    _, low, high = semantic.inset((np.eye(4), np.zeros(2), np.array([.05, .3])), semantic.EDGE)
+    region, _ = world_geometry.support_region([world_geometry.table_shape(TABLE)], 'table')
+    _, low, high = regions.around(regions.inset(region, regions.EDGE), [-.9, -.7, TABLE['height']])
+    corner = np.array([-.5, -.4]) + regions.EDGE
+    assert np.allclose(low, corner, atol=world_geometry.SUPPORT_STEP)
+    assert np.allclose(high, corner + regions.NEAR, atol=world_geometry.SUPPORT_STEP)
+    _, low, high = regions.inset((np.eye(4), np.zeros(2), np.array([.05, .3])), regions.EDGE)
     assert np.allclose(low, [.025, .04]) and np.allclose(high, [.025, .26])

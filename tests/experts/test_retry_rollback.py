@@ -6,7 +6,7 @@ import pytest
 from table_1000.experts.context import Unreachable
 from table_1000.experts.skills import retry
 from table_1000.experts.skills.common import Unmet
-from table_1000.experts.trace import CallTrace,traced
+from table_1000.experts.audit.trace import CallTrace, traced
 from table_1000.experts.retrying import copy_recorded
 
 
@@ -119,9 +119,9 @@ def test_real_planning_world_is_restored_after_failed_attachment_changes(tmp_pat
 
 
 def test_retry_restores_the_live_inhand_predicate_cache():
-    from table_1000.experts.skills.placing import Placing
+    from table_1000.experts.skills.place.strict import Placing
     from table_1000.experts.skills.common import Target
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.frames import Box
     ctx,state,archives=context(2)
     skill=Placing();skill.ctx=ctx;skill.model=SimpleNamespace(base=np.eye(4),q=np.zeros(2))
     skill.held,skill.reaches,skill.log={},{},[]
@@ -147,7 +147,7 @@ def test_retry_restores_the_live_inhand_predicate_cache():
 
 
 def test_archived_failure_survives_successful_cleanup():
-    from table_1000.experts.trace import select_frame
+    from table_1000.experts.audit.trace import select_frame
     ctx,state,_=context(2)
 
     @traced()
@@ -170,7 +170,7 @@ def test_archived_failure_survives_successful_cleanup():
 
 def test_callback_check_failure_archives_its_control_and_concrete_children():
     from table_1000.experts.context import ExpertFailed
-    from table_1000.experts.trace import select_frame
+    from table_1000.experts.audit.trace import select_frame
     ctx,state,_=context(2)
     with ctx.trace.frame('skill','retry',concrete=False)as control:
         move(ctx,state,False)

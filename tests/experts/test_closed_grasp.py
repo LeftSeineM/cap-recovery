@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from table_1000.experts.context import ExpertFailed
 from table_1000.experts.skills.common import Target
-from table_1000.experts.skills.grasping import Grasping, MAX_REGRASPS
+from table_1000.experts.skills.hold.pick import Grasping, MAX_REGRASPS
 
 
 def grasping():
@@ -125,8 +125,8 @@ def test_ordinary_part_does_not_carry_its_external_support():
 
 
 def test_part_handover_previews_the_complete_carried_asset():
-    from table_1000.experts.skills.handover import Handing
-    from table_1000.experts.grasps import Box
+    from table_1000.experts.skills.hold.handover import Handing
+    from table_1000.experts.skills.hold.frames import Box
     skill = Handing()
     target = Target('pen', ['pen:barrel'], 'pen:body', Box((.01, .01, .1)), np.eye(4),
                     Box((.01, .01, .1)).points())
