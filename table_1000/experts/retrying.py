@@ -29,7 +29,7 @@ class RetryState:
         if self.record:
             self.problem_lengths = {name:len(getattr(self.record,name)) for name in ('operations','decisions','events')}
             self.diagnostics = self.record._diagnostics.copy()
-        self.requirements = [(need, encode(need.recipe)) for need in getattr(ctx, 'requirements', [])]
+        self.requirements = [(need, encode(need.recipe)) for need in ctx.requirements]
         self.control = ctx.trace.stack[-1]
         self.parent_retry = list(getattr(ctx.trace,'retry_path',[]))
         self.attempts = []
@@ -63,8 +63,7 @@ class RetryState:
         for need, recipe in self.requirements:
             restored = ctx.skills().restore_need(decode(recipe, ctx))
             vars(need).update(vars(restored))
-        if hasattr(ctx, 'requirements'):
-            ctx.requirements[:] = [need for need, _ in self.requirements]
+        ctx.requirements[:] = [need for need, _ in self.requirements]
         del ctx.skills().log[self.skill_log:]
         for name,length in self.lengths.items():
             del getattr(ctx,name)[length:]

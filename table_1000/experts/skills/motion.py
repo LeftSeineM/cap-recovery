@@ -1,6 +1,7 @@
 """Straight moves (dragging a jointed part), push and release."""
 
 import numpy as np
+from mplib.collision_detection import fcl
 
 from table_1000.experts.context import Unreachable, steps
 from table_1000.experts.grasps import standoff, translated
@@ -13,6 +14,10 @@ PARTIALS = (.75, .5, .25)     # fractions of a straight move tried when all of i
 SHORT_RETREAT = .02     # m back along the approach that takes the fingers off what they held
 PUSH_GAP = .03          # m, push starts with the fingertips this far in front of the face
 PUSH_TILTS = np.radians([0., 20., 40., 60.])   # push approaches, tilted down from the push direction
+
+
+class DrawerClosed(Exception):
+    """The supported drawer reached its measured closed end during a push."""
 
 
 class Motion:
@@ -37,6 +42,8 @@ class Motion:
                 solver.release(riders, contacts)
                 solver.release(dragged, contacts + riders)
             if held:
+                if held['carried']:
+                    solver.world.allow(held['carried'], supports, False)
                 solver.allow(supports, False)
                 held['supports'] = []
 
@@ -45,7 +52,6 @@ class Motion:
         yet held, every part of the other objects resting on or against it (a pen in a drawer rides
         along), and what they may touch besides each other and the rest of their objects: the
         objects within ``SUPPORT_DISTANCE`` of them."""
-        from mplib.collision_detection import fcl
         solver = self.solvers[arm]
         solver.sync()
         world, key = solver.world, f'{drag[0]}:{drag[1]}'
@@ -59,6 +65,15 @@ class Motion:
                         for body in bodies)]
 
         objects = {name.split(':')[0] for name in touching(names, bodies, drag[0] + ':') if ':' in name}
+        # A supporting object below the dragged body is not its payload. In
+        # particular, pushing an item atop a book must not attach that book
+        # (and then collide it with every neighbour) to the pushing hand.
+        from table_1000.experts.skills import semantic
+        pose = self.ctx.poses()[key]
+        points = self.ctx.geometry[drag[0]].points(drag[1], drag[1])
+        bottom = (points @ pose[:3, :3].T + pose[:3, 3])[:, 2].min()
+        objects = {obj for obj in objects
+                   if semantic.object_points(self.ctx, obj)[:, 2].min() >= bottom - SUPPORT_DISTANCE}
         riders = [name for name in world.objects
                   if ':' in name and name.split(':')[0] in objects and not attached(name)]
         carried = names + riders
@@ -99,7 +114,7 @@ class Motion:
                     return fraction
                 except PlanningFailed:
                     pass
-        if np.linalg.norm(displacement[:2]) > 1e-9 or displacement[2] <= 0.:
+        if self.braced or np.linalg.norm(displacement[:2]) > 1e-9 or displacement[2] <= 0.:
             raise failed
         straight = {'reason': failed.reason, 'collisions': failed.details.get('plan', {}).get('collisions')}
         rise = float(displacement[2])
@@ -134,33 +149,35 @@ class Motion:
         ctx.note('rise short', rest=rest, reason=reason, collisions=collisions)
         return float(np.clip((solver.tcp()[2, 3] - start[2, 3]) / rise, 0., 1.))
 
+    def push_contacts(self, target, direction, arms):
+        """Measured face contacts shared by pushing and coupled brace preflight."""
+        transform = self.ctx.poses()[target.body] @ target.offset
+        face = transform[:3, 3] + direction * float((target.shape.points() @ transform[:3, :3].T @ direction).min())
+        level = normalized(direction - [0., 0., direction[2]])
+        side = normalized(np.cross([0., 0., 1.], level))
+        for arm in sorted(arms, key=lambda a: np.linalg.norm((self.shoulder(a) - face)[:2])):
+            for tilt in PUSH_TILTS:
+                approach = normalized(level * np.cos(tilt) - np.array([0., 0., 1.]) * np.sin(tilt))
+                for closing in (side, normalized(np.cross(approach, side))):
+                    pose = np.eye(4)
+                    pose[:3, :3] = np.c_[approach, closing, np.cross(approach, closing)]
+                    pose[:3, 3] = face - approach * self.hands[arm].tip()
+                    yield arm, tilt, pose
+
     @decision
     def push(self, target, direction, distance, arm=None):
         """Push ``target`` (:class:`Target`) by ``distance`` along world ``direction``; see the
         module docstring. Returns ``{'arm', 'tilt', 'moved'}`` (how far its body went)."""
         ctx = self.ctx
         direction = normalized(np.asarray(direction, dtype=float))
-        transform = ctx.poses()[target.body] @ target.offset
-        face = transform[:3, 3] + direction * float((target.shape.points() @ transform[:3, :3].T @ direction).min())
-        level = normalized(direction - [0., 0., direction[2]])
-        side = normalized(np.cross([0., 0., 1.], level))
         arms = [arm] if arm else [a for a in self.arms if a not in self.held]
-        options = []
-        for candidate in sorted(arms, key=lambda a: np.linalg.norm((self.shoulder(a) - face)[:2])):
-            tip = self.hands[candidate].tip()
-            for tilt in PUSH_TILTS:
-                approach = normalized(level * np.cos(tilt) - np.array([0., 0., 1.]) * np.sin(tilt))
-                for closing in (side, normalized(np.cross(approach, side))):
-                    pose = np.eye(4)
-                    pose[:3, :3] = np.c_[approach, closing, np.cross(approach, closing)]
-                    pose[:3, 3] = face - approach * tip
-                    options.append((candidate, tilt, pose))
+        options = list(self.push_contacts(target, direction, arms))
         before = ctx.poses()[target.body][:3, 3]
         # Either arm with the torso lift where it is (all the way through the push), then moving it too;
         # none in reach with the other arm out: again with it in.
         tried, pushed, stowed, roomed = set(), False, False, False
         while not pushed:
-            for lift, (index, (candidate, tilt, contact)) in ((lift, option) for lift in (False, True)
+            for lift, (index, (candidate, tilt, contact)) in ((lift, option) for lift in ((False,) if self.braced else (False, True))
                                                               for option in enumerate(options)):
                 # A rejected candidate may already have moved the part. Continue
                 # from its measured face and complete only the remaining travel.
@@ -173,6 +190,10 @@ class Motion:
                     continue
                 solver = self.solvers[candidate]
                 start = self.model.vector(ctx.spec.arms[candidate].finger_targets(0.))
+                seed = self.brace_seed
+                if seed is not None:
+                    indices = self.model.arm_indices(candidate)
+                    start[indices] = seed[indices]
                 mark(self, 'pre-push IK')
                 status, q_pre = self.model.ik(candidate, translated(contact, -direction * PUSH_GAP), start, world=True,
                                               lift=lift, attempts=IK_ATTEMPTS)
@@ -191,11 +212,17 @@ class Motion:
                 touched = [name for name, obj in solver.world.objects.items() if obj.body == target.body] or target.names
                 try:
                     solver.close_gripper()
+                    # Contact can obstruct the companion arm's later withdrawal.
+                    # Preserve the old pre-contact clearance for pushing only.
+                    self.stow([a for a in self.arms if a != candidate], why='push before contact')
                     solver.move_to_pose_with_RRTConnect(None, lift=True, goals=[q_pre], attempts=CANDIDATE_PLANS)
                     solver.allow(touched)
                     solver.move_to_pose_with_screw(contact)
-                    self.move_by_displacement(candidate, direction * remaining,
-                                              drag=(target.obj, target.body.split(':', 1)[1]))
+                    if self.braced:
+                        self._push_braced(candidate, target, direction * remaining)
+                    else:
+                        self.move_by_displacement(candidate, direction * remaining,
+                                                  drag=(target.obj, target.body.split(':', 1)[1]))
                     mark(self, 'plan', outcome='accepted')
                     pushed = True
                     break
@@ -207,7 +234,7 @@ class Motion:
             if not pushed:
                 if not stowed and self.stow():
                     tried, stowed = set(), True
-                elif not roomed and ctx.spec.base:
+                elif not roomed and ctx.spec.base and not self.braced:
                     # None in reach from here: the base moves to reach the first contacts (and the push
                     # from them), then again.
                     roomed = True
@@ -234,14 +261,54 @@ class Motion:
             ctx.note('no retreat', arm=candidate, reason=error.reason, **collisions(error))
         return {'arm': candidate, 'tilt': float(tilt), 'moved': moved}
 
-    def release(self, arm):
+    def _push_braced(self, arm, target, displacement):
+        """Stop pushing a supported drawer at its measured closed end."""
+        # semantic imports skills, whose Motion mixin is still being initialized at module load.
+        from table_1000.experts.skills.semantic import CLOSED, Joint, opening
+
+        ctx = self.ctx
+        child = target.body.split(':', 1)[1]
+        matches = [Joint.of(ctx.geometry[target.obj], name) for name in ctx.geometry[target.obj].joints
+                   if Joint.of(ctx.geometry[target.obj], name).child == child]
+        joint = next((joint for joint in matches if joint.kind == 'SLIDER'), None)
+        if joint is None:
+            raise ValueError('braced push requires a slider child; use an unbraced push')
+
+        def closing(context):
+            if opening(context, target.obj, joint.name) <= CLOSED / 2:
+                raise DrawerClosed
+
+        # Stop before pressing the housing through the slider stop.
+        stopped = False
+        ctx.observers.append(closing)
+        try:
+            self.move_by_displacement(arm, displacement, drag=(target.obj, child))
+        except DrawerClosed:
+            stopped = True
+        finally:
+            ctx.observers.remove(closing)
+        if stopped:
+            ctx.step({arm: self.solvers[arm].qpos()[None]})
+
+    def release(self, arm, upward=0., backoff=0., settle=0.):
         """Open the fingers to the grasp's opening and back out along the approach (straight, else
-        planned), or up."""
+        planned), or up. ``upward`` > 0 restricts withdrawal to a vertical screw
+        of that distance, with the torso lift held first, then free (insertion).
+        ``backoff`` first moves straight back by this distance, before going up
+        on a flat release whose opening and both segments were screened.
+        ``settle`` waits after opening/detaching, before observing withdrawal
+        geometry, for an intentional gravity release to leave the fingers."""
         held = self.held.pop(arm)
         solver = self.solvers[arm]
         solver.open_gripper(held['grasp']['open_gap'])
-        for name in held['target'].names:
+        carried = held['carried']
+        riders = held['riders']
+        for name in dict.fromkeys([*held['target'].names, *carried, *riders]):
             solver.detach(name)
+        for pair in held['carry_permissions']:
+            solver.world.allow(pair[:1], pair[1:] or pair[:1], False)
+        if settle:
+            self.ctx.hold(settle)
         solver.sync()
         tcp = solver.tcp()
         # Straight out (with the torso lift too, if the arm alone runs into a limit or the body at either distance),
@@ -255,7 +322,26 @@ class Motion:
         moves.append(lambda: solver.move_to_pose_with_RRTConnect(standoff(tcp, RETREATS[0]), lift=True))
         moves.append(out_and_up)
         moves += [lambda d=d: solver.move_to_pose_with_screw(translated(tcp, [0., 0., d])) for d in RETREATS]
+        if upward:
+            moves = [lambda lift=lift: solver.move_to_pose_with_screw(translated(tcp, [0., 0., upward]), lift=lift)
+                     for lift in (False, True)]
         try:
+            if backoff:
+                solver.first_reachable([False, True], lambda lift: solver.move_to_pose_with_screw(
+                    standoff(tcp, backoff), lift=lift))
+                backed = solver.tcp()
+                moves = [lambda lift=lift: solver.move_to_pose_with_screw(
+                    translated(backed, [0., 0., upward]), lift=lift) for lift in (False, True)]
+                # A low shelf may leave the full withdrawal height at a torso
+                # or wrist joint limit. Keep the requested height first, then
+                # try shorter exits from the measured backoff pose; collision
+                # checking still rejects an exit that does not clear the
+                # opening.
+                moves += [lambda height=upward * fraction, lift=lift:
+                          solver.move_to_pose_with_screw(translated(backed, [0., 0., height]), lift=lift)
+                          for fraction in (.5, .25) for lift in (False, True)]
             solver.first_reachable(moves, lambda move: move())
         finally:
-            solver.allow([*held['target'].names, *held['supports']], False)
+            # Part grasps can grant approach contacts to adjacent pieces or
+            # contents too. Their finger permissions end with this hold.
+            solver.allow(list(dict.fromkeys([*held['target'].names, *carried, *riders, *held['supports']])), False)

@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 
 from table_1000.experts import skills
 from table_1000.experts.skills import chain
@@ -124,3 +125,44 @@ def test_chain_asks_each_need_of_the_state_the_actions_before_leave(picking):
             return None
     chain(Context(), [Pick('pen'), Pick('cup'), Asked(picking)])
     assert picking == ['pick right', 'asked', 'pick right', 'place']
+
+
+@pytest.mark.parametrize('adapt', [('base', 'handover'), ('base',)])
+def test_chain_tries_independent_release_hold_after_shared_stance_fails(monkeypatch, adapt):
+    log = []
+    strict = InHand('pen', lambda *args: False, ['left'], recipe={'origin': {}})
+    relaxed = InHand('pen', lambda *args: True, ['left'], recipe={'gravity_release': True})
+    ctx = Context()
+    ctx.skills = lambda: SimpleNamespace(low_release_need=lambda need: relaxed if need is strict else None)
+    def pick(ctx, obj, need=None, base=True, **options):
+        log.append((need, base))
+        if need is strict:
+            raise Unmet('pick', 'no shared stance')
+        assert need is relaxed and base
+        return {'arm': 'left'}
+    class Release(Placing):
+        def requirements(self, ctx):
+            return strict
+    monkeypatch.setattr(skills, 'pick', pick)
+    result = chain(ctx, [Pick('pen'), Release(log)], adapt=adapt)
+    assert log == [(strict, False), (strict, True), (relaxed, True), 'place']
+    assert result == [[{'arm': 'left'}], 'placed']
+
+
+def test_failed_independent_release_hold_keeps_the_existing_handover_fallback(monkeypatch):
+    log = []
+    strict = InHand('pen', lambda *args: False, ['left'], recipe={'origin': {}})
+    relaxed = InHand('pen', lambda *args: True, ['left'], recipe={'gravity_release': True})
+    ctx = Context()
+    ctx.skills = lambda: SimpleNamespace(low_release_need=lambda need: relaxed)
+    def pick(ctx, obj, need=None, base=True, **options):
+        log.append((need, base))
+        if need is not None:
+            raise Unmet('pick', 'no compatible hold')
+        return {'arm': 'left', 'tcp_object': np.eye(4)}
+    class Release(Placing):
+        def requirements(self, ctx):
+            return strict
+    monkeypatch.setattr(skills, 'pick', pick)
+    chain(ctx, [Pick('pen'), Release(log)])
+    assert log == [(strict, False), (strict, True), (relaxed, True), (None, True), 'place']

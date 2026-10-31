@@ -8,17 +8,19 @@ import math
 
 import numpy as np
 
-from table_1000.experts.context import DT, Unreachable, steps
+from table_1000.experts.context import DT, ExpertFailed, Unreachable, remaining_wall, steps
 from table_1000.experts.grasps.checks import CollisionSurface
 from table_1000.experts.grasps import (BACKOFF_STEP, CONTACT_TOLERANCE, HOLD_AREA,
-                                      _contact_area, _vertices, build_grasp_pose, grasp_candidates, translated)
+                                      _grasp_area, _vertices, build_grasp_pose, grasp_candidates, translated)
 from table_1000.experts.skills.common import APPROACH, IK_ATTEMPTS
 from table_1000.experts.skills.grasping import MAX_IK, MAX_REGRASPS
+from table_1000.scenes.geometry import transform_points
 from table_1000.experts.solver import ARRIVAL_TOLERANCE, GRIPPER_TIME, PlanningFailed
 from table_1000.experts.pressure import (PressureLoad, correction_path, material_motion,
                                         same_pressure_contact)
 from table_1000.experts.thin_objects import (ExposedSection, classify, exposed_section, landing, overhang_depth,
-                                          supported_overhangs, support_polygon, supported_point, swept_obstacle, table_edges)
+                                          supported_overhangs, support_polygon, supported_point, swept_obstacle,
+                                          swept_obstacles, table_edges)
 
 
 class PreparationSearch:
@@ -59,7 +61,7 @@ class ThinPicking:
         return super().contact_surface(target)
 
     def candidate_hand(self, target, arm):
-        hand = self.hands[arm]
+        hand = super().candidate_hand(target, arm)
         if not getattr(self, '_fingertip_candidates', False):
             return hand
         tip = copy.copy(hand)
@@ -106,7 +108,7 @@ class ThinPicking:
         ctx = self.ctx
         table = ctx.scene.TABLE
         pose = ctx.poses()[target.body]
-        world = target.points @ pose[:3, :3].T + pose[:3, 3]
+        world = transform_points(pose, target.points)
         height = table['height']
         if (world[:, 2].min() > height + CONTACT_TOLERANCE
                 or world[:, 2].max() < height - CONTACT_TOLERANCE
@@ -223,6 +225,23 @@ class ThinPicking:
                 self.ctx.note('thin preparation retry', attempt=retries, budget=budget,
                               reason='insufficient thin object overhang')
 
+    def pressure_geometry(self, target, pose):
+        """Body collision material and physical pressure patches in one observed pose."""
+        body = target.body.split(':', 1)[1]
+        pieces = [(frame, kind, data) for name, _, frame, kind, data in self.ctx.geometry[target.obj].shapes
+                  if name == body]
+        patches, convex = [], []
+        for frame, kind, data in pieces:
+            placed = pose @ frame
+            if kind == 'sphere':
+                vertices = np.asarray(list(itertools.product((-data, data), repeat=3)))
+                convex.append(transform_points(placed, vertices))
+            elif kind == 'convex':
+                points = transform_points(placed, data)
+                convex.append(points)
+                patches.append((points.mean(0), points))
+        return CollisionSurface(pieces), patches, convex
+
     def _slide_segment(self, target, arm=None, height=.1, prepared=None, search=None):
         """Press the top collision surface and drag to a reachable supported edge landing.
 
@@ -232,7 +251,8 @@ class ThinPicking:
         external force moves the object.
         """
         ctx = self.ctx
-        if prepared is not None and prepared.get('repeated_empty_pressure'):
+        if prepared is not None and (prepared.get('repeated_empty_pressure')
+                                     or self.thin_geometry(target).kind == 'plate'):
             # An unchanged body does not need a whole new mode/depth preview.
             # Recheck the committed landing with all ordinary grasp checks.
             candidate = prepared['arm']
@@ -245,35 +265,24 @@ class ThinPicking:
                 prepared['planned_overhang_m'],
                 (prepared['grasp_approach'], prepared['grasp_joints']), prepared, search,
                 prepared['fingertip'], prepared['landing_rule'], [], height)
-        geometry = ctx.geometry[target.obj]
-        body = target.body.split(':', 1)[1]
         pose = ctx.poses()[target.body]
-        pieces = [(transform, kind, data) for name, _, transform, kind, data in geometry.shapes if name == body]
-        surface = CollisionSurface(pieces)
-        world = target.points @ pose[:3, :3].T + pose[:3, 3]
+        surface, patches, convex = self.pressure_geometry(target, pose)
+        world = transform_points(pose, target.points)
         center = ctx.env.center_of_mass(target.body)[0]
-        # Solid patch centres, nearest the COM first, also work for a bent wire
-        # whose overall box centre is empty space.
-        patches, convex = [], []
-        for transform, kind, data in pieces:
-            if kind == 'sphere':
-                # A circumscribed box conservatively covers the sphere's sweep;
-                # only actual convex material supplies a pressure patch.
-                vertices = np.asarray(list(itertools.product((-data, data), repeat=3)))
-                placed = pose @ transform
-                convex.append(vertices @ placed[:3, :3].T + placed[:3, 3])
-            if kind != 'convex':
-                continue
-            points = data @ (pose @ transform)[:3, :3].T + (pose @ transform)[:3, 3]
-            convex.append(points)
-            patch = points.mean(0)
-            patches.append((patch, points))
         patches.sort(key=lambda item: np.linalg.norm(item[0][:2] - center[:2]))
         arms = [arm] if arm else [name for name in self.arms if name not in self.held]
         edges = table_edges(ctx.scene.TABLE, ctx.base_transform()[:3, 3])
         if prepared is not None:
             arms, edges = [prepared['arm']], [prepared['edge']]
         rejected = []
+        plate = self.thin_geometry(target).kind == 'plate'
+        if plate:
+            solver = self.solvers[arms[0]]
+            solver.sync()
+            live = ctx.poses()
+            sweep_obstacles = [(name, obj.fcl(live.get(obj.body, solver.world.poses[name])))
+                               for name, obj in solver.world.objects.items()
+                               if obj.body != target.body and name != 'table']
         # Keep the existing edge and arm order. Within each, preview all
         # modes before spending IK, ranked by the existing soft area target,
         # original candidate cost, then physical drag distance. Measure area
@@ -284,7 +293,7 @@ class ThinPicking:
             queue, preview_counts = [], {}
             for fingertip, rule in itertools.product((False, True), (None, 'shoulder')):
                 mode = ('tip' if fingertip else 'pad') + '/' + (rule or 'nearest')
-                counts = preview_counts[mode] = {'depths': 0, 'supported': 0, 'geometric': 0}
+                counts = preview_counts[mode] = {'depths': 0, 'supported': 0, 'geometric': 0, 'blocked': 0}
                 hand = self.hands[candidate]
                 if fingertip:
                     hand = copy.copy(hand)
@@ -309,21 +318,36 @@ class ThinPicking:
                     if not supported_point(center + shift, polygon):
                         continue
                     counts['supported'] += 1
+                    # A blocked body sweep cannot be repaired by another pad
+                    # orientation. Prune it before expensive closure previews.
+                    if plate:
+                        blockers = swept_obstacles(convex, shift, sweep_obstacles)
+                        if blockers:
+                            counts['blocked'] += 1
+                            for obstacle in blockers:
+                                blocked = {'stage': 'target drag sweep', 'obstacle': obstacle,
+                                           'edge': edge.point.tolist(), 'arm': candidate}
+                                if blocked not in rejected:
+                                    rejected.append(blocked)
+                            continue
                     section, frame = exposed_section(world + shift, edge, [piece + shift for piece in convex])
                     virtual = replace(target, shape=section, offset=np.linalg.inv(pose) @ frame)
                     transform = pose @ virtual.offset
                     obstacles, supports = self.obstacles(candidate, virtual, transform)
                     stream = grasp_candidates(section, transform, hand, obstacles, preferred,
                         mass_center=center + shift, weight=self.grasp_weight(target),
-                        approach_distance=APPROACH, contact_surface=section)
+                        approach_distance=APPROACH, contact_surface=section,
+                        _placement_cache=self._grasp_placement_cache(
+                            section, transform, hand, obstacles, APPROACH, section),
+                        check_budget=lambda: remaining_wall(ctx))
                     first = next(stream, None)
                     if first is None:
                         continue
                     counts['geometric'] += 1
                     entry = (edge, candidate, fingertip, rule, hand, depth, float(exposed), shift,
                              polygon, virtual, supports, preferred, seed, stream)
-                    quality = _contact_area(section, transform, first.pose, self.hands[candidate],
-                                            first.info['contact_gap'], section=False)
+                    quality = _grasp_area(section, transform, first.pose, self.hands[candidate],
+                                          first.info['contact_gap'], surface=section)
                     heapq.heappush(queue, (max(0., HOLD_AREA - quality),
                                           first.cost, float(np.linalg.norm(shift)), next(serial),
                                           first, entry, 0))
@@ -334,9 +358,17 @@ class ThinPicking:
                 (edge, candidate, fingertip, rule, hand, depth, exposed, shift, polygon,
                  virtual, supports, preferred, seed, stream) = entry
                 search.mode = ('tip' if fingertip else 'pad') + '/' + (rule or 'nearest')
-                option = next(self.options(virtual, [candidate], set(), approach=preferred,
-                    then=(0., 0., height), mass_center=center + shift, candidate_budget=search,
-                    ik_seed=seed, geometric={candidate: (supports, (grasp,))}), None)
+                if plate:
+                    # Preparation moves the object to a future edge pose.
+                    # The ordinary final grasp can relocate the mobile base;
+                    # rejecting it here using only the current fixed base
+                    # would discard that supported route before any drag.
+                    # Pressure IK and every executed path remain checked.
+                    option = candidate, grasp, supports, self.model.q.copy(), None
+                else:
+                    option = next(self.options(virtual, [candidate], set(), approach=preferred,
+                        then=(0., 0., height), mass_center=center + shift, candidate_budget=search,
+                        ik_seed=seed, geometric={candidate: (supports, (grasp,))}), None)
                 if option is not None:
                     hint = option[1].pose[:3, 0].tolist(), option[3].tolist()
                     result = self._drag_landing(target, candidate, edge, hand, shift, depth, exposed,
@@ -353,9 +385,9 @@ class ThinPicking:
                 if checked + 1 < MAX_IK:
                     following = next(stream, None)
                     if following is not None:
-                        quality = _contact_area(virtual.shape, pose @ virtual.offset, following.pose,
-                                                self.hands[candidate], following.info['contact_gap'],
-                                                section=False)
+                        quality = _grasp_area(virtual.shape, pose @ virtual.offset, following.pose,
+                                              self.hands[candidate], following.info['contact_gap'],
+                                              surface=virtual.shape)
                         heapq.heappush(queue, (max(0., HOLD_AREA - quality),
                                               following.cost, float(np.linalg.norm(shift)), next(serial),
                                               following, entry, checked + 1))
@@ -423,11 +455,16 @@ class ThinPicking:
             if budget_span <= 0.:
                 raise ValueError('pressure patch has no extent along drag')
             command = shift.copy()
-            origin = (patch - pose[:3, 3]) @ pose[:3, :3]
+            if self.thin_geometry(target).kind == 'plate' and distance > budget_span:
+                command *= budget_span / distance
+            above = patch.copy()
+            if self.thin_geometry(target).kind == 'plate':
+                above[2] = (transform_points(pose, target.points))[:, 2].max() + CONTACT_TOLERANCE
+            origin = (above - pose[:3, 3]) @ pose[:3, :3]
             _, high = surface.interval(origin[None], pose[:3, :3].T @ [0., 0., 1.])
             if not np.isfinite(high[0]):
                 continue
-            top = patch[2] + high[0]
+            top = above[2] + high[0]
             press = build_grasp_pose([0., 0., -1.], flip * edge.tangent,
                                      [patch[0], patch[1], top + hand.tip() - CONTACT_TOLERANCE / 2])
             pressure_goal = translated(press, command)
@@ -486,7 +523,9 @@ class ThinPicking:
                 contact_started = True
                 before = ctx.poses()[target.body].copy()
                 before_com = ctx.env.center_of_mass(target.body)[0].copy()
-                if corrective:
+                if self.thin_geometry(target).kind == 'plate':
+                    feedback = self._plate_pressure_drag(target, candidate, press, end, direction, float(np.linalg.norm(command)))
+                elif corrective:
                     feedback = self._drag_with_load(target, candidate, press, end, direction, distance)
                 else:
                     feedback = self._observe_pressure_drag(target, candidate, press, end, direction)
@@ -494,7 +533,7 @@ class ThinPicking:
                 self.move_by_displacement(candidate, [0., 0., .05])
                 ctx.hold(.2)
                 final = ctx.poses()[target.body]
-                points = target.points @ final[:3, :3].T + final[:3, 3]
+                points = transform_points(final, target.points)
                 if points[:, 2].max() < ctx.scene.TABLE['height'] - CONTACT_TOLERANCE:
                     ctx.fail('thin object lost support', object_before=pose.tolist(),
                              object_after=final.tolist(), highest_point_m=float(points[:, 2].max()),
@@ -557,27 +596,12 @@ class ThinPicking:
     def _recheck_pressure_landing(self, target, arm, edge, hand, goal_com, depth,
                                   planned_depth, hint, prepared, search, fingertip, rule, rejected, height):
         ctx = self.ctx
-        geometry = ctx.geometry[target.obj]
-        body = target.body.split(':', 1)[1]
         pose = ctx.poses()[target.body]
         center = ctx.env.center_of_mass(target.body)[0]
         shift = goal_com - center
         shift[2] = 0.
-        pieces = [(transform, kind, data) for name, _, transform, kind, data in geometry.shapes if name == body]
-        surface = CollisionSurface(pieces)
-        patches, convex = [], []
-        for transform, kind, data in pieces:
-            if kind == 'sphere':
-                placed = pose @ transform
-                vertices = np.asarray(list(itertools.product((-data, data), repeat=3)))
-                convex.append(vertices @ placed[:3, :3].T + placed[:3, 3])
-            if kind != 'convex':
-                continue
-            placed = pose @ transform
-            points = data @ placed[:3, :3].T + placed[:3, 3]
-            convex.append(points)
-            patches.append((points.mean(0), points))
-        world = target.points @ pose[:3, :3].T + pose[:3, 3]
+        surface, patches, convex = self.pressure_geometry(target, pose)
+        world = transform_points(pose, target.points)
         polygon = support_polygon([piece + shift for piece in convex], ctx.scene.TABLE, CONTACT_TOLERANCE)
         if not supported_point(center + shift, polygon):
             ctx.fail('thin pressure landing lost support')
@@ -587,12 +611,22 @@ class ThinPicking:
         obstacles, supports = self.obstacles(arm, virtual, transform)
         stream = grasp_candidates(section, transform, hand, obstacles, np.asarray(hint[0]),
             mass_center=center + shift, weight=self.grasp_weight(target),
-            approach_distance=APPROACH, contact_surface=section)
+            approach_distance=APPROACH, contact_surface=section,
+            _placement_cache=self._grasp_placement_cache(
+                section, transform, hand, obstacles, APPROACH, section),
+            check_budget=lambda: remaining_wall(ctx))
         ctx.note('thin pressure local landing recheck', arm=arm, retries=search.pressure_retries,
                  search_candidates=search.checked)
-        option = next(self.options(virtual, [arm], set(), approach=np.asarray(hint[0]),
-            then=(0., 0., height), mass_center=center + shift, candidate_budget=search,
-            ik_seed=np.asarray(hint[1]), geometric={arm: (supports, stream)}), None)
+        if self.thin_geometry(target).kind == 'plate':
+            # Keep the already selected mobile-base landing. Rechecking all
+            # fixed-base IK branches before every small physical stroke
+            # repeats work which the final grasp must do at its live pose.
+            grasp = next(stream, None)
+            option = None if grasp is None else (None, grasp, None, np.asarray(hint[1]))
+        else:
+            option = next(self.options(virtual, [arm], set(), approach=np.asarray(hint[0]),
+                then=(0., 0., height), mass_center=center + shift, candidate_budget=search,
+                ik_seed=np.asarray(hint[1]), geometric={arm: (supports, stream)}), None)
         if option is None:
             ctx.fail('thin pressure landing no longer reachable')
         hint = option[1].pose[:3, 0].tolist(), option[3].tolist()
@@ -602,6 +636,87 @@ class ThinPicking:
         if result is None:
             ctx.fail('thin pressure has no new contact')
         return result
+
+    def _plate_pressure_drag(self, target, arm, press, end, direction, distance):
+        """Stop a plate press on measured bearing, retaining its loaded drive target.
+
+        A thick rigid plate can bear the fingertip before the penetrated contact
+        goal reaches the ordinary free-space joint tolerance. Pressure contact
+        terminates this approach; the unchanged solver still checks every path.
+        """
+        ctx, solver = self.ctx, self.solvers[arm]
+        contacts = ctx.env.contacts
+        load = PressureLoad(target.body, ctx.spec.arms[arm].finger_links,
+                            contacts.dt, self.grasp_weight(target), lambda: contacts.time)
+        feedback = {'mode': 'plate measured bearing', 'samples': [], 'corrections_m': []}
+        with contacts.observe_impulses(load.record):
+            path = solver._plan('plate press', lambda: self.model.plan_screw(
+                arm, press, world=True, time_step=DT, lift=True))
+            def bearing():
+                sample = load.read()
+                feedback['samples'].append({'stage': 'press', 'step': ctx.steps, **sample})
+                return not sample['bearing']
+            completed = solver.follow(path, monitor=bearing)
+            if completed:
+                ctx.fail('plate pressure has no bearing', feedback=feedback)
+            before = ctx.env.center_of_mass(target.body)[0].copy()
+            # Contact may start above the intended loaded reference. Complete
+            # the checked press drive without waiting for free-space joint
+            # arrival against the rigid plate.
+            self._pressure_correction(arm, press, command_only=True)
+            # A broad plate adds table friction under the fingertip load.
+            # Establish a finite preload before a tangential stroke; merely
+            # exceeding the object's weight can still let the finger slide.
+            for _ in range(MAX_REGRASPS):
+                load.read()
+                ctx.step()
+                sample = load.read()
+                feedback['samples'].append({'stage': 'preload', 'step': ctx.steps, **sample})
+                if sample['normal_impulse_ns'] >= 4 * load.minimum * load.substeps:
+                    break
+                press = press.copy()
+                press[2, 3] -= CONTACT_TOLERANCE / 2
+                self._pressure_correction(arm, press, command_only=True)
+                feedback['corrections_m'].append(CONTACT_TOLERANCE / 2)
+            start = self._commanded_pressure_start(arm)
+            # Continue from the loaded joint reference, not the deflected
+            # measured joints, so tangential motion retains the contact load.
+            origin = self.model.tcp(arm, q=start, world=True)
+            destination = translated(origin, direction * distance)
+            for attempt in range(MAX_REGRASPS + 1):
+                path = solver._plan('plate drag', lambda: self.model.plan_screw(
+                    arm, destination, start, world=True, time_step=DT, lift=True))
+                tcp_before = ctx.tcp(arm)[:3, 3].copy()
+                com_before = ctx.env.center_of_mass(target.body)[0].copy()
+                stop = None
+                applied = 0
+                def progress():
+                    nonlocal stop, applied
+                    applied += 1
+                    along = float((ctx.env.center_of_mass(target.body)[0] - before) @ direction)
+                    slip = float(((ctx.tcp(arm)[:3, 3] - tcp_before) -
+                                  (ctx.env.center_of_mass(target.body)[0] - com_before)) @ direction)
+                    sample = load.read()
+                    feedback['samples'].append({'stage': 'drag', 'step': ctx.steps,
+                                                'object_along_m': along, 'slip_m': slip, **sample})
+                    stop = ('target reached' if along >= distance - CONTACT_TOLERANCE else
+                            'sliding' if slip > .01 else
+                            'command completed' if applied >= len(path['position']) else None)
+                    return stop is None
+                solver.follow(path, monitor=progress)
+                if stop != 'sliding' or attempt == MAX_REGRASPS:
+                    feedback['stop'] = stop
+                    break
+                # Correct load at the live contact, keeping the horizontal
+                # goal. This is a deliberate pressure command, not a relaxed
+                # collision or joint-arrival tolerance.
+                correction = self.model.tcp(arm, self._commanded_pressure_start(arm), world=True)
+                correction[2, 3] -= CONTACT_TOLERANCE / 2
+                self._pressure_correction(arm, correction, command_only=True)
+                feedback['corrections_m'].append(CONTACT_TOLERANCE / 2)
+                start = self._commanded_pressure_start(arm)
+                destination[2, 3] = correction[2, 3]
+        return feedback
 
     def _observe_pressure_drag(self, target, arm, press, end, direction):
         """Observe a first contact without mistaking preload release for failure.
@@ -641,7 +756,7 @@ class ThinPicking:
             start[indices] = robot.data.joint_pos_target[0, ids].cpu().numpy()
         return start
 
-    def _pressure_correction(self, arm, target):
+    def _pressure_correction(self, arm, target, command_only=False):
         """IK and checked joint interpolation resolve a sub-mm loaded correction.
 
         The screw planner's existing 1 mm arrival tolerance cannot express a
@@ -665,7 +780,13 @@ class ThinPicking:
                                      solver.planner.joint_acc_limits)
             result['checks'] = checks
             return self.model._arm_path(arm, result, lift=True)
-        solver.follow(solver._plan('pressure correction', plan))
+        path = solver._plan('pressure correction', plan)
+        applied = 0
+        def command_sent():
+            nonlocal applied
+            applied += 1
+            return applied < len(path['position'])
+        solver.follow(path, monitor=command_sent if command_only else None)
 
     def _drag_with_load(self, target, arm, press, end, direction, distance):
         """Keep measured bearing and the applied joint reference through a drag."""
@@ -763,7 +884,7 @@ class ThinPicking:
     def exposed_target(self, target, edge):
         """Observed exposed material of the whole held body's collision union."""
         pose = self.ctx.poses()[target.body]
-        world = target.points @ pose[:3, :3].T + pose[:3, 3]
+        world = transform_points(pose, target.points)
         geometry = self.ctx.geometry[target.obj]
         body = target.body.split(':', 1)[1]
         pieces = [data @ (pose @ transform)[:3, :3].T + (pose @ transform)[:3, 3]
@@ -776,8 +897,22 @@ class ThinPicking:
         previous = getattr(self, '_fingertip_candidates', False)
         self._fingertip_candidates = prepared['fingertip']
         try:
-            option = next(self.options(exposed, [prepared['arm']], set(), approach=-prepared['edge'].outward,
-                                       then=(0., 0., height)), None)
+            if self.thin_geometry(target).kind == 'plate':
+                # A supported plate need not be dragged all the way to the
+                # arm's initial shoulder. Once real exposed material admits
+                # a grip, ordinary grasp can relocate the mobile base.
+                arm = prepared['arm']
+                transform = self.ctx.poses()[target.body] @ exposed.offset
+                obstacles, _ = self.obstacles(arm, exposed, transform)
+                option = next(grasp_candidates(exposed.shape, transform, self.candidate_hand(exposed, arm),
+                    obstacles, -prepared['edge'].outward, mass_center=self.grasp_center_of_mass(target, None),
+                    weight=self.grasp_weight(target), approach_distance=APPROACH, contact_surface=exposed.shape,
+                    _placement_cache=self._grasp_placement_cache(
+                        exposed.shape, transform, self.candidate_hand(exposed, arm), obstacles, APPROACH, exposed.shape),
+                    check_budget=lambda: remaining_wall(self.ctx)), None)
+            else:
+                option = next(self.options(exposed, [prepared['arm']], set(), approach=-prepared['edge'].outward,
+                                           then=(0., 0., height)), None)
         finally:
             self._fingertip_candidates = previous
         available = option is not None
@@ -803,8 +938,32 @@ class ThinPicking:
             return self.grasp_at_edge(target, arm, height, need, base, closure_only_record)
         except Unreachable as error:
             self.ctx.note('thin edge route unreachable', reason=error.reason, details=error.details)
-            if thin.kind == 'filament':
+            if thin.kind == 'plate' and error.reason == 'no reachable pressure drag':
+                blocked = error.details['rejected']
+                if (isinstance(blocked, list)
+                        and all(isinstance(item, dict) and item.get('stage') == 'target drag sweep'
+                                for item in blocked)):
+                    edges = []
+                    for item in blocked:
+                        edge = item['edge']
+                        row = next((row for row in edges if row['edge'] == edge), None)
+                        if row is None:
+                            row = {'edge': edge, 'clear_objects': []}
+                            edges.append(row)
+                        obj = item['obstacle'].split(':', 1)[0]
+                        if obj not in row['clear_objects']:
+                            row['clear_objects'].append(obj)
+                    self.ctx.fail('plate edge route blocked; clear the obstacles for one listed edge and retry pick',
+                                  Unreachable, edges=edges, rejected=blocked)
+            if thin.kind in ('filament', 'plate'):
                 raise
+        except ExpertFailed as error:
+            if thin.kind != 'sheet' or error.reason != 'thin preparation search exhausted':
+                raise
+            # Retain edge-first ordering and its finite preparation allowance.
+            # A checked fingertip hold is a distinct route, not a restart of
+            # the exhausted pressure-drag search.
+            self.ctx.note('thin sheet preparation exhausted; try fingertip pinch', details=error.details)
         return self.pinch_thin(target, arm, height, need, base, closure_only_record)
 
     def grasp_at_edge(self, target, arm, height, need, base, closure_only_record):
@@ -813,6 +972,11 @@ class ThinPicking:
         prepared = self.slide_to_edge(target, arm, height)
         edge = prepared['edge']
         exposed = self.exposed_target(target, edge)
+        if arm is None and self.thin_geometry(target).kind == 'plate':
+            # Retain the pressure arm's selected edge branch. A second arm
+            # reaching across it can close successfully but leave no room for
+            # the supported extraction; the mobile base can still relocate.
+            arm = prepared['arm']
         previous = getattr(self, '_fingertip_candidates', False)
         self._fingertip_candidates = prepared['fingertip']
         try:
@@ -853,7 +1017,8 @@ class ThinPicking:
                 try:
                     self.move_by_displacement(arm, outward * distance)
                 except PlanningFailed as error:
-                    if error.reason != 'joint_limit':
+                    if error.reason != 'joint_limit' and not (error.reason == 'collision'
+                            and self.thin_geometry(target).kind == 'plate'):
                         raise
                     # Extraction is an optional waypoint. Both fixed-torso
                     # and free-torso straight plans failed before execution;

@@ -30,6 +30,9 @@ def transform_points(transform, points):
 class AssetGeometry:
     def __init__(self, model, centers_of_mass=None, body_mapping=None):
         model = json.loads(Path(model).read_text()) if not isinstance(model, dict) else model
+        self.max_drop_m = float(model.get('max_drop_m', .15))
+        if not np.isfinite(self.max_drop_m) or self.max_drop_m < 0.:
+            raise ValueError('max_drop_m must be a finite nonnegative distance')
         self.shapes, self.rest = model_shapes(model)
         self.joints = {joint['name']: joint for joint in model.get('joints', [])}
         if body_mapping is not None:
@@ -44,6 +47,8 @@ class AssetGeometry:
                            for name, joint in self.joints.items()
                            if body_mapping[joint['body1']]['body'] != body_mapping[joint['body2']]['body']}
         self._hulls = None      # collision hulls in their shape frames, built once
+        self._candidate_surfaces = {}  # body/offset -> candidate-frame contact surface
+        self._grasp_surfaces = {}      # body -> measured closure surface
         # A one-body asset's authored centre of mass (``{body: point in its frame}``), in the asset
         # frame; None: uniform density.
         self.center_of_mass = None

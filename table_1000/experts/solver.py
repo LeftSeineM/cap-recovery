@@ -20,7 +20,7 @@ from table_1000.common.timing import timed
 
 import numpy as np
 
-from table_1000.experts.context import DT, ExpertFailed, steps
+from table_1000.experts.context import DT, ExpertFailed, remaining_wall, steps
 from table_1000.planning.world import PlanningScene, asset_objects, box_object, pose
 
 # Free-space (RRTConnect) plans keep this clearance from padded objects (its edges are checked
@@ -35,6 +35,7 @@ GRIPPER_TIME = .6         # s for the fingers to close or open
 OPEN_GAP = .08            # m
 GRIPPER_THERE = .002     # m from a commanded opening the fingers count as there
 TORSO_STILL = .001        # m of torso lift travel below which a path leaves it where it was
+LOCAL_LIFT = .15          # m: plan small shared-lift changes before retracting free arms
 # Fingers starting within the padding of an object they are not meant to touch
 # (a hand that just let go of a handle) back off
 # straight first, along the approach or up, by the first of DEPARTS that leaves the padding.
@@ -65,6 +66,7 @@ class MotionSolver:
         self.timings = {'planning_s': 0., 'executing_s': 0.}
         self.attachments = {}
         self.overlaps = []      # pairs allowed for the plan being made (see _plan)
+        self.lock_lift = False  # a second hand is supporting an external body
 
     # -- planning world --------------------------------------------------------------
     def add_box(self, name, size, transform):
@@ -97,6 +99,20 @@ class MotionSolver:
     @timed('world_update')
     def sync(self):
         """Move planning objects to their live poses (and all of them where the base moved)."""
+        # Each arm has a complete robot in its own world. The other hand's
+        # declared hold contacts remain legitimate when this arm plans too.
+        # Borrow only existing finger/attachment declarations; never suppress
+        # contacts with unrelated objects or links, and revoke on release.
+        shared = set()
+        skills = getattr(self.ctx, '_skills', None)
+        for arm in getattr(skills, 'held', {}):
+            if arm == self.arm.name:
+                continue
+            other = self.ctx.solvers[arm]
+            names = other.attachments.keys() & self.world.objects.keys()
+            fingers = set(other.arm.finger_links)
+            shared.update(pair for pair in other.world.permissions if pair & names and pair & fingers)
+        self.world.set_shared_permissions(shared)
         frame = np.linalg.inv(self.model.base)
         poses = self.ctx.poses()
         if not np.allclose(frame, self.world.frame, atol=1e-6):
@@ -121,10 +137,19 @@ class MotionSolver:
             name, self.planner.robot.get_name(), self.planner.link_name_2_idx[self.arm.tcp_link], pose(relative),
             list(self.arm.finger_links))
         self.attachments[name] = np.asarray(relative).copy()
+        self._restore_permissions(name)
 
     def detach(self, name):
         self.attachments.pop(name)
         self.planner.planning_world.detach_object(name, False)
+        self._restore_permissions(name)
+
+    def _restore_permissions(self, name):
+        # MPlib recreates ACM entries when attaching or detaching. Keep the
+        # scene's declarations until their owner revokes them.
+        others = {other for pair in self.world.permissions if name in pair for other in pair if other != name}
+        if others:
+            self.planner.planning_world.get_allowed_collision_matrix().set_entry([name], sorted(others), True)
 
     def carry(self, names, contacts):
         """Attach planning objects moved through a joint (a drawer pulled by its handle) so they
@@ -153,6 +178,7 @@ class MotionSolver:
     # -- planning ------------------------------------------------------------------------
     @timed('motion_plan')
     def _plan(self, kind, function, goals=(), problem=None):
+        remaining_wall(self.ctx)
         self.world.set_padding(PADDING if kind == 'rrt' else 0.)
         self.sync()
         # Find overlaps caused by padding at the endpoints. RRT uses the affected
@@ -247,15 +273,23 @@ class MotionSolver:
             return {'status': 'path collision', 'reason': 'path collision', 'collisions': pairs}
         return result
 
-    def move_to_pose_with_RRTConnect(self, target, planning_time=3., attempts=3, lift=False, goals=None, retime=None):
+    def move_to_pose_with_RRTConnect(self, target, planning_time=3., attempts=3, lift=False, goals=None, retime=None,
+                                    local_lift=False):
         """Plan to an IK goal of world TCP pose ``target`` (or to ``goals``, full configurations of
         the planning model) with RRTConnect and follow it; an approximate or colliding path is
         re-planned up to ``attempts`` times, each with twice the time of the one before. ``lift``
         ``retime`` optionally transforms the validated trajectory before execution.
         ``lift`` lets the torso lift move as well: where the goal leaves it where it is (or ``target`` has
-        an IK solution that does), the plan holds it first, once, and frees it only if that fails."""
+        an IK solution that does), the plan holds it first, once, and frees it only if that fails.
+        ``local_lift`` keeps the other arm out for small lift changes after a missed-grasp retreat;
+        other approaches retain the ready posture used by contact preparation."""
         skill = getattr(self.ctx, '_skills', None)
-        if lift and skill is not None:
+        lift = lift and not self.lock_lift
+        here = self.model.q[self.model.lift_indices()] if lift else None
+        large = lift and goals is not None and all(
+            np.max(np.abs(np.asarray(goal)[self.model.lift_indices()] - here)) > LOCAL_LIFT for goal in goals)
+        clear_first = lift and (not local_lift or large)
+        if clear_first and skill is not None:
             # The torso moves both arms. Clear its free arm before this arm
             # approaches contact, while an escape is still possible.
             skill.stow([arm for arm in skill.arms if arm != self.arm.name], why='shared torso lift')
@@ -273,7 +307,15 @@ class MotionSolver:
             except PlanningFailed as error:
                 if not error.reason.startswith(('RRTConnect', 'path collision', 'IK Failed')):
                     raise
-        self._rrt(target, planning_time, attempts, free[-1], goals, **timing)
+        try:
+            self._rrt(target, planning_time, attempts, free[-1], goals, **timing)
+        except PlanningFailed:
+            # The ordinary full-robot collision/path checks also cover the
+            # other arm as the torso moves. Retract only after that plan fails.
+            if (not lift or clear_first or skill is None or not skill.stow(
+                    [arm for arm in skill.arms if arm != self.arm.name], why='shared torso path blocked')):
+                raise
+            self._rrt(target, planning_time, attempts, free[-1], goals, **timing)
 
     @timed('departure_check')
     def touching(self):
@@ -304,12 +346,17 @@ class MotionSolver:
                 return
 
     def _rrt(self, target, planning_time, attempts, lift, goals, retime=None):
+        lift = lift and not self.lock_lift
         for attempt in range(attempts):
+            remaining = remaining_wall(self.ctx)
+            budget = planning_time * 2 ** attempt
+            if remaining is not None:
+                budget = min(budget, remaining)
             try:
                 result = self._plan('rrt', lambda: self._validated(self.model.plan_rrt(
-                    self.arm.name, target, world=True, time_step=DT, planning_time=planning_time * 2 ** attempt,
+                    self.arm.name, target, world=True, time_step=DT, planning_time=budget,
                     lift=lift, goals=goals, check=self.check_geometry)), goals=list(goals or []),
-                    problem=dict(target=target, world=True, time_step=DT, planning_time=planning_time * 2 ** attempt,
+                    problem=dict(target=target, world=True, time_step=DT, planning_time=budget,
                                  lift=lift, goals=goals, attempt=attempt, attempts=attempts, validation_step=VALIDATION_STEP))
                 break
             except PlanningFailed as error:
@@ -320,6 +367,7 @@ class MotionSolver:
     def move_to_pose_with_screw(self, target, lift=False):
         """Move the TCP along a straight screw path to world pose ``target``; ``lift`` moves the
         torso lift as well."""
+        lift = lift and not self.lock_lift
         self.follow(self._plan('screw', lambda: self.model.plan_screw(self.arm.name, target, world=True,
                                                                       time_step=DT, lift=lift),
                                problem=dict(target=target, world=True, time_step=DT, lift=lift, attempts=1)))

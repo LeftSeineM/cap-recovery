@@ -15,6 +15,7 @@ arms, moves only with the giving arm, before the receiving one reaches.
 """
 
 import itertools
+from dataclasses import replace
 
 from table_1000.common.timing import timed
 
@@ -22,7 +23,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from table_1000.experts.grasps import grasp_candidates, standoff
-from table_1000.experts.skills.common import APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, Unmet, collisions, normalized
+from table_1000.experts.skills.common import APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, Unmet, collisions, normalized, upright_need
 from table_1000.experts.solver import PlanningFailed
 from table_1000.experts.problems import decision, mark
 
@@ -96,11 +97,12 @@ class Handing:
             obstacles, _ = self.obstacles(to, target, transform)
             obstacles.append((self.hands[giver].fcl(give, gap), 0.))
             preferred = normalized(transform[:3, 3] - self.shoulder(to))
+            end_grasps = upright_need(need)
             if not asked:
                 asked = True
                 holds = itertools.islice(grasp_candidates(target.shape, transform, self.hands[to], obstacles, preferred,
                                                           mass_center=com, weight=self.grasp_weight(target),
-                                                          approach_distance=APPROACH), NEED_HOLDS)
+                                                          approach_distance=APPROACH, end_grasps=end_grasps), NEED_HOLDS)
                 if not any(need.accepts(to, np.linalg.inv(grasp.pose) @ pose) for grasp in holds):
                     mark(self, 'need', outcome='rejected')
                     self.rejected['need'] += NEED_HOLDS
@@ -111,7 +113,7 @@ class Handing:
                 found = None
                 for count, grasp in enumerate(grasp_candidates(target.shape, transform, self.hands[to], obstacles,
                                                                preferred, mass_center=com, weight=self.grasp_weight(target),
-                                                               approach_distance=APPROACH)):
+                                                               approach_distance=APPROACH, end_grasps=end_grasps)):
                     if count >= MAX_RECEIVING_IK or checked >= MAX_HANDOVER_IK:
                         break
                     checked += 1
@@ -153,14 +155,23 @@ class Handing:
         """Hand the held ``obj`` to arm ``to`` (default: the other one ``need`` takes), held as
         ``need`` (an :class:`~table_1000.experts.skills.chain.InHand`) asks; see the module
         docstring. :class:`Unmet` where no handover is in reach. Returns ``{'arm', 'giver', 'grasp',
-        'tcp_object', 'pose'}`` (the object's where it was handed over)."""
+        'tcp_object', 'pose'}`` (the object's where it was handed over).
+        Loaded rim grasps are unsupported: keep the current arm and place the
+        container before changing hands; handover turns can spill its contents."""
         ctx = self.ctx
         giver = self.holding(obj)
         if giver is None:
             raise ValueError(f'{obj!r} is not held')
         if to is None:
             to = next(arm for arm in (need.arms if need is not None else self.arms) if arm != giver)
-        target = self.held[giver]['target']
+        held = self.held[giver]
+        if held['riders']:
+            raise ValueError('loaded container handover is unsupported; keep the current arm and place it before changing hands')
+        target = held['target']
+        if held['carried']:
+            # A real-part grip still transfers the asset's entire collision
+            # assembly in receiver previews and after the giving hand releases.
+            target = replace(target, names=list(dict.fromkeys([*target.names, *held['carried']])))
         giving, receiving = self.solvers[giver], self.solvers[to]
         # In the receiving arm's world the object is not held: it touches the giving fingers.
         receiving.world.allow(target.names, ctx.spec.arms[giver].finger_links)
@@ -199,11 +210,15 @@ class Handing:
         if not checked['held']:
             ctx.fail('object not handed over', finger_gap=gap, width=grasp.width)
         poses = ctx.poses()
+        previous_permissions = set(receiving.world.permissions)
         for name in target.names:
             receiving.attach(name, poses[receiving.world.objects[name].body])
+        receiving.world.allow(target.names, target.names)
         chosen = {'pose': taken.tolist(), 'open_gap': grasp.open_gap, 'width': grasp.width,
                   'backoff': grasp.backoff, 'cost': grasp.cost, **grasp.info}
-        self.held[to] = {'target': target, 'supports': [], 'grasp': chosen}
+        self.held[to] = {'target': target, 'supports': [], 'grasp': chosen,
+                        'carried': [], 'riders': [], 'carry_contacts': [],
+                        'carry_permissions': [list(pair) for pair in receiving.world.permissions - previous_permissions]}
         # Now in the giving arm's world the object touches the receiving fingers (as it backs out, and on
         # while they hold it).
         giving.world.allow(target.names, ctx.spec.arms[to].finger_links)

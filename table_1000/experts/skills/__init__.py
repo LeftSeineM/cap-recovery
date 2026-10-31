@@ -16,6 +16,16 @@ planned) when it is not. Lower-level moves stay available through
     p = skills.pick(ctx, 'pen')                                              # grasp, then lift
     skills.place(ctx, 'pen', (table_frame, (x0, y0), (x1, y1)), near=(x, y, table_height))
 
+With only an ordinary object name, ``pick`` and ``grasp`` use its whole-body
+target. Geometric containers retain their rim/part search, and upright pick
+lookahead keeps its existing whole-body-first search. Asset grasp acceptance
+enumerates real parts independently. Explicit ``part`` or ``shape`` selects
+only that target.
+Upright hollow collision geometry adds wall-top pinches from above; a closed
+top uses the compact exterior envelope. Free part grasps carry the asset's
+remaining planning pieces, and a container rim also carries touching objects
+already geometrically inside it. Physical bodies move only through simulation.
+
 What is grasped is an object of the scene (an asset, by name), or a part or body
 of it: its shape is the collision box of that part in the frame of its body, or
 one given (a :class:`~table_1000.experts.grasps.Box` or
@@ -61,6 +71,13 @@ unchanged drive. See ``docs/specs/thin-grasp.md``.
 For thin targets, ``pick`` rejects non-default ``point``, ``approach`` and ``max_angle`` with
 ``ValueError`` (remove them); ``grasp`` rejects an unprepared flat body on the table (use ``pick``
 or ``slide_to_edge`` then ``grasp``), while overhanging or already held thin bodies are allowed.
+Broad plates whose thickness fits the hand but whose footprint does not first
+try ordinary authored features, then use the edge route. Their preparation
+uses measured pressure and finite slip corrections; unsupported explicit
+point/approach/max_angle arguments must be removed before edge preparation.
+When all plate sweeps are blocked, ``Unreachable.details['edges']`` lists each
+edge and its ``clear_objects``. Clear one listed route, then retry ``pick``;
+preparation does not rearrange obstacles or plan a curved table drag.
 
 **slide_to_edge** -- the sheet preparation alone: press its top collision
 surface with the closed fingertips, drag while its COM stays supported, then
@@ -91,6 +108,12 @@ normal every ``PLACE_TURN_STEP`` are ranked nearest a given point, then least tu
 IK screens them above and at the release (``MAX_PLACE_IK``), and the first of those that has a motion
 (``MAX_PLACES`` planned) is taken: above it, straight down to ``clearance`` over the
 surface, then :func:`release`.
+``orientation='upright'`` aligns a slender body's long axis with the support
+normal, ``'flat'`` a planar body's short axis, and ``'insert'`` tries each axis
+for narrow-mouth placement. Default None preserves tilt. For a compatible
+grasp use ``chain([Pick(obj), Place(obj, region, orientation='upright')])``;
+semantic ``inside_region(..., support=previous, orientation='flat')`` uses
+the live top of a previous object inside the container to build a stack.
 
 **make_room** -- move the base to where given TCP poses (each a pose, or the poses along a
 straight move) are reachable with every joint a margin inside its limits: where it stands
@@ -103,6 +126,8 @@ started.
 **handover** -- the held object passed to the other hand, held as the next action needs
 (:mod:`~table_1000.experts.skills.handover`, after WRS): the giving arm brings it in front of the
 body, the receiving one grasps it, the giving one lets go.
+Loaded container rim holds reject handover: keep the current arm and place
+the container before changing hands, since handover turns can spill contents.
 
 **ready** -- the arms that hold nothing back at the robot's declared ready pose, using
 their initial values for undeclared joints. The shared torso stays where it is.
@@ -130,18 +155,21 @@ The skills are one :class:`Skills` per context (``ctx.skills()``), put together 
 (the base, ready); ``common`` holds what they share.
 """
 
+from dataclasses import replace
+
 import numpy as np
 
 from table_1000.experts.context import ExpertFailed, Unreachable
 from table_1000.experts.grasps import Hand
 from table_1000.experts.skills.base import Base
 from table_1000.experts.skills.chain import InHand, Pick, Place, chain
-from table_1000.experts.skills.common import Unmet
+from table_1000.experts.skills.common import Unmet, upright_need
 from table_1000.experts.skills.grasping import LIFT, Grasping
 from table_1000.experts.skills.handover import Handing
 from table_1000.experts.skills.motion import Motion
-from table_1000.experts.skills.placing import PLACE_ABOVE, PLACE_CLEARANCE, PLACE_MARGIN, PLACE_STEP, Placing
+from table_1000.experts.skills.placing import PLACE_ABOVE, PLACE_CLEARANCE, PLACE_MARGIN, PLACE_STEP, PLACE_TURNS, Placing
 from table_1000.experts.skills.thin import ThinPicking
+from table_1000.experts.skills.targets import targets as enumerate_targets, target_groups, rim_sections
 
 ATTEMPTS = 3            # tries of a step under retry
 
@@ -176,13 +204,20 @@ class Skills(ThinPicking, Grasping, Handing, Motion, Placing, Base):
                     self.home[self.model.index[name]] = rest[name]
 
         self.start_base = np.asarray(ctx.start['base_pose'], dtype=float) if ctx.spec.base else None
-        self.held = {}      # arm -> {'target', 'supports', 'grasp'}
+        self.held = {}      # arm -> target, supports, grasp, carried, riders, carry_contacts, carry_permissions
+        self.braced = False  # only the manipulating arm remains selectable during a brace
+        self.brace_seed = None
         self.log, self.rejected = [], {}
         self.reaches = {}   # arm -> its reach (see Base.arm_reach)
+        # Repeated grasp phases revisit the same target pose and scene while
+        # changing only the preferred approach or IK seed. Keep expensive
+        # placed-contact results while each caller orders and screens candidates.
+        self._grasp_placement_caches = {}
 
 
 def _skills(ctx):
     return ctx.skills()
+
 
 
 def make_room(ctx, poses, arms=None, path=False):
@@ -235,6 +270,45 @@ def relaxed(limits, attempt):
     raise unmet or last
 
 
+def _rim_approach(group, approach, angle):
+    """Wall tops enter from above; other shapes retain the declared preferences."""
+    if (group[0].rim or group[0].container) and approach is None:
+        return (0., 0., -1.), np.radians(15.) if angle is None else angle
+    return approach, angle
+
+
+def _target_attempts(skills, obj, part, shape, offset, body, attempt, preferred=None):
+    """Keep ordinary expert targets whole; specialized searches retain their groups."""
+    unmet = None
+    def groups():
+        if preferred is not None:
+            yield [preferred]
+        explicit = any(value is not None for value in (part, shape, offset, body))
+        ordinary = None
+        if preferred is None and not explicit:
+            ordinary = skills.target(obj)
+            geometry = skills.ctx.geometry.get(obj)
+            if geometry is not None and not geometry.solid(None, narrow=0.) and hasattr(skills, 'hands'):
+                rim_sections(skills, obj, ordinary, geometry)
+        if ordinary is not None and not ordinary.container:
+            # Asset acceptance calls its own target enumeration directly. A
+            # scene expert's ordinary pick must keep the established body
+            # frame and avoid searching every authored part head first.
+            yield [ordinary]
+        else:
+            yield from target_groups(list(enumerate_targets(skills, obj, part, shape, offset, body)))
+    for group in groups():
+        try:
+            return attempt(group)
+        except Unreachable as error:
+            if error.reason != 'no reachable grasp':
+                raise
+            if isinstance(error, Unmet):
+                unmet = error
+            last = error
+    raise unmet or last
+
+
 def grasp(ctx, obj, part=None, *, arm=None, shape=None, offset=None, body=None, point=None, approach=None, then=None,
           max_angle=None):
     """Grasp scene object ``obj`` (or its ``part``); see the module docstring. ``max_angle`` (rad): only
@@ -243,8 +317,11 @@ def grasp(ctx, obj, part=None, *, arm=None, shape=None, offset=None, body=None, 
     :func:`slide_to_edge` then :func:`grasp`; overhanging or already held thin objects are allowed.
     """
     skills = _skills(ctx)
-    target = skills.target(obj, part, shape, offset, body)
-    return relaxed(max_angle, lambda angle: skills.grasp(target, arm, point, approach, then, angle))
+    def attempt(group, angle):
+        direction, angle = _rim_approach(group, approach, angle)
+        return skills.grasp(group, arm, point, direction, then, angle)
+    return _target_attempts(skills, obj, part, shape, offset, body,
+        lambda group: relaxed(max_angle, lambda angle: attempt(group, angle)))
 
 
 def pick(ctx, obj, part=None, *, arm=None, shape=None, offset=None, body=None, point=None, approach=None, height=LIFT,
@@ -256,8 +333,31 @@ def pick(ctx, obj, part=None, *, arm=None, shape=None, offset=None, body=None, p
     ``max_angle`` because preparation chooses its own grasp geometry; remove these arguments.
     """
     skills = _skills(ctx)
-    target = skills.target(obj, part, shape, offset, body)
-    return relaxed(max_angle, lambda angle: skills.pick(target, arm, point, approach, height, angle, need, base))
+    def attempt(group, angle):
+        direction, angle = _rim_approach(group, approach, angle)
+        return skills.pick(group, arm, point, direction, height, angle, need, base)
+    # Upright lookahead needs an end contact on the whole carried body. Try
+    # its body-axis frame before part heads and the minimum-volume envelope:
+    # the latter can roll a slender box and remove a table-clear pinch from
+    # the discrete face/approach samples. Explicit target overrides keep priority.
+    preferred = (skills.target(obj) if upright_need(need) and
+                 all(value is None for value in (part, shape, offset, body)) else None)
+    try:
+        return _target_attempts(skills, obj, part, shape, offset, body,
+            lambda group: relaxed(max_angle, lambda angle: attempt(group, angle)), preferred)
+    except Unreachable as failure:
+        recipe = (need.recipe or {}) if need is not None else {}
+        if (failure.reason != 'no reachable grasp' or not (recipe.get('gravity_release') and recipe.get('hanging'))
+                or skills.holding(obj) is not None):
+            raise
+        # End pinches are useful for hanging, but a central hold can also
+        # clear the release channel. Keep that same geometric requirement
+        # while falling back to the ordinary contact candidates.
+        ctx.note('try ordinary contacts for bounded release hold', obj=obj, reason=failure.reason)
+        need = replace(need, recipe={**recipe, 'hanging': False})
+        preferred = skills.target(obj) if all(value is None for value in (part, shape, offset, body)) else None
+        return _target_attempts(skills, obj, part, shape, offset, body,
+            lambda group: relaxed(max_angle, lambda angle: attempt(group, angle)), preferred)
 
 
 def move_by_displacement(ctx, arm, x=0., y=0., z=0., drag=None, least=1.):
@@ -272,6 +372,25 @@ def push(ctx, obj, part=None, *, direction, distance, arm=None, shape=None, offs
     return skills.push(skills.target(obj, part, shape, offset, body), direction, distance, arm)
 
 
+def braced_drawer(ctx, obj, name, amount=None):
+    """Open a slider to absolute opening amount (m), or close it when amount is None.
+
+    Normally called as semantic.open(..., brace=True) or semantic.close(...,
+    brace=True). The other empty hand presses actual housing material first,
+    retracting after the pull/push. Both hands must be empty at entry; place held
+    objects first. No support/reachable coupled motion raises Unreachable;
+    there is no silent unbraced fallback. Every control step checks housing
+    translation <=5 mm, rotation <=2 degrees, and other sliders <=5 mm from
+    their lower limit, including approach and retreat. No physical parameters
+    change. The whole operation is one replayable atomic skill, so replay also
+    reconstructs the support hand and stability checks.
+    """
+    from table_1000.experts.skills import semantic
+    if amount is None:
+        return semantic._close(ctx, obj, name, brace=True)
+    return semantic._open(ctx, obj, name, amount, brace=True)
+
+
 def slide_to_edge(ctx, obj, part=None, *, arm=None, body=None):
     """Pressure-drag a thin object to a graspable table edge; see :meth:`Skills.slide_to_edge`."""
     skills = _skills(ctx)
@@ -284,9 +403,9 @@ def release(ctx, arm):
 
 
 def place(ctx, obj, region, *, arm=None, near=None, keep_out=(), clearance=PLACE_CLEARANCE, above=PLACE_ABOVE,
-          step=PLACE_STEP, margin=PLACE_MARGIN):
+          step=None, margin=None, orientation=None, turns=PLACE_TURNS):
     """Put the held ``obj`` down in ``region`` (see :meth:`Skills.place`) and release it."""
-    return _skills(ctx).place(obj, region, arm, near, keep_out, clearance, above, step, margin)
+    return _skills(ctx).place(obj, region, arm, near, keep_out, clearance, above, step, margin, orientation, turns)
 
 
 def handover(ctx, obj, *, to=None, need=None):
@@ -307,7 +426,7 @@ def close_gripper(ctx, arm):
 from table_1000.experts.trace import traced
 
 for _name in ('grasp', 'pick', 'place', 'push', 'move_by_displacement', 'release', 'handover',
-              'make_room', 'ready', 'open_gripper', 'close_gripper'):
+              'braced_drawer', 'make_room', 'ready', 'open_gripper', 'close_gripper'):
     globals()[_name] = traced()(globals()[_name])
 retry = traced(concrete=False)(retry)
 chain = traced(concrete=False)(chain)

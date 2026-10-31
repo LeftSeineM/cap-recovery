@@ -91,6 +91,7 @@ def test_numpy_target_and_shape_roundtrip():
 def test_inhand_roundtrip_keeps_frozen_candidates_and_cached_verdicts():
     from table_1000.experts.skills.placing import Placing
     ctx = context()
+    ctx.requirements = []
     skill = Placing()
     skill.ctx = ctx
     skill.model = SimpleNamespace(base=np.eye(4), q=np.zeros(2))
@@ -114,13 +115,17 @@ def test_restore_held_attachments_permissions_and_rng(monkeypatch):
     operations = []
     world = SimpleNamespace(permissions={frozenset(('old', 'finger'))},
                             allow=lambda a,b,*args: operations.append(('allow', a,b,args)),
-                            set_padding=lambda p: operations.append(('padding', p)))
-    solver = SimpleNamespace(world=world, attach_at=lambda name, pose: operations.append(('attach', name, pose.tolist())))
+                            set_padding=lambda p: operations.append(('padding', p)),
+                            set_shared_permissions=lambda pairs: None)
+    solver = SimpleNamespace(world=world, attach_at=lambda name, pose: operations.append(('attach', name, pose.tolist())),
+                             planner=SimpleNamespace(robot=SimpleNamespace(set_qpos=lambda q, full: None)))
     skill = SimpleNamespace(held={})
     ctx.skills, ctx.solver = lambda: skill, lambda arm: solver
     entry = {'held': encode({'left': {'target': Target('pen', ['pen'], 'pen', Box((1, 1, 1)), np.eye(4), np.zeros((1, 3))),
                                      'supports': ['table'], 'grasp': {'gap': .02}}}),
              'planners': {'left': {'extra_objects': [], 'padding': .005, 'permissions': [['pen', 'finger']],
+                                   'shared_permissions': [], 'object_padding': {}, 'poses': {},
+                                   'frame': encode(np.eye(4)), 'qpos': encode(np.zeros(2)),
                                    'attached': encode({'pen': np.eye(4)})}},
              'reaches': {}, 'current': 'place', 'mplib_seed': 31337, 'rng': encode(ctx.rng.bit_generator.state)}
     expected = ctx.rng.random()
@@ -139,7 +144,8 @@ def test_restore_preserves_planning_obstacles_before_skill_sync():
     # sync. Rebuilding only from live poses would change the first IK decision.
     stale = np.eye(4)
     stale[0, 3] = .25
-    world = SimpleNamespace(permissions=set(), padding=0., objects={},
+    world = SimpleNamespace(permissions=set(), local_permissions=set(), shared_permissions=set(),
+                            object_padding={}, set_shared_permissions=lambda pairs: None, padding=0., objects={},
                             poses={'cabinet:drawer': stale}, frame=np.diag([1., 1., 1., 1.]))
     restored = {}
     robot = SimpleNamespace(get_qpos=lambda: np.array([.2, .4]),

@@ -29,6 +29,7 @@ not handled yet: their handle moves along an arc.
 """
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 
 import numpy as np
 from scipy.spatial import ConvexHull
@@ -125,48 +126,110 @@ def slider(ctx, obj, name):
     return j
 
 
-def open(ctx, obj, name, amount):
-    """Open joint ``name`` of ``obj`` by ``amount`` (m) by its handle; nothing when it already is."""
+def _open(ctx, obj, name, amount, *, brace=False):
+    """Implementation of :func:`open`, also used by the replayable brace skill."""
     j = slider(ctx, obj, name)
+    from table_1000.experts.skills.bracing import brace as support, stability
+    if brace and (ctx.skills().held or len(ctx.skills().arms) < 2):
+        raise ValueError('brace=True needs both hands empty; place held objects first, or use brace=False')
 
     def attempt():
         for _ in range(PULLS):
             if is_open(ctx, obj, name, amount):
                 break
             direction = j.direction(ctx.pose(obj, j.child))
-            held = skills.grasp(ctx, obj, j.handle, then=direction * (amount - opening(ctx, obj, name)),
-                                approach=-direction, max_angle=OPEN_ANGLES)
-            # Closing on the handle straight on may have pushed the part in a little.
-            move = direction * (amount - opening(ctx, obj, name))
             housing = ctx.pose(obj, j.parent)[:3, 3]
-            try:
-                moved = skills.move_by_displacement(ctx, held['arm'], *move, drag=(obj, j.child), least=PULL_LEAST)
-            except ExpertFailed:
-                skills.release(ctx, held['arm'])    # so that it can be tried again
-                raise
-            ctx.note('pulled', joint=name, opening=opening(ctx, obj, name), moved=moved,
-                     parent_shift=float(np.linalg.norm(ctx.pose(obj, j.parent)[:3, 3] - housing)),
-                     finger_gap=ctx.solver(held['arm']).finger_gap())
-            skills.release(ctx, held['arm'])
+            s = ctx.skills() if brace else None
+            active = min(s.arms, key=lambda a: np.linalg.norm(s.shoulder(a) - ctx.pose(obj, j.child)[:3, 3])) if brace else None
+            with support(ctx, obj, j, active, amount) if brace else nullcontext() as selected:
+                active = selected if brace else active
+                move = direction * (amount - opening(ctx, obj, name))
+                if brace:
+                    held = s.grasp(s.target(obj, j.handle), arm=active, then=move, approach=-direction,
+                                   max_angle=OPEN_ANGLES[-1], base=False)
+                else:
+                    held = skills.grasp(ctx, obj, j.handle, then=move, approach=-direction, max_angle=OPEN_ANGLES)
+                try:
+                    move = direction * (amount - opening(ctx, obj, name))
+                    moved = (s.move_by_displacement(held['arm'], move, drag=(obj, j.child), least=PULL_LEAST) if brace else
+                             skills.move_by_displacement(ctx, held['arm'], *move, drag=(obj, j.child), least=PULL_LEAST))
+                except ExpertFailed:
+                    if brace:
+                        s.release(held['arm'])
+                    else:
+                        skills.release(ctx, held['arm'])
+                    raise
+                ctx.note('pulled', joint=name, opening=opening(ctx, obj, name), moved=moved,
+                         parent_shift=float(np.linalg.norm(ctx.pose(obj, j.parent)[:3, 3] - housing)),
+                         finger_gap=ctx.solver(held['arm']).finger_gap())
+                if brace:
+                    s.release(held['arm'])
+                else:
+                    skills.release(ctx, held['arm'])
         require(ctx, is_open(ctx, obj, name, amount), 'not opened', joint=name, opening=opening(ctx, obj, name))
 
-    skills.retry(ctx, attempt)
+    def checked():
+        with stability(ctx, obj, j) if brace else nullcontext():
+            attempt()
+
+    skills.retry(ctx, checked)
 
 
-def close(ctx, obj, name):
-    """Close joint ``name`` of ``obj``: push its handle back with the closed fingertips (no grasp
-    needed, and the handle of an open drawer is too close to its body to grasp straight on)."""
+def _close(ctx, obj, name, *, brace=False):
+    """Implementation of :func:`close`, also used by the replayable brace skill."""
     j = slider(ctx, obj, name)
+    from table_1000.experts.skills.bracing import brace as support, stability
+    if brace and (ctx.skills().held or len(ctx.skills().arms) < 2):
+        raise ValueError('brace=True needs both hands empty; place held objects first, or use brace=False')
 
     def attempt():
         housing = ctx.pose(obj, j.parent)[:3, 3]
-        pushed = skills.push(ctx, obj, j.handle, direction=-j.direction(ctx.pose(obj, j.child)),
-                             distance=opening(ctx, obj, name) + PUSH_PAST)
+        s = ctx.skills() if brace else None
+        active = min(s.arms, key=lambda a: np.linalg.norm(s.shoulder(a) - ctx.pose(obj, j.child)[:3, 3])) if brace else None
+        with support(ctx, obj, j, active) if brace else nullcontext() as selected:
+            active = selected if brace else active
+            direction = -j.direction(ctx.pose(obj, j.child))
+            distance = opening(ctx, obj, name) + PUSH_PAST
+            pushed = (s.push(s.target(obj, j.handle), direction, distance, arm=active) if brace else
+                      skills.push(ctx, obj, j.handle, direction=direction, distance=distance))
         ctx.note('pushed', joint=name, opening=opening(ctx, obj, name), arm=pushed['arm'], tilt=pushed['tilt'],
                  parent_shift=float(np.linalg.norm(ctx.pose(obj, j.parent)[:3, 3] - housing)))
         require(ctx, is_closed(ctx, obj, name), 'not closed', joint=name, opening=opening(ctx, obj, name))
 
-    skills.retry(ctx, attempt)
+    def checked():
+        with stability(ctx, obj, j) if brace else nullcontext():
+            attempt()
+
+    skills.retry(ctx, checked)
+
+
+def open(ctx, obj, name, amount, *, brace=False):
+    """Open joint ``name`` of ``obj`` by ``amount`` (m) by its handle; nothing when it already is.
+
+    ``brace=True`` presses the housing roof with the other empty hand during
+    each pull, then retracts it. Both hands must be empty at entry; otherwise
+    ``ValueError`` asks the expert to place the held object first. Housing
+    translation <= 5 mm, rotation <= 2 degrees, and other sliders' absolute
+    openings <= 5 mm are checked every control step, including approach and
+    retreat. A violation fails the skill. The opt-in route locks base and torso
+    during support; no reachable loaded roof contact raises ``Unreachable``.
+    Clear the roof/reposition first, or use ``brace=False`` to omit these
+    stability checks. Metrics are in ``drawer stability``
+    notes, including failed attempts. No asset/drive parameters are changed.
+    """
+    return skills.braced_drawer(ctx, obj, name, amount) if brace else _open(ctx, obj, name, amount)
+
+
+def close(ctx, obj, name, *, brace=False):
+    """Close joint ``name`` of ``obj``: push its handle back with the closed fingertips (no grasp
+    needed, and the handle of an open drawer is too close to its body to grasp straight on).
+
+    ``brace=True`` supports the housing roof with the opposite empty hand and
+    checks <= 5 mm housing translation, <= 2 degree rotation and <= 5 mm other
+    sliders' openings at every control step. Requirements, failures, logging
+    and locked torso/base are as in :func:`open`; default behavior is unchanged.
+    """
+    return skills.braced_drawer(ctx, obj, name) if brace else _close(ctx, obj, name)
 
 
 def travel(ctx, obj, name, margin=0.):
@@ -265,7 +328,7 @@ def selects(shape, obj, part=None):
                                  or shape.part.startswith(part + '.'))
 
 
-def support_region(shapes, obj, part=None, floor=False, headroom=np.inf, step=SUPPORT_STEP):
+def support_region(shapes, obj, part=None, floor=False, headroom=np.inf, step=SUPPORT_STEP, *, top_envelope=False):
     """``(region, keep_out)`` to put something down on ``obj`` (its body or ``part``) among
     ``shapes`` (the scene, but what is put down): ``region`` the rectangle ``(frame, low, high)`` of
     the cells whose rays cast straight down hit an upward face of it first, at the highest height
@@ -276,7 +339,9 @@ def support_region(shapes, obj, part=None, floor=False, headroom=np.inf, step=SU
     remain excluded at the ray-grid resolution. What is put down comes straight down from
     ``headroom`` above that height: what
     is all higher (a handle over the edge of a drawer's floor) neither hides it nor is kept out; the
-    hand above is checked against it when placing. See :meth:`~table_1000.experts.skills.Skills.place`."""
+    hand above is checked against it when placing. ``top_envelope`` retains all upward-face
+    cells at their highest sampled height, for a slightly tilted flat stack support; the
+    default selects a shared level. See :meth:`~table_1000.experts.skills.Skills.place`."""
     support = [shape for shape in shapes if selects(shape, obj, part)]
     frame = support[0].frame
     local = np.linalg.inv(frame)
@@ -301,11 +366,12 @@ def support_region(shapes, obj, part=None, floor=False, headroom=np.inf, step=SU
         return None, []
     levels = np.round(height[up] / LEVEL)
     level = levels.min() if floor else levels.max()
-    surface_z = float(np.median(height[up & (np.round(height / LEVEL) == level)]))
+    surface_z = (float(height[up].max()) if top_envelope else
+                 float(np.median(height[up & (np.round(height / LEVEL) == level)])))
     every = shapes
     shapes = [shape for shape in shapes if heights(shape).min() < surface_z + headroom]
     first, height, up = hits(shapes)
-    cells = up & (np.round(height / LEVEL) == level)
+    cells = up if top_envelope else up & (np.round(height / LEVEL) == level)
     # The region's edges halfway between the cells on it and those off it.
     low, high = grid[cells].min(0) - step / 2, grid[cells].max(0) + step / 2
     surface = frame @ translated(np.eye(4), [0., 0., surface_z])
@@ -367,11 +433,89 @@ def inside(ctx, obj, container, part=None):
     sideways both ways along the container body's x and y axes and straight down all hit it."""
     shapes = [shape for shape in scene_shapes(ctx, exclude=(obj,)) if selects(shape, container, part)]
     middle = centre(object_points(ctx, obj))
+    return _inside_point(shapes, middle)
+
+
+def _inside_point(shapes, middle):
+    """Five enclosing rays at a world point, along the container body's axes."""
     axes = shapes[0].frame[:3, :3]
     for direction in (axes[:, 0], -axes[:, 0], axes[:, 1], -axes[:, 1], -axes[:, 2]):
         if cast(shapes, [middle], direction)[0][0] < 0:
             return False
     return True
+
+
+def supported_inside(ctx, obj, container):
+    """Whether collision material immerses in the cavity and touches an inward
+    floor/wall face within the existing support distance. Unlike ``inside``,
+    contents may protrude above the mouth; touching an exterior wall is not support.
+    """
+    from mplib.collision_detection import fcl
+    from table_1000.experts.skills.common import SUPPORT_DISTANCE, convex_keepout
+    from table_1000.experts.thin_objects import Edge, exposed_points
+    shapes = scene_shapes(ctx)
+    walls = [s for s in shapes if s.obj == container]
+    normal = walls[0].frame[:3, 2]
+    mouth = max(float((s.points @ normal).max()) for s in walls)
+    below = Edge(normal * mouth, -normal, np.zeros(3), 0.)
+    request = fcl.DistanceRequest(enable_nearest_points=True, enable_signed_distance=True)
+    for item in (s for s in shapes if s.obj == obj):
+        immersed = exposed_points(item.points, below)
+        if not len(immersed):
+            continue
+        middle = immersed.mean(axis=0)
+        if (not _inside_point(walls, middle) or any(
+                np.all(w.planes[:, :3] @ middle + w.planes[:, 3] <= 0.) for w in walls)):
+            continue
+        material = convex_keepout(item.points)
+        for wall in walls:
+            contact = fcl.distance(convex_keepout(wall.points), material, request)
+            if contact.min_distance >= SUPPORT_DISTANCE:
+                continue
+            # The nearest wall face must point into this immersed material,
+            # not out toward an adjacent object on the other side of a wall.
+            face = wall.planes[np.argmax(wall.planes[:, :3] @ contact.nearest_points + wall.planes[:, 3])]
+            if face[:3] @ middle + face[3] > 0.:
+                return True
+    return False
+
+
+def upright_inside(ctx, obj, container, part=None, max_tilt=np.radians(30.)):
+    """Whether a slender body is contained and stands within ``max_tilt`` radians
+    of the container's up axis. Use this same predicate before deciding to move
+    a pen and after settling it. An existing correct pen need not be removed
+    and reinserted. The longest body-frame collision extent defines its axis.
+    Its lower end must penetrate at least a quarter of its length or half
+    the container height, whichever is smaller. Enclosing rays test a point
+    in that immersed segment: the pen's centre may protrude above the mouth.
+    """
+    target = ctx.skills().target(obj)
+    size = np.ptp(target.points, axis=0)
+    order = np.argsort(size)
+    if size[order[-1]] < 2 * size[order[-2]]:
+        raise ValueError('upright_inside requires a slender collision body; use inside for ordinary objects')
+    shapes = [s for s in scene_shapes(ctx) if selects(s, container, part)]
+    if not shapes:
+        raise ValueError('upright_inside requires a container with collision geometry')
+    if not 0. <= max_tilt < np.pi / 2:
+        raise ValueError('max_tilt must be radians in [0, pi/2)')
+    pose = ctx.poses()[target.body]
+    axis = pose[:3, order[-1]]
+    normal = shapes[0].frame[:3, 2]
+    if abs(float(axis @ normal)) < np.cos(max_tilt):
+        return False
+    points = target.points @ pose[:3, :3].T + pose[:3, 3]
+    bounds = np.concatenate([s.points for s in shapes]) @ normal
+    bottom, mouth = float((points @ normal).min()), float(bounds.max())
+    if bottom < float(bounds.min()) - LEVEL:
+        return False
+    depth = mouth - bottom
+    required = min(float(size[order[-1]]) / 4, float(np.ptp(bounds)) / 2)
+    if depth < required:
+        return False
+    middle = centre(points)
+    middle += normal * (bottom + min(depth, float(np.ptp(points @ normal))) / 2 - middle @ normal)
+    return _inside_point(shapes, middle)
 
 
 def headroom(ctx, obj):
@@ -385,9 +529,9 @@ def around(region, near):
     the region's point nearest it when ``near`` is outside."""
     if near is None:
         return region
-    frame, low, high = region
+    frame, low, high = region[:3]
     point = np.clip((np.linalg.inv(frame) @ np.r_[np.asarray(near, dtype=float)[:3], 1.])[:2], low, high)
-    return frame, np.maximum(low, point - NEAR), np.minimum(high, point + NEAR)
+    return (frame, np.maximum(low, point - NEAR), np.minimum(high, point + NEAR), *region[3:])
 
 
 def inset(region, margin):
@@ -411,21 +555,111 @@ def on_region(obj, surface, part=None, near=None, keep_out=()):
     return where
 
 
-def inside_region(obj, container, part=None, near=None):
+def inside_region(obj, container, part=None, near=None, *, support=None, orientation=None,
+                  top_tolerance=None):
     """``where(ctx) -> (region, keep_out)``: where inside ``container`` (or its body or ``part``: a
-    drawer) to put ``obj`` down in the state then, on its floor where nothing covers it (the part of
-    a drawer out of its cabinet); as :func:`on_region`."""
+    drawer) to put ``obj`` down in the state then, on its floor where nothing covers it.
+    ``support`` names an object already inside the container: use its live top
+    surface instead of the floor for stacking (largest first). The support must
+    satisfy :func:`inside`; an empty/unreachable surface fails with ``no support``.
+    With ``orientation='flat'``, the full footprint stays inside the container,
+    while its measured centre of mass projects inside the lower object's top.
+    A small overhang is allowed; collision checks still exclude walls and other
+    objects. Use :func:`on` and containment after settling to reject a slide/tip.
+    Re-evaluated before picking and placing by ``Place``; no fixed layer height.
+    ``orientation`` matches ``Place``: for upright/flat placement the floor or
+    support is found without unrelated objects hiding it; actual convex scene
+    shapes above it become 3D keep-outs (including existing pens and walls).
+    ``top_tolerance`` optionally bounds the object's resting top by the live
+    container geometry's upper edge plus this tolerance. This limits only the
+    final pose, not the descent corridor. Omit it for contents such as pens
+    that may protrude above the rim. For a part inside a larger container,
+    overhead parts exclude the covered floor and bound flat release below
+    the measured opening.
+    Use ``Place(obj, inside_region(obj, container, support=previous, orientation='flat'),
+    orientation='flat')``."""
     def where(ctx):
-        region, blocked = support_region(scene_shapes(ctx, exclude=(obj,)), container, part, floor=True,
+        if support == obj or support == container:
+            raise ValueError('support must name another object already inside the container; '
+                             'omit support to place on its floor')
+        if support is not None:
+            require(ctx, inside(ctx, support, container, part), 'stack support not inside container',
+                    support=support, container=container)
+        shapes = scene_shapes(ctx, exclude=(obj,))
+        owner, piece = support or container, None if support else part
+        region, blocked = support_region([s for s in shapes if selects(s, owner, piece)]
+                                         if orientation else shapes, owner, piece, floor=support is None,
                                          headroom=headroom(ctx, obj))
         require(ctx, region is not None, 'no support', container=container, part=part)
+        stack = None
+        if support is not None and orientation == 'flat':
+            container_shapes = [s for s in shapes if selects(s, container, part)]
+            floor, _ = support_region(container_shapes, container, part, floor=True)
+            require(ctx, floor is not None, 'no container floor', container=container)
+            # Cast the live support top along the container's up, even if a
+            # notebook was placed with its authored body Z pointing down.
+            aligned = [Shape(s.obj, s.body, s.part, floor[0], s.points)
+                       for s in shapes if s.obj == support]
+            top, _ = support_region(aligned, support, top_envelope=True)
+            require(ctx, top is not None, 'no support', support=support)
+            # The lower book can settle slightly tilted. Put the next layer
+            # above its highest collision point rather than through the median
+            # sampled face; it then settles onto the real top without overlap.
+            inv = np.linalg.inv(top[0])
+            rise = max((s.points @ inv[:3, :3].T + inv[:3, 3])[:, 2].max() for s in aligned)
+            top = (translated(top[0], top[0][:3, 2] * rise), *top[1:])
+            target = ctx.skills().target(obj)
+            com = (np.linalg.inv(ctx.poses()[target.body])
+                   @ np.r_[ctx.env.center_of_mass(target.body)[0], 1.])[:3]
+            stack = dict(surface=top, centre_of_mass=com)
+            region = (top[0], floor[1], floor[2])
+        if orientation:
+            if orientation not in ('upright', 'flat', 'insert'):
+                raise ValueError("orientation must be None, 'upright', 'flat' or 'insert'")
+            if support is not None and orientation in ('upright', 'insert'):
+                raise ValueError("insertion with a stack support is unsupported; omit support or use orientation='flat'")
+            local = np.linalg.inv(region[0])
+            blocked = [s.points for s in shapes
+                       if ((s.points @ local[:3, :3].T + local[:3, 3])[:, 2].max() > 1e-6)]
+        region = (*region, stack) if stack is not None else region
+        if orientation == 'flat':
+            live = dict(flat_container=container, part=part, support=support)
+            region = (*region[:3], {**(stack or {}), **live})
+        if orientation == 'upright':
+            region = (*region, dict(upright_container=container, part=part))
+        if top_tolerance is not None:
+            local = np.linalg.inv(region[0])
+            points = np.vstack([s.points for s in shapes if selects(s, container, part)])
+            maximum = float((points @ local[:3, :3].T + local[:3, 3])[:, 2].max())
+            metadata = region[3] if len(region) > 3 else {}
+            metadata = {**metadata, 'maximum_height': maximum + top_tolerance,
+                        'top_tolerance': top_tolerance}
+            ceilings = []
+            for shape in shapes:
+                if shape.obj != container or selects(shape, container, part):
+                    continue
+                points = shape.points @ local[:3, :3].T + local[:3, 3]
+                low, high = points.min(0), points.max(0)
+                if (low[2] > 1e-6 and np.all(high[:2] >= region[1])
+                        and np.all(low[:2] <= region[2])):
+                    # Use only the pulled-out floor: a released object above
+                    # the housing would land on its shelf or roof instead.
+                    blocked.append((region[0], low[:2], high[:2]))
+                    ceilings.append(float(low[2]))
+            if ceilings:
+                metadata['maximum_release_top'] = min(ceilings)
+            region = (*region[:3], metadata)
+        if support is None:
+            metadata = region[3] if len(region) > 3 else {}
+            region = (*region[:3], {**metadata, 'release_container': container,
+                                  'release_part': part, 'release_support': support})
         return around(region, near), blocked
     return where
 
 
-def put(ctx, obj, where, near):
+def put(ctx, obj, where, near, **options):
     region, keep_out = where(ctx)
-    skills.place(ctx, obj, region, near=near, keep_out=keep_out)
+    skills.place(ctx, obj, region, near=near, keep_out=keep_out, **options)
 
 
 def place_on(ctx, obj, surface, part=None, near=None, keep_out=()):

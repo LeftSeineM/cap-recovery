@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from table_1000.experts.asset_grasp import oriented_shape
+from table_1000.experts.skills.targets import oriented_shape
 from table_1000.experts.grasps import Box, Cylinder, fitted, oriented_bounds
 from table_1000.experts.skills import semantic
 from table_1000.experts.skills.placing import Placing

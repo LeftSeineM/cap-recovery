@@ -17,7 +17,7 @@ executed motion also its tracking error. IK failures are counted per decision an
 first five also get a collision-free CLIK check and a colliding-pair probe, for diagnosis only.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 import gzip
 import hashlib
@@ -30,6 +30,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from table_1000.experts.trace import decode, encode
+from table_1000.experts.context import remaining_wall
 
 
 def packed(value):
@@ -89,7 +90,8 @@ class Problems:
         return self.intern(self.worlds, dict(objects=objects, poses=encode(world.poses), frame=encode(world.frame),
                                              padding=world.padding, attached=encode(solver.attachments),
                                              object_padding=world.object_padding.copy(),
-                                             permissions=sorted(sorted(pair) for pair in world.permissions),
+                                             permissions=sorted(sorted(pair) for pair in world.local_permissions),
+                                             shared_permissions=sorted(sorted(pair) for pair in world.shared_permissions),
                                              robot_q=encode(solver.planner.robot.get_qpos())))
 
     @contextmanager
@@ -217,7 +219,7 @@ def mark(skill, stage, candidate=None, outcome=None, **values):
 
 
 def decision(function):
-    """Observe a decision without changing candidate generation, budgets or random draws."""
+    """Observe a decision and check an optional wall deadline between candidates."""
     signature = inspect.signature(function)
     def arguments(args, kwargs):
         bound = signature.bind(*args, **kwargs)
@@ -229,29 +231,34 @@ def decision(function):
         @wraps(function)
         def iterate(self, *args, **kwargs):
             record = recorder(self)
-            if not record:
-                yield from function(self, *args, **kwargs)
-                return
-            with record.decision(function.__qualname__, arguments((self, *args), kwargs)) as entry:
+            scope = (record.decision(function.__qualname__, arguments((self, *args), kwargs))
+                     if record else nullcontext(None))
+            with scope as entry:
                 generator = function(self, *args, **kwargs)
             try:
                 while True:
-                    with record.active(entry):
+                    remaining_wall(self.ctx)
+                    with record.active(entry) if record else nullcontext():
                         try:
                             value = next(generator)
                         except StopIteration:
                             return
+                    remaining_wall(self.ctx)
                     yield value
             finally:
                 generator.close()
         return iterate
     @wraps(function)
     def call(self, *args, **kwargs):
+        remaining_wall(self.ctx)
         record = recorder(self)
         if not record:
-            return function(self, *args, **kwargs)
+            result = function(self, *args, **kwargs)
+            remaining_wall(self.ctx)
+            return result
         with record.decision(function.__qualname__, arguments((self, *args), kwargs)) as entry:
             result = function(self, *args, **kwargs)
+            remaining_wall(self.ctx)
             entry['result'] = packed(result)
             return result
     return call
@@ -300,8 +307,10 @@ class Offline:
         solver.world.padding = world['padding']
         for name, relative in decode(world['attached']).items():
             solver.attach_at(name, relative)
+        shared = {frozenset(pair) for pair in world['shared_permissions']}
         for pair in world['permissions']:
             solver.world.allow(pair[:1], pair[-1:])
+        solver.world.set_shared_permissions(shared)
         solver.planner.robot.set_qpos(decode(world['robot_q']), True)
         return solver
 
@@ -424,11 +433,13 @@ class Offline:
         ctx.fail = fail
         skill = object.__new__(Skills)
         skill.ctx, skill.model, skill.solvers = ctx, model, self.solvers
+        skill.braced, skill.brace_seed = False, None
         skill.arms = list(model.spec.arms)
         skill.hands = {arm: Hand(model, arm) for arm in skill.arms}
         skill.held, skill.home = decode(state['held']), decode(state['home'])
         skill.start_base, skill.reaches = decode(state['start_base']), decode(state['reaches'])
         skill.log, skill.rejected = [], {}
+        skill._grasp_placement_caches = {}
         ctx._skills, ctx.skills = skill, lambda: skill
         for solver in self.solvers.values():
             solver.ctx = ctx

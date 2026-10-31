@@ -22,6 +22,7 @@ def test_torso_fallback_only_completes_remaining_rise(moved,upper,expected_lift)
     ctx=SimpleNamespace(env=SimpleNamespace(qpos=lambda _:np.array([[state['lift']]])),
         spec=SimpleNamespace(lift=['lift'],lift_velocity_limit=1.),step=step,hold=lambda _:None,note=lambda *a,**kw:None)
     motion=Motion();motion.solvers={'left':solver};motion.ctx=ctx;motion.model=SimpleNamespace(limits=np.array([[0.,upper]]),lift_indices=lambda:[0]);motion.held={};motion.stow=lambda _:False;motion.in_the_way=lambda *a:[]
+    motion.braced = False
     assert motion.straight('left',np.array([0.,0.,.1]))==pytest.approx(1.)
     assert state['lift']==pytest.approx(expected_lift)
     assert state['pose'][2,3]==pytest.approx(.9)

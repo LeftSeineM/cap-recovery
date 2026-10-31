@@ -35,6 +35,7 @@
 每次运行一份 `episodes/<seed>.json`；同一起点的第 r 次重复（r = 1 … K − 1）为 `episodes/<seed>-<r>.json`，不录轨迹、不写检查点。报告包括：
 
 - 子任务起止、每次规划、手指碰过的部件、换用的候选（`ctx.note`）、失败原因（附调用栈）、物体终态；
+- 放置放宽事件：`placement relaxation attempted`（`strict_failure` 严格放置失败原因、`candidates` 候选数、`max_drop_m`）与 `placement relaxation used`（`drop_m` 松手时物体最低点到实测底面的法向距离、`max_drop_m`、`release_pose`），`level` 为放宽级别；
 - 由步骤组成的专家：每步结束时的控制步、wall time 和进程的 CPU time（秒）（`steps` 的 `at`、`wall_s`、`cpu_s`），每个子任务的 wall time（`subtask_wall_s`）；
 - 负载 `load`（见下文），以及调用帧 `call_trace`、求解记录 `solve_trace` 的相对路径；
 - `native_math_threadpools`：episode 内生效的原生数学线程池快照（`threadpoolctl.threadpool_info()`），包含库路径、接口和 `num_threads`；专家 episode 与抓取评测 trial 的 BLAS 池统一限制为 1 线程；

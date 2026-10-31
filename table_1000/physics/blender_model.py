@@ -80,7 +80,12 @@ def extract(blend):
                            'body2': joint.object2.name, 'matrix': [list(line) for line in obj.matrix_world],
                            'limits': list(limits) if enabled else None,
                            'disable_collisions': bool(joint.disable_collisions)})
-    return {'nodes': nodes, 'joints': joints, 'units': 'm', 'up_axis': 'Z'}
+    model = {'nodes': nodes, 'joints': joints, 'units': 'm', 'up_axis': 'Z'}
+    # object.py may author this on bpy.context.scene; retain it in the
+    # geometry description without changing rigid-body physics parameters.
+    if 'max_drop_m' in scene:
+        model['max_drop_m'] = float(scene['max_drop_m'])
+    return model
 
 
 def main(argv=None):

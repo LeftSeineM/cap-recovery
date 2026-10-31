@@ -139,6 +139,48 @@ class PlanningWorldTest(unittest.TestCase):
             self.assertTrue(world.get_allowed_collision_matrix().get_entry('held', 'l3'))
             scene.clear()
 
+    def test_solver_attachments_retain_declared_contacts_until_their_owner_revokes_them(self):
+        import mplib
+        from types import SimpleNamespace
+        from mplib.collision_detection import AllowedCollision
+        from table_1000.experts.solver import MotionSolver
+        from table_1000.planning.world import box_object
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / 'source').mkdir()
+            urdf = robot(directory / 'source')
+            write_srdf(urdf, directory / 'robot.srdf')
+            planner = mplib.Planner(str(urdf), 'l3', srdf=str(directory / 'robot.srdf'))
+            scene = PlanningScene(planner)
+            transform = np.eye(4)
+            obj, _ = box_object('held', (.04, .04, .04), transform)
+            scene.add(obj, transform)
+            scene.allow(['held'], ['l3', 'l1'])
+            saved = set(scene.permissions)
+            world = planner.planning_world
+            solver = MotionSolver.__new__(MotionSolver)
+            solver.planner, solver.world = planner, scene
+            solver.arm = SimpleNamespace(tcp_link='l3', finger_links=('l3',))
+            solver.attachments = {}
+            solver.attach_at('held', transform)
+            matrix = world.get_allowed_collision_matrix()
+            self.assertEqual(matrix.get_entry('held', 'l1'), AllowedCollision.ALWAYS)
+            # Refreshing a settled hold recreates the native attachment too.
+            moved = transform.copy()
+            moved[0, 3] += .03
+            solver.attach_at('held', moved)
+            self.assertEqual(matrix.get_entry('held', 'l1'), AllowedCollision.ALWAYS)
+            MotionSolver.detach(solver, 'held')
+            self.assertFalse(world.is_object_attached('held'))
+            self.assertNotIn('held', solver.attachments)
+            self.assertEqual(scene.permissions, saved)
+            self.assertEqual(matrix.get_entry('held', 'l3'), AllowedCollision.ALWAYS)
+            self.assertEqual(matrix.get_entry('held', 'l1'), AllowedCollision.ALWAYS)
+            self.assertIsNone(matrix.get_entry('held', 'l2'))
+            scene.allow(['held'], ['l3'], False)
+            self.assertEqual(matrix.get_entry('held', 'l3'), AllowedCollision.NEVER)
+            scene.clear()
+
     def test_shapes_are_placed_relative_to_their_body(self):
         shapes, rest = model_shapes(MODEL)
         self.assertEqual(sorted(rest), ['box', 'box.lid'])

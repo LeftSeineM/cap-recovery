@@ -18,8 +18,9 @@ def test_scene_initializes(name):
     missing = [spec['asset'] for spec in scene.OBJECTS.values() if not (ASSETS / spec['asset'] / 'model.json').is_file()]
     if missing:
         pytest.skip(f'assets not built: {missing}')
-    if (ROOT / 'asset_sources' / 'scenes' / name / 'experts').is_dir():
-        assert hasattr(load(name, 'expert'), 'solve')
+    for path in (ROOT / 'asset_sources' / 'scenes' / name / 'experts').glob('*/*.py'):
+        if path.stem.isdigit():
+            assert hasattr(load(name, 'expert', robot=path.parent.name, expert=path.stem), 'solve')
     for seed in range(3):
         layouts = []
         for _ in range(2):

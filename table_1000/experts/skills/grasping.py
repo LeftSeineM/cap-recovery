@@ -1,14 +1,18 @@
 """Grasp and pick: candidates of a target, their IK and motion, the base moved where none is in reach."""
 
+import copy
 import time
 
 import numpy as np
+from mplib.collision_detection import fcl
 
-from table_1000.experts.context import DT, Unreachable
-from table_1000.experts.grasps import (MIN_HOLD_AREA, SUPPORT_CLEARANCE, _held_area, fitted, grasp_candidates,
+from table_1000.experts.context import DT, Unreachable, remaining_wall
+from table_1000.experts.grasps import (MIN_HOLD_AREA, SUPPORT_CLEARANCE, _closing_surface, _grasp_area, contact_resistance, fitted, grasp_candidates,
                                        merge_part_heads, standoff, translated)
+from table_1000.experts.grasps.checks import CollisionSurface, closure
+from table_1000.planning.world import geometry, pose
 from table_1000.experts.skills.common import (APPROACH, CANDIDATE_PLANS, IK_ATTEMPTS, ROOM_PLACES, SUPPORT_DISTANCE,
-                                              Target, Unmet, collisions, normalized, planning_object)
+                                              Target, Unmet, collisions, normalized, planning_object, upright_need)
 from table_1000.experts.solver import PlanningFailed
 from table_1000.experts.problems import decision, mark
 
@@ -46,6 +50,32 @@ class Replayed:
 class Grasping:
     """The grasp skills of :class:`~table_1000.experts.skills.Skills`."""
 
+    def _grasp_placement_cache(self, shape, transform, hand, obstacles, approach_distance,
+                               contact_surface, *, step=np.radians(15), max_up=.05,
+                               end_grasps=False, edge_grasps=False):
+        """Cache placement geometry for identical world inputs across grasp phases.
+
+        Preferred directions and occupancy callbacks stay outside the key: they
+        affect ordering and costs, not the contact result for a raw choice.
+        Obstacle poses and clearances invalidate entries after a world update.
+        """
+        def array_key(value):
+            array = np.asarray(value)
+            return array.dtype.str, array.shape, array.tobytes()
+
+        def obstacle_key(obstacle, clearance):
+            pose = obstacle.pose.to_transformation_matrix()
+            return obstacle.name, array_key(pose), float(clearance), len(obstacle.shapes)
+
+        key = (type(shape), repr(shape.fcl_shape()), array_key(transform),
+               (id(getattr(hand, '_contact_geometry_key', hand)),
+                float(hand.max_gap), float(hand.opening_clearance), float(hand.pad_spacing),
+                float(hand.min_pad_area), float(hand.min_hold_area), float(hand.hold_margin)),
+               tuple(obstacle_key(obstacle, clearance) for obstacle, clearance in obstacles),
+               contact_surface, float(approach_distance),
+               float(step), float(max_up), bool(end_grasps), bool(edge_grasps))
+        return self._grasp_placement_caches.setdefault(key, {})
+
     # -- what is grasped -----------------------------------------------------------------
     def target(self, obj, part=None, shape=None, offset=None, body=None):
         """The :class:`Target` of scene object ``obj`` (an asset, or a primitive with ``shape``):
@@ -77,7 +107,15 @@ class Grasping:
         return next((arm for arm, held in self.held.items() if held['target'].obj == obj), None)
 
     # -- choice ------------------------------------------------------------------------
+    def unprepared_flat_thin(self, target):
+        """Ordinary grasping needs no thin-object preparation; ThinPicking overrides this."""
+        return False
+
     def candidate_hand(self, target, arm):
+        if target.container:
+            hand = copy.copy(self.hands[arm])
+            hand.opening_clearance = .002
+            return hand
         return self.hands[arm]
 
     def centre(self, target):
@@ -107,13 +145,10 @@ class Grasping:
 
     def contact_surface(self, target):
         """All stopping surfaces of the held body, in the candidate shape frame."""
-        from table_1000.experts.grasps.checks import CollisionSurface
-        if self.constrained(target) or target.obj not in self.ctx.geometry:
+        if target.obj not in self.ctx.geometry or self.constrained(target):
             return None
         geometry = self.ctx.geometry[target.obj]
         key = (target.body, target.offset.tobytes())
-        if not hasattr(geometry, '_candidate_surfaces'):
-            geometry._candidate_surfaces = {}
         if key not in geometry._candidate_surfaces:
             to_shape = np.linalg.inv(target.offset)
             geometry._candidate_surfaces[key] = CollisionSurface([
@@ -127,7 +162,6 @@ class Grasping:
         This compares current part heads only. It never changes the original
         within-part cost or adds a second normal-force redirection demand.
         """
-        from table_1000.experts.grasps import contact_resistance
         surface = self.contact_surface(target)
         if surface is None or not grasp.info.get('weight_N', 0.):
             return 0.
@@ -137,20 +171,17 @@ class Grasping:
         scale = grasp.info['predicted_normal_force_N'] * support['contact_radius_m'] * support['contact_normal_cosine']
         cost = grasp.info['gravity_moment_Nm'] / scale if scale > 0. else np.inf
         grasp.info.update(support, part_load_cost=cost, predicted_torsion_scale_Nm=scale)
-        if hasattr(self.ctx, 'note'):
-            self.ctx.note('part head compared', arm=arm, parts=target.names,
-                          pose=grasp.pose.tolist(), target_offset=target.offset.tolist(),
-                          within_part_cost=grasp.cost, **grasp.info)
+        self.ctx.note('part head compared', arm=arm, parts=target.names,
+                      pose=grasp.pose.tolist(), target_offset=target.offset.tolist(),
+                      within_part_cost=grasp.cost, **grasp.info)
         return cost
 
-    def check_closure(self, target, arm, grasp):
-        from table_1000.experts.grasps.checks import CollisionSurface, closure
+    def pad_closure(self, target, arm, open_gap):
+        """Measured opposing pad contacts and surface gap, without candidate area gates."""
         if target.obj in self.ctx.scene.OBJECTS:
             geometry = self.ctx.geometry[target.obj]
             body = target.body.split(':', 1)[1]
             # The whole held body can stop a finger, not just the selected part.
-            if not hasattr(geometry, '_grasp_surfaces'):
-                geometry._grasp_surfaces = {}
             if body not in geometry._grasp_surfaces:
                 geometry._grasp_surfaces[body] = CollisionSurface(
                     [(transform, kind, data) for name, _, transform, kind, data in geometry.shapes if name == body])
@@ -174,11 +205,16 @@ class Grasping:
                         row['pad_links'].append(link)
             contacts.append(row)
         body_pose, tcp, gap = self.ctx.poses()[target.body], self.ctx.tcp(arm), solver.finger_gap()
-        checked = closure(hand, surface, body_pose, tcp, gap, grasp.open_gap,
-                          contacts, target.body)
+        return closure(hand, surface, body_pose, tcp, gap, open_gap, contacts, target.body)
+
+    def check_closure(self, target, arm, grasp):
+        checked = self.pad_closure(target, arm, grasp.open_gap)
+        solver, hand = self.solvers[arm], self.hands[arm]
+        body_pose, tcp, gap = self.ctx.poses()[target.body], self.ctx.tcp(arm), solver.finger_gap()
         # Actual-surface contacts add evidence; they do not replace the expert's
         # existing planned-gap and interior-area checks from #60.
-        actual_held = _held_area(target.shape, body_pose @ target.offset, tcp, hand, gap)
+        actual_held = self.measured_held_area(target, arm, body_pose @ target.offset, tcp, gap,
+                                             open_gap=grasp.open_gap)
         planned_gap_held = bool(gap >= grasp.info['contact_gap'] - HELD_TOLERANCE)
         area_held = actual_held >= MIN_HOLD_AREA
         if not planned_gap_held:
@@ -191,14 +227,24 @@ class Grasping:
                        planned_gap_held=planned_gap_held, area_held=area_held)
         return checked
 
+    def measured_held_area(self, target, arm, transform, tcp, gap, *, open_gap=None):
+        """Measure the real contact layer within the candidate's finite closing sweep."""
+        surface = self.contact_surface(target)
+        if open_gap is None:
+            held = getattr(self, 'held', {}).get(arm)
+            if held and held['target'].body == target.body:
+                open_gap = held['grasp']['open_gap']
+        if surface is not None and open_gap is not None:
+            surface = _closing_surface(surface, transform, tcp, self.hands[arm], open_gap)
+        return _grasp_area(target.shape, transform, tcp, self.hands[arm], gap,
+                           surface=surface)
+
     def shoulder(self, arm):
         return self.model.fk(self.ctx.spec.arms[arm].joints[1].replace('joint', 'link'), world=True)[:3, 3]
 
     def obstacles(self, arm, target, transform):
         """``([(FCL object, clearance to keep)], supports)``: the objects of ``arm``'s planning world
         other than ``target``'s (its shape at ``transform``), and the names of those supporting it."""
-        from mplib.collision_detection import fcl
-        from table_1000.planning.world import geometry, pose
         self.solvers[arm].sync()
         world = self.solvers[arm].world
         shape = fcl.FCLObject('target', pose(transform), [fcl.CollisionObject(geometry(*target.shape.fcl_shape()))],
@@ -216,7 +262,7 @@ class Grasping:
 
     @decision
     def options(self, target, arms, skip, point=None, approach=None, then=None, max_angle=None, tried=None,
-                need=None, mass_center=None, candidate_budget=None, ik_seed=None, geometric=None):
+                need=None, mass_center=None, candidate_budget=None, ik_seed=None, geometric=None, local=False):
         """Feasible ``(arm, grasp, supports, q_grasp, q_pre)``, in the order tried: those of either
         arm (the nearer first) with the torso lift where it is (also through ``then``), then those
         moving it too; ``skip`` holds the ids of candidates already used, ``tried`` (``{lift: count}``)
@@ -248,19 +294,34 @@ class Grasping:
             angles = []
             for target in targets:
                 transform = self.ctx.poses()[target.body] @ target.offset
+                upright = upright_need(need)
                 preferred = approach if approach is not None else normalized(
                     transform[:3, 3] - self.shoulder(arm)) + [0., 0., -1.]
+                if upright and approach is None:
+                    preferred = np.array([0., 0., -1.])
                 obstacles, supports = self.obstacles(arm, target, transform)
                 surface = self.contact_surface(target)
                 # The measured wrist is a preference for a declared next hold
                 # at this stance. Unguided fallback keeps physical ordering;
                 # grasp_paths likewise describes a future, different stance.
-                arguments = dict(center_of_mass=point, mass_center=self.grasp_center_of_mass(target, mass_center),
+                arguments = dict(check_budget=lambda: remaining_wall(self.ctx),
+                                 center_of_mass=point, mass_center=self.grasp_center_of_mass(target, mass_center),
                                  weight=self.grasp_weight(target), approach_distance=APPROACH,
                                  contact_surface=surface,
                                  reference_rotation=self.model.tcp(arm, world=True)[:3, :3]
-                                                    if surface is not None and need is not None else None)
-                arguments['_placement_cache'] = {}
+                                                    if surface is not None and need is not None and not upright else None)
+                if need is not None and (need.recipe or {}).get('origin', {}).get('orientation') == 'flat':
+                    arguments['edge_grasps'] = True
+                if upright:
+                    arguments['end_grasps'] = True
+                    arguments['first_feasible'] = True
+                    if need.rank is not None:
+                        body = self.ctx.poses()[target.body]
+                        arguments['occupancy_cost'] = lambda tcp, gap, a=arm, b=body: need.rank(a, np.linalg.inv(tcp) @ b, gap)
+                arguments['_placement_cache'] = self._grasp_placement_cache(
+                    target.shape, transform, self.candidate_hand(target, arm), obstacles,
+                    arguments['approach_distance'], surface,
+                    end_grasps=arguments.get('end_grasps', False), edge_grasps=arguments.get('edge_grasps', False))
                 inputs = target.shape, transform, self.candidate_hand(target, arm), obstacles, preferred
                 # As with a single target, the phase needs only the closest
                 # valid approach. Cost-sorted part heads can be expensive and
@@ -283,11 +344,15 @@ class Grasping:
         # The approach any candidate of either arm comes closest to (each knows it from its first).
         closest = min((angle for _, _, angles in found.values() for angle in angles if np.isfinite(angle)),
                       default=0.)
-        for lift in (False, True):
-            if lift:
+        for lift in ((False,) if self.braced else (False, True)):
+            if lift and not local:
+                # Contact preparation needs the same ready configuration as
+                # its movable-lift IK preview. Only a missed-grasp retreat
+                # keeps the current arm branch for local joint planning.
                 self.stow(why='shared torso lift')
             limit = np.degrees(max_angle) if max_angle is not None else np.inf
-            if not lift:
+            # A brace has no movable-lift pass to try the remaining angles.
+            if not lift and not self.braced and not local:
                 limit = min(limit, closest + HELD_SLACK)
             for arm in arms:
                 solver, side = self.solvers[arm], self.ctx.spec.arms[arm]
@@ -310,8 +375,9 @@ class Grasping:
                                           if len(streams) > 1 else 0.)
                 checked = 0
                 for number, index, grasp in candidates:
+                    remaining_wall(self.ctx)
                     target, supports = metadata[number]
-                    geometry_choice = getattr(grasp, 'choice', None)
+                    geometry_choice = grasp.choice
                     identifier_index = geometry_choice if len(targets) == 1 and geometry_choice is not None else index
                     mark(self, 'candidate', f'{arm}/{number}/{identifier_index}/{lift}', grasp=grasp, lift=lift)
                     if tried[lift] >= MAX_PLANS:
@@ -331,9 +397,10 @@ class Grasping:
                         candidate_budget(arm, lift)
                     checked += 1
                     start = self.model.vector(side.finger_targets(grasp.open_gap))
-                    if ik_seed is not None:
+                    seed = ik_seed if ik_seed is not None else self.brace_seed
+                    if seed is not None:
                         moving = self.model.arm_indices(arm) + (self.model.lift_indices() if lift else [])
-                        start[moving] = ik_seed[moving]
+                        start[moving] = seed[moving]
                     solver.sync()
                     # The fingers touch the object and come closer to its supports than the padding.
                     solver.allow([*target.names, *supports])
@@ -398,7 +465,8 @@ class Grasping:
         else:
             solver = self.solvers[arm]
             solver.allow(allowed)
-            keys = sorted({f'{link} / {obj}' for link, obj, _ in self.model.collisions(arm, q)}) or ['none']
+            keys = sorted({f'{link} / {obj}:{obj_link}'
+                           for link, obj, obj_link in self.model.collisions(arm, q)}) or ['none']
             solver.allow(allowed, False)
         counts = self.rejected['collisions']
         for key in keys:
@@ -417,8 +485,7 @@ class Grasping:
         ctx = self.ctx
         alternatives = target
         targets = target if isinstance(target, (list, tuple)) else [target]
-        unprepared_flat_thin = getattr(self, 'unprepared_flat_thin', None)
-        if close is None and unprepared_flat_thin and any(unprepared_flat_thin(item) for item in targets):
+        if close is None and any(self.unprepared_flat_thin(item) for item in targets):
             raise ValueError('grasp cannot prepare a flat thin object on the table; use pick, '
                              'or call slide_to_edge before grasp')
         target = target[0] if isinstance(target, (list, tuple)) else target
@@ -427,8 +494,10 @@ class Grasping:
         if need is not None:
             arms = [a for a in arms if a in need.arms]
         skip, regrasps, started, roomed, stowed = set(), 0, time.perf_counter(), False, False
+        rerouted = False
         while True:
-            reached = self.reach(alternatives, arms, skip, point, approach, then, max_angle, need)
+            reached = self.reach(alternatives, arms, skip, point, approach, then, max_angle, need,
+                                 **({'local': True} if regrasps else {}))
             # Candidates, none in reach with the other arm out: again with it in, before the base moves;
             # first the arms but the nearest (which may then reach from where it is), then all.
             # (None at all within max_angle: the next, wider one is tried instead.)
@@ -454,10 +523,35 @@ class Grasping:
                     self.make_room(paths, need=1, touch=list(dict.fromkeys(touch)), relocate=True)
                     skip = set()
                     reached = self.reach(alternatives, arms, skip, point, approach, then, max_angle, need)
+            if (reached is None and roomed and skip and not rerouted
+                    and ctx.spec.base and base and not self.braced):
+                # A stance selected for endpoint IK can still have no arm
+                # approach path. As for placing, try one alternative stance
+                # after actual approach plans failed; do not retry unchanged
+                # geometry when no candidate ever passed the IK screens.
+                rerouted = True
+                paths = self.grasp_paths(alternatives, arms, point, approach, then, max_angle, need)
+                if any(paths.values()):
+                    touch = []
+                    for item in targets:
+                        _, supports = self.obstacles(arms[0], item, ctx.poses()[item.body] @ item.offset)
+                        touch.extend([*item.names, *supports])
+                    ctx.note('try another base stance after failed grasp approach', obj=target.obj)
+                    self.make_room(paths, need=1, touch=list(dict.fromkeys(touch)), relocate=True)
+                    skip = set()
+                    reached = self.reach(alternatives, arms, skip, point, approach, then, max_angle, need)
             if reached is None:
                 # With a need and the base held, only this stance failed: Unmet, for the chain to adapt (the base moves).
                 unmet = unmet or need is not None and (not base or self.rejected['need'])
-                ctx.fail('no reachable grasp', Unmet if unmet else Unreachable, target=target.names, candidates_tried=len(skip), rejected=self.rejected)
+                blocked = (need.recipe or {}).get('blocked_by', ()) if need is not None else ()
+                release_limit = ((need.recipe or {}).get('origin', {}).get('release_limit_m')
+                                 if need is not None else None)
+                ctx.fail('no reachable grasp', Unmet if unmet else Unreachable, target=target.names,
+                         candidates_tried=len(skip), rejected=self.rejected,
+                         **({'maximum_flat_release_m': release_limit, 'recoverable': True,
+                             'recovery': 'pick again with a hold compatible with low flat release'}
+                            if release_limit is not None else {}),
+                         **({'blocked_by': blocked, 'recoverable': True} if blocked else {}))
             arm, grasp, supports = reached
             target = grasp.target or target
             solver = self.solvers[arm]
@@ -480,12 +574,51 @@ class Grasping:
             if regrasps > MAX_REGRASPS:
                 ctx.fail('object not held', finger_gap=gap, width=grasp.width)
         poses = ctx.poses()
+        # A free body moves as one rigid collision assembly. Joint-constrained
+        # bodies continue to use Motion.dragged for their separate riders.
+        carried, riders, contacts, carry_permissions = [], [], [], []
+        free = target.obj in ctx.geometry and not self.constrained(target)
+        if free:
+            previous_permissions = set(solver.world.permissions)
+            # dragged inspects unattached source pieces. Discover contents
+            # before attaching even a whole-container grasp.
+            carried, riders, contacts = self.dragged(arm, (target.obj, target.body.split(':', 1)[1]))
+            # A free asset's root can carry authored child bodies (pen caps
+            # and lid detents). Whole-object grasps already moved all of
+            # these planning pieces; a part grasp must preserve that model.
+            own = [name for name in solver.world.objects if name.startswith(target.obj + ':')]
+            carried = [name for name in own if name not in target.names]
+            if not (target.rim or target.container):
+                # Ordinary parts may rest in a drawer: that supporting
+                # cabinet must not become a carried payload. Only the
+                # geometrically identified container carries touching contents,
+                # including when an ordinary authored wall part is grasped.
+                riders, contacts = [], []
+            else:
+                # semantic imports this package's public skills; defer to avoid the cycle.
+                from table_1000.experts.skills import semantic
+                contents = {name.split(':', 1)[0] for name in riders}
+                contents = {name for name in contents if semantic.supported_inside(ctx, name, target.obj)}
+                riders = [name for name in riders if name.split(':', 1)[0] in contents]
         for name in target.names:
             solver.attach(name, poses[solver.world.objects[name].body])
+        if free:
+            solver.carry(carried, target.names + supports + riders + contacts)
+            solver.carry(riders, target.names + carried + contacts)
+            # MPlib attachment recreates ACM entries. Restore the scene's
+            # authored intra-asset permissions after all pieces are attached.
+            solver.world.allow(own, own)
+            solver.world.allow(riders, own + riders)
+            carry_permissions = [list(pair) for pair in solver.world.permissions - previous_permissions]
+            # Adjacent pieces of the held body were approach supports. Once
+            # attached they remain deliberate finger contacts, rather than
+            # being revoked with the table after the first lift.
+            supports = [name for name in supports if name not in carried + riders]
         chosen = {'pose': grasp.pose.tolist(), 'open_gap': grasp.open_gap, 'width': grasp.width,
                   'backoff': grasp.backoff, 'cost': grasp.cost, **grasp.info}
         chosen['geometry_choice'] = getattr(grasp, 'choice', None)
-        self.held[arm] = {'target': target, 'supports': supports, 'grasp': chosen}
+        self.held[arm] = {'target': target, 'supports': supports, 'grasp': chosen, 'carried': carried,
+                          'riders': riders, 'carry_contacts': contacts, 'carry_permissions': carry_permissions}
         ctx.note('grasped', arm=arm, target=target.names[0], approach=grasp.pose[:3, 0].tolist(),
                  closing=grasp.pose[:3, 1].tolist(), finger_gap=solver.finger_gap(),
                  closure=checked, **grasp.info)
@@ -505,14 +638,26 @@ class Grasping:
         paths = {arm: [] for arm in arms}
         def candidates(arm, target):
             transform = self.ctx.poses()[target.body] @ target.offset
+            upright = upright_need(need)
             preferred = approach if approach is not None else normalized(
                 transform[:3, 3] - self.shoulder(arm)) + [0., 0., -1.]
+            if upright and approach is None:
+                preferred = np.array([0., 0., -1.])
             obstacles, _ = self.obstacles(arm, target, transform)
             surface = self.contact_surface(target)
+            arguments = {'check_budget': lambda: remaining_wall(self.ctx),
+                         'edge_grasps': need is not None and (need.recipe or {}).get('origin', {}).get('orientation') == 'flat'}
+            arguments['_placement_cache'] = self._grasp_placement_cache(
+                target.shape, transform, self.hands[arm], obstacles, APPROACH, surface,
+                end_grasps=upright, edge_grasps=arguments['edge_grasps'])
+            if upright and need.rank is not None:
+                body = self.ctx.poses()[target.body]
+                arguments['occupancy_cost'] = lambda tcp, gap: need.rank(arm, np.linalg.inv(tcp) @ body, gap)
             for grasp in grasp_candidates(target.shape, transform, self.hands[arm], obstacles, preferred,
                     center_of_mass=point, mass_center=self.grasp_center_of_mass(target, None),
                     weight=self.grasp_weight(target), approach_distance=APPROACH,
-                    contact_surface=surface, max_angle=max_angle):
+                    contact_surface=surface, max_angle=max_angle, end_grasps=upright,
+                    first_feasible=upright, **arguments):
                 yield grasp
         for arm in arms:
             ordered = merge_part_heads([candidates(arm, item) for item in targets],
@@ -541,12 +686,12 @@ class Grasping:
         return paths
 
     @decision
-    def reach(self, target, arms, skip, point, approach, then, max_angle=None, need=None):
+    def reach(self, target, arms, skip, point, approach, then, max_angle=None, need=None, local=False):
         """Move to the first grasp of :meth:`options` whose motion plans, fingers open around the
         object; ``(arm, grasp, supports)``, or None when no candidate is left."""
         ctx, tried = self.ctx, {False: 0, True: 0}
         for arm, grasp, supports, q_grasp, q_pre, lift in self.options(target, arms, skip, point, approach, then,
-                                                                      max_angle, tried, need):
+                                                                      max_angle, tried, need, local=local):
             mark(self, 'plan', f'{arm}/{tried[lift]}/{lift}', grasp=grasp)
             tried[lift] += 1
             solver = self.solvers[arm]
@@ -555,7 +700,8 @@ class Grasping:
                 solver.open_gripper(grasp.open_gap)
                 # With the torso lift held, one try each: where they fail, the lift is likely needed.
                 solver.move_to_pose_with_RRTConnect(None, lift=True, goals=[q_pre],
-                                                    attempts=CANDIDATE_PLANS if lift else 1)
+                                                    attempts=CANDIDATE_PLANS if lift else 1,
+                                                    **({'local_lift': True} if local else {}))
                 solver.allow([*selected.names, *supports])
                 solver.move_to_pose_with_screw(grasp.pose)
                 mark(self, 'plan', outcome='accepted')
@@ -576,14 +722,34 @@ class Grasping:
         ``max_angle``: remove them so that preparation can choose its own grasp geometry.
         """
         ctx = self.ctx
-        if self.thin_geometry(target) is None:
-            result = self.grasp(target, arm, point, approach, then=(0., 0., height), max_angle=max_angle, need=need,
+        alternatives = target
+        target = target[0] if isinstance(target, (list, tuple)) else target
+        profile = self.thin_geometry(target)
+        if profile is None:
+            result = self.grasp(alternatives, arm, point, approach, then=(0., 0., height), max_angle=max_angle, need=need,
                                 base=base)
+        elif profile.kind == 'plate':
+            # Authored narrow features can already offer a legal grasp (a
+            # bookmark/spine). Keep that route before moving a broad plate.
+            try:
+                result = self.grasp(alternatives, arm, point, approach, then=(0., 0., height),
+                                    max_angle=max_angle, need=need, base=base,
+                                    close=lambda selected, arm, grasp: self.solvers[arm].close_gripper())
+            except Unreachable as error:
+                # A chain's requested next hold has not been met at this stance.
+                # Let chain adapt the base/hand before attempting edge preparation.
+                if isinstance(error, Unmet) or error.reason != 'no reachable grasp':
+                    raise
+                if point is not None or approach is not None or max_angle is not None:
+                    raise ValueError('plate edge preparation chooses its own grasp geometry; '
+                                     'remove point, approach and max_angle') from error
+                target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base)
         else:
             if point is not None or approach is not None or max_angle is not None:
                 raise ValueError('the thin-object pick route does not support point, approach or max_angle '
                                  'because preparation chooses its own grasp geometry; remove these arguments')
             target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base)
+        target = self.held[result['arm']]['target']
         before = ctx.poses()[target.body]
         if 'preparation' in result:
             self.prepare_thin_lift(target, result)
@@ -595,6 +761,12 @@ class Grasping:
             self.release(result['arm'])     # so that it can be picked again
             ctx.fail('object not lifted', rise=rise, finger_gap=self.solvers[result['arm']].finger_gap(),
                      arm=result['arm'], grasp=result['grasp'], object_before=before.tolist())
+        # An object can settle or pivot in the pads while being lifted. Its
+        # collision attachment must match the measured hold returned below,
+        # including the adjacent parts and any loaded container's contents.
+        solver, poses = self.solvers[result['arm']], ctx.poses()
+        for name in list(solver.attachments):
+            solver.attach(name, poses[solver.world.objects[name].body])
         result.update(rise=rise, finger_gap=self.solvers[result['arm']].finger_gap(),
                       tcp_object=(np.linalg.inv(self.solvers[result['arm']].tcp()) @ after).tolist())
         return result

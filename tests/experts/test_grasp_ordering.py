@@ -4,7 +4,15 @@ import numpy as np
 import pytest
 
 from table_1000.experts.grasps import Box, gravity_lever, pinch_normal_force
+from table_1000.experts.skills.common import Target
 from table_1000.robots import load_spec
+
+
+@pytest.fixture(autouse=True)
+def isolated_placement_cache(monkeypatch):
+    """Ordering tests replace geometric candidates and use sentinel hands."""
+    from table_1000.experts.skills.grasping import Grasping
+    monkeypatch.setattr(Grasping, '_grasp_placement_cache', lambda *args, **kwargs: {})
 
 
 def test_gravity_moment_uses_com_and_clamping_line_not_mass():
@@ -43,10 +51,10 @@ def test_cost_sorted_candidates_do_not_stop_at_an_out_of_angle_candidate(monkeyp
     import table_1000.experts.skills.grasping as grasping
     from table_1000.experts.grasps import Grasp
     skill = grasping.Grasping()
+    skill.braced, skill.brace_seed = False, None
     skill.stow = lambda **kwargs: False
     shape = Box((.03,) * 3)
-    target = types.SimpleNamespace(obj='object', body='object:body', names=['object:body.part'],
-                                   offset=np.eye(4), shape=shape)
+    target = Target('object', ['object:body.part'], 'object:body', shape, np.eye(4), shape.points())
     candidates = [Grasp(np.eye(4), .04, .03, 0., cost,
                          {'approach_deg': angle, 'closest_deg': 0.}, choice=i)
                   for i, (cost, angle) in enumerate(
@@ -121,6 +129,17 @@ def test_cost_sorted_candidates_do_not_stop_at_an_out_of_angle_candidate(monkeyp
     assert len(choices) == 1 and choices[0][2] == ['table']
     assert skip == {('right', grasping.ROOM_PLACES + 1)}
     assert calls == [] and len(ik_calls) == 2
+    # A cabinet brace cannot try the movable-lift phase: its fixed-lift pass
+    # must retain the full requested angle range instead of dropping the
+    # farther candidates normally deferred to the movable-lift pass.
+    skill.braced = True
+    angled = candidates[-1]
+    angled.info['approach_deg'] = 18.
+    choices = list(skill.options(target, ['right'], set(), max_angle=np.radians(20),
+        geometric={'right': ([], iter([angled]))}))
+    assert len(choices) == 1 and choices[0][-1] is False
+    skill.braced = False
+    angled.info['approach_deg'] = 0.
     candidates.pop()  # no in-angle choice: avoid constructing the full stream
     calls.clear()
     assert list(skill.options(target, ['right'], set(), max_angle=np.radians(15))) == []
@@ -137,8 +156,9 @@ def test_wrist_preference_requires_a_declared_next_hold(monkeypatch, with_need):
         return iter([Grasp(np.eye(4), .04, .03, 0., 0., {'approach_deg': 0., 'closest_deg': 0.})])
     monkeypatch.setattr(grasping, 'grasp_candidates', candidates)
     skill = grasping.Grasping()
-    target = types.SimpleNamespace(body='object:body', names=['object:body.part'],
-                                   offset=np.eye(4), shape=Box((.03,) * 3))
+    skill.braced, skill.brace_seed = False, None
+    shape = Box((.03,) * 3)
+    target = Target('object', ['object:body.part'], 'object:body', shape, np.eye(4), shape.points())
     skill.ctx = types.SimpleNamespace(poses=lambda: {'object:body': np.eye(4)},
         spec=types.SimpleNamespace(arms={'right': types.SimpleNamespace(finger_targets=lambda gap: {})}))
     skill.model = types.SimpleNamespace(tcp=lambda *a, **k: np.eye(4), vector=lambda _: np.zeros(1),
@@ -151,7 +171,7 @@ def test_wrist_preference_requires_a_declared_next_hold(monkeypatch, with_need):
     skill.grasp_weight = lambda target: 0.
     skill.obstacles = lambda *a: ([], [])
     skill.stow = lambda **kw: False
-    need = types.SimpleNamespace(arms=['right'], accepts=lambda *a: True, hands=None) if with_need else None
+    need = types.SimpleNamespace(arms=['right'], accepts=lambda *a: True, hands=None, recipe=None) if with_need else None
     assert list(skill.options(target, ['right'], set(), need=need))
     assert skill.grasp_paths(target, ['right'], need=need)['right']
     # Only a choice at the current base can use its measured wrist. The
@@ -169,9 +189,10 @@ def test_parts_merge_by_cost_before_ik_with_distinct_retry_ids(monkeypatch):
     import table_1000.experts.skills.grasping as grasping
     from table_1000.experts.grasps import Grasp
     skill = grasping.Grasping()
+    skill.braced, skill.brace_seed = False, None
     skill.stow = lambda **kwargs: False
-    targets = [types.SimpleNamespace(obj='object', body='object:body', names=[name],
-        offset=np.eye(4), shape=Box((width, .02, .02))) for name, width in [('large', .1), ('small', .02)]]
+    targets = [Target('object', [name], 'object:body', Box((width, .02, .02)), np.eye(4), np.empty((0, 3)))
+               for name, width in [('large', .1), ('small', .02)]]
     def generated(shape, *args, **kwargs):
         return iter([Grasp(np.eye(4), .04, .03, 0., shape.size[0],
                            {'approach_deg': 0., 'closest_deg': 0.})])
@@ -197,9 +218,10 @@ def test_empty_held_lift_phase_preserves_later_part_order_and_retry_ids(monkeypa
     import table_1000.experts.skills.grasping as grasping
     from table_1000.experts.grasps import Grasp
     skill = grasping.Grasping()
+    skill.braced, skill.brace_seed = False, None
     skill.stow = lambda **kwargs: False
-    targets = [types.SimpleNamespace(obj='object', body='object:body', names=[str(i)],
-        offset=np.eye(4), shape=Box((i + 1., .02, .02))) for i in range(2)]
+    targets = [Target('object', [str(i)], 'object:body', Box((i + 1., .02, .02)), np.eye(4), np.empty((0, 3)))
+               for i in range(2)]
     generated, at_first_lift = [0, 0], []
     def candidates(shape, *args, **kwargs):
         part = int(shape.size[0]) - 1
@@ -238,8 +260,9 @@ def test_part_cost_heads_are_lazy_for_unused_arm_and_phase(monkeypatch, near_arm
     import table_1000.experts.skills.grasping as grasping
     from table_1000.experts.grasps import Grasp
     skill = grasping.Grasping()
-    targets = [types.SimpleNamespace(body='object:body', names=[str(i)], offset=np.eye(4),
-                                     shape=Box((i + 1., .02, .02))) for i in range(2)]
+    skill.braced, skill.brace_seed = False, None
+    targets = [Target('object', [str(i)], 'object:body', Box((i + 1., .02, .02)), np.eye(4), np.empty((0, 3)))
+               for i in range(2)]
     calls = []
     def candidates(shape, transform, hand, *args, **kwargs):
         part = int(shape.size[0]) - 1

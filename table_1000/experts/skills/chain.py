@@ -32,6 +32,7 @@ class InHand:
     arms: list
     hands: callable = None
     recipe: dict = None
+    rank: callable = None  # nonnegative live insertion-occupancy cost of (arm, tcp_object, gap)
 
 
 class Action:
@@ -57,6 +58,7 @@ class Pick(Action):
 
     @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
+        # skills imports these action classes while initializing the package.
         from table_1000.experts import skills
         return skills.retry(ctx, lambda: skills.pick(ctx, self.obj, need=need, base=base, **self.options))
 
@@ -82,6 +84,7 @@ class Place(Action):
 
     @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
+        # skills imports these action classes while initializing the package.
         from table_1000.experts import skills
 
         def place():
@@ -98,6 +101,7 @@ class Handover(Action):
 
     @traced(concrete=False, action=True)
     def run(self, ctx, need=None, base=True):
+        # skills imports these action classes while initializing the package.
         from table_1000.experts import skills
         return skills.handover(ctx, self.obj, need=need)
 
@@ -148,4 +152,14 @@ def adapted(ctx, action, need, adapt, failure):
             except Unreachable as unmet:     # also nothing in reach with the need from anywhere: on as it can
                 ctx.note('need unmet', action=type(action).__name__, reason=unmet.reason)
                 failure = unmet
+                if isinstance(action, Pick):
+                    relaxed = ctx.skills().low_release_need(need) if need.recipe else None
+                    if relaxed is not None:
+                        ctx.note('pick for independent bounded release stance', obj=action.obj, level=1)
+                        try:
+                            with subtask(ctx, action.instruction):
+                                return [action.run(ctx, relaxed)]
+                        except Unreachable as unmet:
+                            ctx.note('need unmet', action='independent bounded release', reason=unmet.reason)
+                            failure = unmet
     raise failure

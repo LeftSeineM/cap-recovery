@@ -10,6 +10,49 @@ from table_1000.robots import load_spec
 from table_1000.robots.kinematics import RobotModel
 
 
+def test_flat_put_down_records_and_restores_native_release_hulls(tmp_path):
+    """Problems recording must not abort flat Place before its first motion."""
+    from table_1000.experts.skills.flat_release import FlatReleaseGeometry
+    from table_1000.experts.skills.placing import Placing, convex_keepout
+    ctx = SimpleNamespace(spec=SimpleNamespace(name='fake'), trace=SimpleNamespace(stack=[4]))
+    record = Problems(ctx)
+    ctx.trace.problems = record
+    points = np.array([[x, y, z] for x in (.015, .025) for y in (-.01, .01) for z in (0., .2)])
+    wall = convex_keepout(points)
+    flat = FlatReleaseGeometry([('drawer:wall', wall, (points.min(0), points.max(0)))], .05,
+                               ceiling=.09)
+    def frames(gap):
+        pose = np.eye(4)
+        pose[0, 3] = gap
+        return {'finger': pose}
+    hand = SimpleNamespace(shapes={'finger': [(np.eye(4), 'box', (.01, .01, .01), True)]}, frames=frames)
+    # Also exercise a populated, native-object cache: identity keys are local
+    # to this process and must be rebuilt, rather than included in the record.
+    assert flat.minimum(hand, np.eye(4), np.eye(4), 0., .04, .08) is None
+    assert flat.channels
+    skill = object.__new__(Placing)
+    skill.ctx, skill.hands = ctx, {'left': hand}
+    skill.solvers = {'left': SimpleNamespace(finger_gap=lambda: 0.)}
+    skill.held = {'left': {'grasp': {'open_gap': .04}}}
+    options = [(np.eye(4), np.zeros(3))]
+    result = skill.put_down('left', options, np.eye(4), .01, .08, 'flat', flat)
+    assert not result['done'] and result['blocked_by'] == ['drawer:wall']
+    path = tmp_path / 'flat-problems.json.gz'
+    record.save(path)
+    restored = decode(load(path)['decisions'][0]['arguments'])['flat_geometry']
+    assert restored.ceiling == flat.ceiling
+    assert not restored.channels and not restored.heights
+    restored_wall = restored.obstacles[0][1]
+    np.testing.assert_array_equal(restored_wall.pose.to_transformation_matrix(), wall.pose.to_transformation_matrix())
+    original_shape = wall.shapes[0].get_collision_geometry()
+    restored_shape = restored_wall.shapes[0].get_collision_geometry()
+    np.testing.assert_array_equal(restored_shape.get_vertices(), original_shape.get_vertices())
+    np.testing.assert_array_equal(restored_shape.get_faces(), original_shape.get_faces())
+    assert restored.minimum(hand, np.eye(4), np.eye(4), 0., .04, .08) is None
+    skill.ctx.trace.problems = None
+    assert skill.put_down('left', options, np.eye(4), .01, .08, 'flat', restored) == result
+
+
 def numerical_context(tmp_path):
     model = RobotModel(load_spec('x1pro_rm001'), tmp_path / 'recording')
     model.set_state(model.spec.keyframe('ready'))
@@ -34,6 +77,10 @@ def test_world_roundtrip_preserves_collision_geometry_attachment_contacts_and_fr
     solver.attach_at('held', np.eye(4))
     solver.world.set_padding(.01)
     solver.allow(['support'])
+    borrowed = frozenset(('held', 'right_arm_gripper_left_link'))
+    overlapping = frozenset(('support', 'right_arm_gripper_left_link'))
+    solver.world.allow(['support'], ['right_arm_gripper_left_link'])
+    solver.world.set_shared_permissions({borrowed, overlapping})
     record = ctx.trace.problems
     with record.operation('ik', 'left', dict(target=solver.tcp(), world=True)) as entry:
         entry['result'] = {'status': 'Success'}
@@ -47,6 +94,11 @@ def test_world_roundtrip_preserves_collision_geometry_attachment_contacts_and_fr
     assert restored.world.padding == .01
     assert restored.world.object_padding == {'support': .01, 'held': 0.}
     assert restored.world.permissions == solver.world.permissions
+    assert restored.world.shared_permissions == {borrowed, overlapping}
+    restored.world.set_shared_permissions(())
+    assert borrowed not in restored.world.permissions
+    assert overlapping in restored.world.permissions
+    restored = resolver.restore(document['operations'][0])
     assert restored.planner.planning_world.is_object_attached('held')
     np.testing.assert_array_equal(restored.attachments['held'], np.eye(4))
     np.testing.assert_array_equal(restored.world.poses['support'], position)

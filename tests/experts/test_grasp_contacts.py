@@ -171,7 +171,7 @@ def test_subpart_closure_uses_all_actual_surfaces_on_the_same_body():
     skill = Grasping()
     remote = np.eye(4)
     remote[1, 3] = .03
-    geometry = types.SimpleNamespace(shapes=[
+    geometry = types.SimpleNamespace(_candidate_surfaces={}, _grasp_surfaces={}, shapes=[
         ('body', 'fins', np.eye(4), 'convex', Box((.01, .02, .01)).points()),
         ('body', 'fins', remote, 'convex', Box((.01, .02, .01)).points())])
     skill.ctx = types.SimpleNamespace(geometry={'object': geometry},
@@ -194,7 +194,7 @@ def test_subpart_closure_uses_all_actual_surfaces_on_the_same_body():
 def test_candidate_contact_surfaces_belong_to_the_held_rigid_body():
     from table_1000.experts.skills.grasping import Grasping
     skill = Grasping()
-    geometry = types.SimpleNamespace(shapes=[
+    geometry = types.SimpleNamespace(_candidate_surfaces={}, _grasp_surfaces={}, shapes=[
         ('body', 'barrel', np.eye(4), 'convex', Box((.02, .02, .1)).points()),
         ('cap', 'cap_shell', np.eye(4), 'convex', Box((.04, .04, .04)).points())])
     skill.ctx = types.SimpleNamespace(geometry={'object': geometry}, env=types.SimpleNamespace(
@@ -285,24 +285,26 @@ def test_asset_closure_observation_does_not_change_expert_default(only_record, c
     from table_1000.experts.skills.grasping import Grasping
     skill = Grasping()
     skill.arms, skill.held, skill.log = ['right'], {}, []
+    skill.constrained = lambda target: False
+    skill.dragged = lambda *args: ([], [], [])
     skill.rejected = {key: [] for key in ('grasp IK', 'pre-grasp IK', 'then', 'need')}
     opened, checked = [], []
     solver = types.SimpleNamespace(close_gripper=lambda: None, finger_gap=lambda: .02,
         open_gripper=opened.append, first_reachable=lambda poses: None, allow=lambda *args: None,
-        tcp=lambda: np.eye(4), attach=lambda *args: None,
-        world=types.SimpleNamespace(objects={'part': types.SimpleNamespace(body='object:body')}))
+        tcp=lambda: np.eye(4), attach=lambda *args: None, carry=lambda *args: None,
+        world=types.SimpleNamespace(objects={'part': types.SimpleNamespace(body='object:body')}, allow=lambda *args: None))
     skill.solvers = {'right': solver}
-    grasp = types.SimpleNamespace(pose=np.eye(4), width=.02, open_gap=.03, backoff=0., cost=0., info={}, target=None)
-    skill.reach = lambda *args: ('right', grasp, [])
+    grasp = types.SimpleNamespace(pose=np.eye(4), width=.02, open_gap=.03, backoff=0., cost=0., info={}, target=None, choice=None)
+    skill.reach = lambda *args, **kwargs: ('right', grasp, [])
     def check(*args):
         checked.append(True)
         return {'held': len(checked) > 1, 'reasons': ['no opposing collision surfaces']}
     skill.check_closure = check
     events = []
-    skill.ctx = types.SimpleNamespace(spec=types.SimpleNamespace(base=False),
+    skill.ctx = types.SimpleNamespace(geometry={}, spec=types.SimpleNamespace(base=False),
         poses=lambda: {'object:body': np.eye(4)}, note=lambda note, **data: events.append((note, data)))
     kwargs = {'closure_only_record': True} if only_record else {}  # exercise the actual default
-    result = skill.grasp(types.SimpleNamespace(names=['part'], body='object:body'), **kwargs)
+    result = skill.grasp(types.SimpleNamespace(obj='object', names=['part'], body='object:body'), **kwargs)
     assert len(checked) == checks and len(opened) == opens
     assert result['regrasps'] == opens
     assert result['closure_check']['held'] == (not only_record)
@@ -322,22 +324,23 @@ def test_expert_closure_retains_main_gap_and_area_checks(monkeypatch, gap, area,
     hand = types.SimpleNamespace(side=types.SimpleNamespace(finger_links=[]))
     skill.hands = {'right': hand}
     skill.solvers = {'right': types.SimpleNamespace(finger_gap=lambda: gap)}
-    geometry = types.SimpleNamespace(shapes=[])
+    geometry = types.SimpleNamespace(_candidate_surfaces={}, _grasp_surfaces={}, shapes=[])
     body_pose, tcp, offset, shape = np.eye(4), np.eye(4), np.eye(4), object()
     offset[0, 3] = .03
     skill.ctx = types.SimpleNamespace(scene=types.SimpleNamespace(OBJECTS={'object': {}}),
         geometry={'object': geometry}, tcp=lambda arm: tcp,
         poses=lambda: {'object:body': body_pose},
         env=types.SimpleNamespace(contacts=types.SimpleNamespace(surface_contacts={})))
-    monkeypatch.setattr(checks, 'CollisionSurface', lambda shapes: object())
-    monkeypatch.setattr(checks, 'closure', lambda *args: {
+    monkeypatch.setattr(grasping, 'CollisionSurface', lambda shapes: object())
+    monkeypatch.setattr(grasping, 'closure', lambda *args: {
         'held': surface_held, 'reasons': [] if surface_held else ['missing opposing pad contact']})
     def held_area(actual_shape, transform, actual_tcp, actual_hand, actual_gap):
         assert actual_shape is shape and actual_tcp is tcp and actual_hand is hand
         np.testing.assert_array_equal(transform, body_pose @ offset)
         assert actual_gap == gap
         return area
-    monkeypatch.setattr(grasping, '_held_area', held_area)
+    skill.contact_surface = lambda selected: None
+    monkeypatch.setattr(grasping, '_grasp_area', lambda *args, **kwargs: held_area(*args))
     result = skill.check_closure(types.SimpleNamespace(obj='object', body='object:body',
                                 shape=shape, offset=offset), 'right',
                                 types.SimpleNamespace(open_gap=.04, info={'contact_gap': .020}))
@@ -461,3 +464,174 @@ def test_candidate_clearance_adds_remote_same_body_colliders_without_filling_gap
         return fcl.collide(probe, target).is_collision()
     assert collides(.03)   # neighbouring fin stops the open hand
     assert not collides(.015)  # the actual space between fins stays empty
+
+
+def test_holder_rim_clearance_keeps_the_authored_floor_hull():
+    import json
+    from pathlib import Path
+    from mplib.collision_detection import fcl
+    from table_1000.planning.world import pose
+
+    fixture = json.loads((Path(__file__).parent / 'fixtures/holder-clearance-hull.json').read_text())
+    frame, points = np.asarray(fixture['transform']), np.asarray(fixture['points'])
+    surface = CollisionSurface([(frame, fixture['kind'], points)])
+    objects, poses = surface.collision_objects(Box(fixture['enclosing_size']))
+    assert len(objects) == 1
+    floor = fcl.FCLObject('floor', pose(np.eye(4)), objects, poses)
+
+    def collides(local):
+        probe_pose = frame.copy()
+        probe_pose[:3, 3] = frame[:3, :3] @ local + frame[:3, 3]
+        probe = fcl.FCLObject('probe', pose(probe_pose),
+                              [fcl.CollisionObject(fcl.Sphere(.0001))], [pose(np.eye(4))])
+        return fcl.collide(probe, floor).is_collision()
+
+    center = points.mean(0)
+    normal = np.linalg.svd(points - center, full_matrices=False)[2][-1]
+    outside = center + normal * (np.max((points - center) @ normal) + .003)
+    assert collides(center)
+    assert not collides(outside)
+
+
+@pytest.mark.parametrize('x,accepted', [(.008, True), (.016, False)])
+def test_round_part_measured_area_uses_the_touched_facets_with_the_original_tip_margin(x, accepted):
+    from table_1000.experts.grasps import Cylinder, MIN_HOLD_AREA, _contact_area, _held_area
+    from table_1000.experts.skills.grasping import Grasping
+    hand = _flat_test_hand()
+    pieces = []
+    for k in range(12):
+        a, b = np.arange(k, k + 2) * 2 * np.pi / 12
+        triangle = [[0., 0.], [.011 * np.cos(a), .011 * np.sin(a)],
+                    [.011 * np.cos(b), .011 * np.sin(b)]]
+        points = np.array([[*p, z] for p in triangle for z in (-.0475, .0475)])
+        pieces.append((np.eye(4), 'convex', points))
+    surface = CollisionSurface(pieces)
+    target = types.SimpleNamespace(shape=Cylinder(.011, .095))
+    skill = Grasping()
+    skill.hands = {'right': hand}
+    skill.contact_surface = lambda selected: surface
+    tcp = np.eye(4)
+    tcp[0, 3] = x
+    # The ideal circle's widest section is beyond the pad-tip margin, while
+    # a touched facet can still provide a real interior contact section.
+    assert _held_area(target.shape, np.eye(4), tcp, hand, .012) == 0.
+    area = skill.measured_held_area(target, 'right', np.eye(4), tcp, .012)
+    assert area == _contact_area(surface, np.eye(4), tcp, hand, .012)
+    assert (area >= MIN_HOLD_AREA) == accepted
+    assert hand.hold_margin == .002 and MIN_HOLD_AREA == 5e-6
+
+
+def test_recorded_jar_closures_use_the_candidate_finite_sweep(tmp_path):
+    import json
+    from pathlib import Path
+    from table_1000.experts.grasps import MIN_HOLD_AREA, _grasp_area
+    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.targets import oriented_shape
+    from table_1000.robots.kinematics import RobotModel
+    from table_1000.scenes.geometry import AssetGeometry
+    root = Path(__file__).resolve().parents[2]
+    if not (root / 'assets/objects/storage_box/000000').exists():
+        pytest.skip('built storage box asset unavailable')
+    geometry = AssetGeometry.of(root / 'assets', 'objects/storage_box/000000')
+    hand = Hand(RobotModel(load_spec('x1pro'), tmp_path / 'planning', root), 'right')
+    skill = Grasping()
+    skill.hands = {'right': hand}
+    skill.ctx = types.SimpleNamespace(geometry={'jar': geometry},
+        env=types.SimpleNamespace(objects={'jar': types.SimpleNamespace(articulated=False)}))
+    pieces = []
+    for body, name, transform, kind, data in geometry.shapes:
+        if kind == 'convex':
+            shape, offset = oriented_shape(data)
+            pieces.append((shape, transform @ offset))
+    fixture = json.loads((Path(__file__).parent / 'fixtures/jar-finite-closing.json').read_text())
+    rows = fixture['closings']
+    assert len(rows) == 6
+    for row in rows:
+        offset, body, tcp = map(np.asarray, (row['target_offset'], row['body_pose'], row['tcp']))
+        shape, nearest = min(pieces, key=lambda piece: np.linalg.norm(piece[1] - offset))
+        assert np.allclose(nearest, offset)
+        target = types.SimpleNamespace(obj='jar', body='jar:' + fixture['body_name'], shape=shape, offset=offset)
+        transform = body @ offset
+        assert _grasp_area(shape, transform, tcp, hand, row['gap'],
+                           surface=skill.contact_surface(target)) == 0.
+        area = skill.measured_held_area(target, 'right', transform, tcp, row['gap'], open_gap=row['open_gap'])
+        assert area == pytest.approx(row['finite_closing_span_area_m2'])
+        skill.held = {'right': {'target': target, 'grasp': {'open_gap': row['open_gap']}}}
+        assert skill.measured_held_area(target, 'right', transform, tcp, row['gap']) == area
+        skill.ctx.poses = lambda: {target.body: body}
+        skill.ctx.tcp = lambda arm: tcp
+        skill.solvers = {'right': types.SimpleNamespace(finger_gap=lambda: row['gap'])}
+        candidate = types.SimpleNamespace(open_gap=row['open_gap'], info={'contact_gap': row['gap']})
+        for held in (False, True):
+            skill.pad_closure = lambda *args: {'held': held, 'reasons': [] if held else ['missing opposing pad contact']}
+            checked = skill.check_closure(target, 'right', candidate)
+            assert checked['held'] is held
+            assert checked['area_held'] and checked['planned_gap_held']
+        candidate.info['contact_gap'] = row['gap'] + .006
+        assert not skill.check_closure(target, 'right', candidate)['held']
+    assert MIN_HOLD_AREA == 5e-6 and hand.hold_margin == .002
+
+
+def test_measured_surface_area_cannot_borrow_support_at_the_pad_tip():
+    from table_1000.experts.grasps import MIN_HOLD_AREA, _held_area
+    from table_1000.experts.skills.grasping import Grasping
+    hand = _flat_test_hand()
+    # The broad contact face reaches only the last millimetre of the pads;
+    # a thinner backing body cannot supply opposing support at this gap.
+    tip, backing = np.eye(4), np.eye(4)
+    tip[0, 3], backing[0, 3] = .0035, -.0005
+    surface = CollisionSurface([(tip, 'convex', Box((.001, .02, .008)).points()),
+                                (backing, 'convex', Box((.007, .002, .008)).points())])
+    target = types.SimpleNamespace(shape=Box((.008, .02, .008)))
+    skill = Grasping()
+    skill.hands = {'right': hand}
+    skill.contact_surface = lambda selected: surface
+    assert _held_area(target.shape, np.eye(4), np.eye(4), hand, .02) >= MIN_HOLD_AREA
+    assert skill.measured_held_area(target, 'right', np.eye(4), np.eye(4), .02) == 0.
+    skill.contact_surface = lambda selected: None
+    # Exact primitive targets retain their original widest-section rule.
+    assert skill.measured_held_area(target, 'right', np.eye(4), np.eye(4), .02) == \
+        _held_area(target.shape, np.eye(4), np.eye(4), hand, .02)
+
+
+def test_recorded_a4_closure_uses_its_actual_cover_contact_layer(tmp_path):
+    from pathlib import Path
+    from table_1000.experts.grasps import MIN_HOLD_AREA, _held_area
+    from table_1000.experts.skills.grasping import Grasping
+    from table_1000.experts.skills.targets import oriented_shape
+    from table_1000.robots.kinematics import RobotModel
+    from table_1000.scenes.geometry import AssetGeometry
+    root = Path(__file__).resolve().parents[2]
+    asset = root / 'assets/objects/notebook/000002'
+    if not asset.exists():
+        pytest.skip('built notebook asset unavailable')
+    geometry = AssetGeometry.of(root / 'assets', 'objects/notebook/000002')
+    body = geometry.bodies[0]
+    shape, offset = oriented_shape(geometry.points('notebook.closed.pages', body))
+    hand = Hand(RobotModel(load_spec('x1pro'), tmp_path / 'planning', root), 'right')
+    # Scene 000100 strict A8, the third closed frame. This is the measured
+    # TCP in the page frame, after aligning post-action state with obs[i+1].
+    tcp = np.array([
+        [2.806324179435076e-5, -.9999972384843762, .0023785010272418493, 2.038750103183773e-7],
+        [-.5002364078929662, -.002073437790107337, -.8658863413553579, .029166749942483756],
+        [.865888884467998, -.0011655040468952348, -.5002351803692557, -.11118144600537183],
+        [0., 0., 0., 1.]])
+    gap = .015043409075587988
+    target = types.SimpleNamespace(obj='notebook', body=f'notebook:{body}', shape=shape, offset=offset)
+    skill = Grasping()
+    skill.hands = {'right': hand}
+    skill.ctx = types.SimpleNamespace(geometry={'notebook': geometry},
+        env=types.SimpleNamespace(objects={'notebook': types.SimpleNamespace(articulated=False)}))
+    assert _held_area(shape, np.eye(4), tcp, hand, gap) == 0.
+    assert skill.measured_held_area(target, 'right', np.eye(4), tcp, gap) == pytest.approx(405e-6)
+    # Move this same measured grasp to an edge where only the last 2 mm of
+    # the pad sees material. Removing the margin would pass; it must fail.
+    import copy
+    at_tip = tcp.copy()
+    at_tip[:3, 3] -= .062 * tcp[:3, 0]
+    assert skill.measured_held_area(target, 'right', np.eye(4), at_tip, gap) == 0.
+    loose = copy.copy(hand)
+    loose.hold_margin = 0.
+    skill.hands = {'right': loose}
+    assert skill.measured_held_area(target, 'right', np.eye(4), at_tip, gap) >= MIN_HOLD_AREA
+    assert hand.hold_margin == .002 and MIN_HOLD_AREA == 5e-6

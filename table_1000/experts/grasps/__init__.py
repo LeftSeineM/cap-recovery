@@ -8,6 +8,7 @@ example from :meth:`~table_1000.experts.context.Context.part_box`.
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
 import heapq
 
 import numpy as np
@@ -411,8 +412,29 @@ def _mesh(shape):
     return trimesh.Trimesh(data @ transform[:3, :3].T + transform[:3, 3]).convex_hull
 
 
+@lru_cache(maxsize=256)
+def _cached_vertices(transform_dtype, transform_shape, transform_bytes, kind,
+                     data_dtype, data_shape, data_bytes):
+    """Return immutable vertices for one geometry-content key.
+
+    Hand geometry is queried for every occupancy and contact candidate, while
+    its URDF collision shapes do not change during an episode.  Reconstructing
+    a trimesh convex hull for each query dominates those loops.  The byte key
+    keeps this cache correct for tests and callers that replace an in-memory
+    shape without changing its object identity.
+    """
+    transform = np.frombuffer(transform_bytes, dtype=transform_dtype).reshape(transform_shape)
+    data = np.frombuffer(data_bytes, dtype=data_dtype).reshape(data_shape)
+    vertices = np.asarray(_mesh((transform, kind, data, False)).vertices)
+    vertices.setflags(write=False)
+    return vertices
+
+
 def _vertices(shape):
-    return np.asarray(_mesh(shape).vertices)
+    transform, kind, data, _ = shape
+    transform, data = np.asarray(transform), np.asarray(data)
+    return _cached_vertices(transform.dtype.str, transform.shape, transform.tobytes(), kind,
+                            data.dtype.str, data.shape, data.tobytes())
 
 
 def _facing(shape, direction, spacing=None, cosine=.7):
@@ -514,7 +536,8 @@ def pinch_normal_force(side, gap, stiffness, effort_limits):
 def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mass=None, approach_distance=.05,
                      step=np.radians(15), max_up=.05, cost_offset=40., cost_backoff=10., cost_hold=.5 / 30e-6,
                      mass_center=None, weight=0., contact_surface=None, max_angle=None, _placement_cache=None,
-                     _first_angle=False, reference_rotation=None):
+                     _first_angle=False, reference_rotation=None, end_grasps=False, occupancy_cost=None, first_feasible=False,
+                     edge_grasps=False, check_budget=None):
     """Grasps of ``shape`` (:class:`Box` or :class:`Cylinder`) at world ``transform`` by ``hand``
     (:class:`Hand`), cheapest first, generated as they are taken.
 
@@ -545,8 +568,22 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
     With ``reference_rotation`` (the measured TCP rotation), the angular cost
     also accounts for wrist roll: project its closing axis onto the preferred
     approach plane and measure the full rotation to that frame. Approach
-    limits and physical contact tests retain their meanings.
+    limits and physical contact tests retain their meanings. ``end_grasps``
+    adds contact centres 5/10 mm from either end of a slender shape for upright
+    insertion lookahead; actual contact area and collision checks still apply.
+    A nonnegative occupancy_cost(tcp, gap) ranks measured insertion channels
+    before expensive contact queries. first_feasible yields accepted geometry
+    immediately in that order, preferring end contacts when end_grasps is set;
+    its consumer can try a valid hold without enumerating every contact first.
+    With an occupancy callback that finds no overlap, retain the original
+    contact/torque cost order instead of changing an unobstructed grasp.
+    edge_grasps also samples contacts near both planar edges when closing
+    through the thickness, to let a following flat place choose a lower release.
+    ``check_budget``, when supplied, is called before contact screening and
+    occupancy queries, including the initial closest-angle probe.
     """
+    if check_budget is not None:
+        check_budget()
     from mplib.collision_detection import fcl
     from table_1000.planning.world import geometry, pose
     transform = np.asarray(transform, dtype=float)
@@ -576,6 +613,18 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
     closings = list(shape.closings(step))
     length = lengthwise(closings)
     for closing, width, basis, slides in closings:
+        if end_grasps and length is not None:
+            size = np.ptp(shape.points(), axis=0)
+            axis = np.eye(3)[int(np.argmax(size))]
+            slides = [*slides, *(sign * axis * (length / 2 - inset)
+                                for inset in (.005, .01) for sign in (-1., 1.) if length / 2 > inset)]
+        if edge_grasps:
+            size = np.ptp(shape.points(), axis=0)
+            thin_axis = int(np.argmin(size))
+            if size[np.argsort(size)[1]] >= 2 * size[thin_axis] and abs(closing[thin_axis]) > .99:
+                slides = [*slides, *(sign * np.eye(3)[m] * (size[m] / 2 - inset)
+                                    for m in range(3) if m != thin_axis
+                                    for inset in (.005, .01) for sign in (-1., 1.) if size[m] / 2 > inset)]
         open_gap = min(width + OPEN_MARGIN, hand.max_gap)
         if width > open_gap - hand.opening_clearance or length is not None and width >= length:
             continue
@@ -595,6 +644,8 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
                    if float(np.degrees(choice[0])) <= np.degrees(max_angle) + 1e-6]
 
     def place(choice):
+        if check_budget is not None:
+            check_budget()
         _, order, approach, closing, slide, _, open_gap = choice
         if _placement_cache is not None and order in _placement_cache:
             return _placement_cache[order]
@@ -605,8 +656,21 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
             _placement_cache[order] = placed
         return placed
 
+    if first_feasible and end_grasps and length is not None:
+        choices.sort(key=lambda c: (c[0], max(0., length / 2 - abs(float(c[4] @ axis))), c[1]))
     placed_grasps, closest = [], None
     bounds = {}
+    occupancy = {}
+    if occupancy_cost is not None and not _first_angle:
+        for angle, order, approach, closing, slide, _, gap in choices:
+            if check_budget is not None:
+                check_budget()
+            tcp = build_grasp_pose(approach, closing, origin + rotation @ slide)
+            occupancy[order] = occupancy_cost(tcp, gap)
+            bounds[order] = angle + occupancy[order]
+        choices.sort(key=lambda choice: (bounds[choice[1]],
+            max(0., length / 2 - abs(float(choice[4] @ axis))) if first_feasible and length is not None else 0., choice[1]))
+    emit_early = first_feasible and (occupancy_cost is None or any(occupancy.values()))
     if preferred_frame is not None and not _first_angle:
         # The closest *approach* defines the torso phase, independently of
         # wrist-roll preference. Probe it in approach order and reuse its
@@ -651,7 +715,10 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
         moment_cost = weight * lever / (force * hand.moment_radius()) if weight else 0.
         angular_cost = angle if preferred_frame is None else max(angle, float(np.arccos(np.clip(
             (np.trace(preferred_frame.T @ tcp[:3, :3]) - 1.) / 2., -1., 1.))))
-        cost = angular_cost + cost_offset * float(np.linalg.norm(contact - com)) + moment_cost \
+        position_cost = float(np.linalg.norm(contact - com))
+        if end_grasps and length is not None:
+            position_cost = max(0., length / 2 - abs(float((contact - origin) @ (rotation @ axis))))
+        cost = angular_cost + occupancy.get(order, 0.) + cost_offset * position_cost + moment_cost \
             + alignment['pad_alignment_cost'] + cost_backoff * backoff + hand.cost_width * width \
             + cost_hold * max(0., HOLD_AREA - held)
         # Approach-ordered placement, or the preceding probe for wrist costs,
@@ -664,6 +731,8 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
             'weight_N': weight, 'gravity_moment_Nm': weight * lever, 'predicted_normal_force_N': force,
             'moment_radius_m': hand.moment_radius(),
             'gravity_moment_cost': moment_cost, **alignment}, choice=order)
+        if occupancy_cost is not None:
+            grasp.info['insertion_occupancy_cost'] = occupancy.get(order, 0.)
         if preferred_frame is not None:
             grasp.info['orientation_deg'] = float(np.degrees(angular_cost))
         if _first_angle:
@@ -671,7 +740,10 @@ def grasp_candidates(shape, transform, hand, obstacles, preferred, center_of_mas
             # phase. Its cheapest grasp is found by the normal cost stream.
             yield grasp
             return
-        heapq.heappush(placed_grasps, (cost, order, grasp))
+        if emit_early:
+            yield grasp
+        else:
+            heapq.heappush(placed_grasps, (cost, order, grasp))
     while placed_grasps:
         yield heapq.heappop(placed_grasps)[2]
 
@@ -704,9 +776,8 @@ def _placed(shape, transform, target, pose, hand, open_gap, obstacles, approach_
         if _collides(hand.fcl(tcp, gap, fingers=False), target, 0.) or any(
                 _collides(closed_hand, obstacle, clearance) for obstacle, clearance in obstacles):
             continue
-        held = _held_area(shape, transform, tcp, hand, gap) if contact_surface is None \
-            else _contact_area(surface, transform, tcp, hand, gap,
-                               section=isinstance(shape, Cylinder))
+        held = _grasp_area(shape, transform, tcp, hand, gap,
+                           surface=None if contact_surface is None else surface)
         if held < hand.min_hold_area:
             if compound:
                 continue  # contact can move from an edge onto another component
@@ -781,6 +852,21 @@ def contact_resistance(shape, transform, tcp, hand, gap, *, open_gap=None):
     cosine = float(np.clip(min(cosines), 0., 1.))
     return {'contact_radius_m': min(radii), 'contact_normal_cosine': cosine,
             'normal_redirection_cost': np.sqrt(1. - cosine ** 2) / cosine if cosine else np.inf}
+
+
+def _grasp_area(shape, transform, tcp, hand, gap, *, surface=None):
+    """Use the same interior material for candidate and measured hold area.
+
+    Real collision surfaces retain their opposing contact layer. A flat
+    face need not include a remote spine's globally widest section. Round
+    candidates also require the touched section behind the tip: a tangent
+    patch alone does not establish insertion of that section. Primitives
+    without a surface keep their original widest-section query. The hand's
+    ordinary pad-tip margin applies in every case.
+    """
+    if surface is None:
+        return _held_area(shape, transform, tcp, hand, gap)
+    return _contact_area(surface, transform, tcp, hand, gap, section=isinstance(shape, Cylinder))
 
 
 def _contact_area(shape, transform, tcp, hand, gap, *, section=True):

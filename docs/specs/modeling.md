@@ -19,6 +19,7 @@
 | 碰撞对象 | `geometry_role = "collision"`；部件节点的子级；设置刚体碰撞形状；`hide_render = True` |
 | 碰撞形状 | 当前支持 `BOX`、`SPHERE`、显式闭合凸网格 `CONVEX_HULL`；`use_margin = True`、`collision_margin = 0` |
 | Scene | `penetration_tolerance_m`，单位 m，默认 0.0002 |
+| Scene（可选） | `max_drop_m`：专家放置时允许的松手落差上限，单位 m，缺省 0.15，0 表示不允许落差释放；导出到 `model.json`，不是物理参数 |
 
 `SPHERE` 的显示网格以对象原点为球心、各顶点到球心距离相同；检测和物理导出使用解析球体。
 

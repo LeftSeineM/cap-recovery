@@ -24,6 +24,7 @@ from table_1000.sim import CONTROL_HZ
 from table_1000.experts.asset_grasp.stability import (TRANSPORT, classify, is_dropped, metrics, motion_report)
 from table_1000.experts.asset_grasp.transport import coupled_twist, retime, retime_stroke
 from table_1000.experts.solver import PlanningFailed
+from table_1000.experts.skills.targets import targets, target_groups
 
 REGION_SIZE = .10
 WORK_OFFSET = (.05, 0.)  # keep the near edge of the square clear of the folded-arm workspace
@@ -35,56 +36,6 @@ SHAKE_OFFSETS = (1, -1, 1, -1, 0)
 # One tenth of the existing 0.01 joint tracking tolerance; only the measured
 # preflight start may be projected, never an IK result or a joint limit.
 START_PROJECTION_TOLERANCE = .001
-
-
-def oriented_shape(points):
-    """Fit in the geometry's oriented box, so a diagonal wire keeps its true width."""
-    from table_1000.experts.grasps import fitted, oriented_bounds
-    to_box, _ = oriented_bounds(points)
-    local = np.asarray(points) @ to_box[:3, :3].T + to_box[:3, 3]
-    shape, offset = fitted(local)
-    return shape, np.linalg.inv(to_box) @ offset
-
-
-def targets(skill):
-    """Convex whole objects first; hollow assemblies use solid collision parts."""
-    geometry = skill.ctx.geometry['object']
-    def target(part=None):
-        result = skill.target('object', part)
-        # The aggregate envelope is tried only after authored part candidates.
-        # This applies to solid bodies too: a broad envelope can hide a stable
-        # part choice even when it is itself collision-valid.
-        if part is None:
-            result.fallback = True
-        result.shape, result.offset = oriented_shape(geometry.points(part, result.body.split(':', 1)[1]))
-        return result
-    whole = target()
-    solid = geometry.solid(None, narrow=0.)
-    if solid:
-        yield whole
-    parts = [target(name) for body, name in geometry.parts()
-             if f'object:{body}' == whole.body and geometry.solid(name, narrow=0.)]
-    # A folded sheet or a ring has no solid part-level box. Its authored convex
-    # collision pieces provide actual contact surfaces, without asset-specific points.
-    for body, name, transform, kind, data in geometry.shapes:
-        if f'object:{body}' != whole.body or geometry.solid(name, narrow=0.) or kind != 'convex':
-            continue
-        shape, offset = oriented_shape(data)
-        piece = skill.target('object', name, shape=shape, offset=transform @ offset)
-        parts.append(piece)
-    parts.sort(key=lambda target: -float(np.prod(np.ptp(target.shape.points(), axis=0))))
-    for target in parts:
-        if not solid or target.names != whole.names:
-            yield target
-    if not solid:
-        yield whole
-
-
-def target_groups(candidates):
-    """Real parts first; the whole-assembly envelope is a planning fallback."""
-    return [group for fallback in (False, True)
-            if (group := [target for target in candidates if getattr(target, 'fallback', False) == fallback])]
-
 
 def pick(skill, report, candidates=None, excluded=()):
     """Choose real part heads, keeping full-list IDs when excluding prior attempts."""
@@ -131,9 +82,6 @@ def pick(skill, report, candidates=None, excluded=()):
                              'center_of_mass_world_m': ctx.env.center_of_mass(target.body)[0].tolist(),
                              'surface_contacts': list(ctx.env.contacts.surface_contacts.values())}
         report['closure'] = attempt['closure']
-        rest = [name for name, obj in solver.world.objects.items()
-                if obj.body == target.body and name not in target.names]
-        solver.carry(rest, target.names + result['supports'])
         before = ctx.poses()[target.body].copy()
         trace = []
         ctx.env.contacts.take_impulses()
@@ -159,7 +107,6 @@ def pick(skill, report, candidates=None, excluded=()):
                           'finger_gap_m': solver.finger_gap()}
         report['lift'] = attempt['lift']
         if rise < .05:
-            solver.release(rest, target.names + result['supports'])
             try:
                 skill.release(result['arm'])
             except ExpertFailed as error:

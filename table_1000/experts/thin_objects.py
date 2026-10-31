@@ -51,6 +51,14 @@ def classify(points, convex_pieces, hand):
     total = sum(volume for _, volume in pieces)
     median = pieces[np.searchsorted(np.cumsum([volume for _, volume in pieces]), total / 2)][0]
     thickness = float(median[0])
+    # A broad plate can be thick enough for an ordinary pad pinch, but its
+    # two in-plane dimensions exceed the opening. It needs the same exposed
+    # edge as a sheet. Use the whole-body extent as well as material thickness
+    # so the thin wall of a tall hollow container cannot select this route.
+    plate = (extent[1] > hand.max_gap and extent[0] < hand.max_gap
+             and extent[0] <= band + 2 * thickness and thickness < hand.max_gap)
+    if plate:
+        return ThinGeometry('plate', float(extent[0]), height, band)
     if thickness >= band or extent[0] > band + 2 * thickness:
         return None
     filament_volume = sum(volume for size, volume in pieces if size[1] < band)
@@ -129,8 +137,8 @@ def landing(points, center_of_mass, edge, overhang, along=None):
     return shift
 
 
-def swept_obstacle(convex_pieces, displacement, obstacles):
-    """First obstacle hit by the continuous translation of the actual convex union.
+def _swept_obstacles(convex_pieces, displacement, obstacles):
+    """Yield obstacles hit by continuous translation of the actual convex union.
 
     Each piece sweeps its own hull; empty space between pieces stays empty.
     ``obstacles`` contains world-frame FCL objects, without the support table.
@@ -141,8 +149,18 @@ def swept_obstacle(convex_pieces, displacement, obstacles):
                for piece in convex_pieces]
     swept = fcl.FCLObject('thin target sweep', pose(np.eye(4)), objects,
                           [pose(np.eye(4)) for _ in objects])
-    return next((name for name, obstacle in obstacles
-                 if fcl.collide(swept, obstacle, fcl.CollisionRequest()).is_collision()), None)
+    yield from (name for name, obstacle in obstacles
+                if fcl.collide(swept, obstacle, fcl.CollisionRequest()).is_collision())
+
+
+def swept_obstacles(convex_pieces, displacement, obstacles):
+    """All blockers of the continuous translation of the actual convex union."""
+    return list(_swept_obstacles(convex_pieces, displacement, obstacles))
+
+
+def swept_obstacle(convex_pieces, displacement, obstacles):
+    """First blocker of the actual convex translation; see :func:`swept_obstacles`."""
+    return next(_swept_obstacles(convex_pieces, displacement, obstacles), None)
 
 
 def exposed_points(points, edge):

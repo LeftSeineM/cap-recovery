@@ -189,7 +189,13 @@ class PlanningScene:
         self.padding, self.poses = 0., {}
         self.object_padding = {}
         # Explicit removals/detaches can drop matrix entries; retain scene-owned permissions.
-        self.permissions = set()
+        self.local_permissions = set()
+        self.shared_permissions = set()
+
+    @property
+    def permissions(self):
+        """Effective contacts, including declarations borrowed from another arm."""
+        return self.local_permissions | self.shared_permissions
 
     def add(self, obj, world_pose):
         self.objects[obj.name] = obj
@@ -240,7 +246,9 @@ class PlanningScene:
                 world.detach_object(name, False)
             if world.has_object(name):
                 world.remove_object(name)
-        self.objects, self.poses, self.permissions, self.object_padding = {}, {}, set(), {}
+        self.objects, self.poses, self.object_padding = {}, {}, {}
+        self.local_permissions.clear()
+        self.shared_permissions.clear()
 
     @timed('world_update')
     def set_frame(self, frame, body_poses=None):
@@ -262,8 +270,27 @@ class PlanningScene:
         """Grant or revoke contact between planning objects and robot links or other objects."""
         pairs = {frozenset((name, other)) for name in names for other in others}
         if allowed:
-            self.permissions |= pairs
+            self.local_permissions |= pairs
         else:
-            self.permissions -= pairs
+            self.local_permissions -= pairs
         acm = self.planner.planning_world.get_allowed_collision_matrix()
         acm.set_entry(list(names), list(others), allowed)
+        if not allowed:
+            self._apply_permissions(pairs & self.shared_permissions, True)
+
+    def _apply_permissions(self, pairs, allowed):
+        acm = self.planner.planning_world.get_allowed_collision_matrix()
+        for pair in pairs:
+            names = sorted(pair)
+            acm.set_entry(names[:1], names[1:] or names[:1], allowed)
+
+    def set_shared_permissions(self, pairs):
+        """Replace borrowed contacts without changing locally owned declarations."""
+        pairs = set(pairs)
+        if pairs == self.shared_permissions:
+            return
+        before = self.permissions
+        self.shared_permissions = pairs
+        after = self.permissions
+        self._apply_permissions(before - after, False)
+        self._apply_permissions(after - before, True)

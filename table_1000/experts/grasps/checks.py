@@ -23,7 +23,8 @@ class CollisionSurface:
 
     def __init__(self, shapes):
         self.pieces, self.vertices, bounds = [], [], []
-        for transform, kind, data in shapes:
+        self._authored_shapes = list(shapes)
+        for transform, kind, data in self._authored_shapes:
             if kind == 'sphere':
                 self.pieces.append((transform, kind, data))
             elif kind == 'convex':
@@ -92,7 +93,7 @@ class CollisionSurface:
             self._collision_objects = {}
         if key not in self._collision_objects:
             objects, poses = [], []
-            for (transform, kind, data), vertices in zip(self.pieces, self.vertices):
+            for (transform, kind, data), vertices in zip(self._authored_shapes, self.vertices):
                 if isinstance(enclosing, Box):
                     low, high = (transform[:3, 3] - data, transform[:3, 3] + data) if kind == 'sphere' \
                         else (vertices.min(0), vertices.max(0))
@@ -106,8 +107,11 @@ class CollisionSurface:
                         and np.all(np.abs(vertices[:, 2]) <= enclosing.length / 2)
                 if covered:
                     continue
-                objects.append(fcl.CollisionObject(geometry(kind, data if kind == 'sphere' else vertices)))
-                poses.append(pose(transform if kind == 'sphere' else np.eye(4)))
+                # Use the authored local vertices directly. A rigid round
+                # trip through candidate coordinates can perturb a thin face
+                # enough to make Trimesh produce a non-watertight hull.
+                objects.append(fcl.CollisionObject(geometry(kind, data)))
+                poses.append(pose(transform))
             self._collision_objects[key] = objects, poses
         return self._collision_objects[key]
 

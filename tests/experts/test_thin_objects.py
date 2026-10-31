@@ -35,7 +35,8 @@ def flat_thin(hand):
     pose = np.eye(4)
     pose[:3, 3] = [.5, 0., .0005]
     geometry = SimpleNamespace(shapes=[('body', 'body', np.eye(4), 'convex', points)],
-                               points=lambda frame: points)
+                               points=lambda part=None, frame=None: points, parts=lambda: [('body', 'body')],
+                               solid=lambda part, **kw: True)
     skill.arms, skill.held, skill.hands = ['right'], {}, {'right': hand}
     skill.ctx = SimpleNamespace(
         geometry={'sheet': geometry}, spec=SimpleNamespace(name='test'),
@@ -44,7 +45,7 @@ def flat_thin(hand):
         env=SimpleNamespace(objects={}, center_of_mass=lambda body: [pose[:3, 3]]),
         hold=lambda seconds: None, skills=lambda: skill)
     skill.target = lambda *args, **kwargs: target
-    skill.solvers = {'right': SimpleNamespace(finger_gap=lambda: .001, tcp=lambda: np.eye(4))}
+    skill.solvers = {'right': SimpleNamespace(finger_gap=lambda: .001, tcp=lambda: np.eye(4), attachments={})}
     skill.move_by_displacement = lambda arm, command: pose.__setitem__((2, 3), pose[2, 3] + command[2])
     skill.release = lambda arm: None
     return skill, target, pose
@@ -66,6 +67,7 @@ def test_thin_pick_defaults_still_use_preparation_and_lift(flat_thin):
     skill, target, _ = flat_thin
     calls = []
     def grasp_thin(chosen, **options):
+        skill.held['right'] = {'target': chosen}
         calls.append((chosen, options))
         return chosen, {'arm': 'right'}
     skill.grasp_thin = grasp_thin
@@ -78,6 +80,7 @@ def test_ordinary_pick_keeps_custom_arguments(flat_thin):
     skill.thin_geometry = lambda target: None
     calls = []
     def grasp(*args, **kwargs):
+        skill.held['right'] = {'target': target}
         calls.append((args, kwargs))
         return {'arm': 'right'}
     skill.grasp = grasp
@@ -88,6 +91,140 @@ def test_ordinary_pick_keeps_custom_arguments(flat_thin):
     assert args[:2] == (target, None)
     assert np.array_equal(args[2], point) and np.array_equal(args[3], approach)
     assert kwargs == {'then': (0., 0., .1), 'max_angle': angle, 'need': None, 'base': True}
+
+
+def test_thin_candidate_hand_preserves_container_opening_margin(flat_thin):
+    skill, target, _ = flat_thin
+    skill.hands['right'].opening_clearance = .01
+    target.container = True
+    assert skill.candidate_hand(target, 'right').opening_clearance == .002
+    skill._fingertip_candidates = True
+    tip = skill.candidate_hand(target, 'right')
+    assert tip.opening_clearance == .002 and tip.hold_margin == 0.
+    assert skill.hands['right'].opening_clearance == .01
+
+
+def test_sheet_preserves_reachable_edge_route_before_fingertip(flat_thin):
+    skill, target, _ = flat_thin
+    skill.thin_geometry = lambda target: SimpleNamespace(kind='sheet', thickness=.0045,
+        contact_height=.0047, contact_band=.0047)
+    skill.solvers['right'].world = SimpleNamespace(objects={
+        'sheet:base': SimpleNamespace(body=target.body),
+        'sheet:cap': SimpleNamespace(body=target.body),
+        'other:body': SimpleNamespace(body='other:body')})
+    skill.ctx.note = lambda *args, **kwargs: None
+    result = target, {'arm': 'right'}
+    skill.grasp_at_edge = lambda *args: result
+    skill.pinch_thin = lambda *args: pytest.fail('the existing edge route already succeeded')
+    assert skill.grasp_thin(target) is result
+
+
+@pytest.mark.parametrize('kind,reason,fallback', [
+    ('sheet', 'thin preparation search exhausted', True),
+    ('sheet', 'physical pressure failed', False),
+    ('plate', 'thin preparation search exhausted', False),
+    ('filament', 'thin preparation search exhausted', False),
+])
+def test_only_sheet_budget_exhaustion_falls_back_without_restarting_edge(flat_thin, kind, reason, fallback):
+    from table_1000.experts.context import ExpertFailed, Unreachable
+    skill, target, _ = flat_thin
+    skill.thin_geometry = lambda target: SimpleNamespace(kind=kind, thickness=.0045,
+        contact_height=.0047, contact_band=.0047)
+    skill.solvers['right'].world = SimpleNamespace(objects={})
+    skill.ctx.note = lambda *args, **kwargs: None
+    error = ExpertFailed(None, reason, candidates=960, limit=960)
+    need, calls = object(), []
+    def edge(*args):
+        calls.append('edge')
+        raise error
+    skill.grasp_at_edge = edge
+    def pinch(*args):
+        calls.append('pinch')
+        if kind == 'filament':
+            raise Unreachable(None, 'no fingertip grasp')
+        assert args[1:] == ('right', .2, need, False, True)
+        return 'pinched'
+    skill.pinch_thin = pinch
+    if fallback:
+        assert skill.grasp_thin(target, 'right', .2, need, False, True) == 'pinched'
+        assert calls == ['edge', 'pinch']
+    else:
+        with pytest.raises(ExpertFailed) as raised:
+            skill.grasp_thin(target, 'right', .2, need, False, True)
+        assert raised.value is error
+        assert calls == (['pinch', 'edge'] if kind == 'filament' else ['edge'])
+
+
+def test_blocked_plate_reports_edge_and_objects_to_clear(flat_thin):
+    from table_1000.experts.context import Unreachable
+    skill, target, _ = flat_thin
+    skill.thin_geometry = lambda target: SimpleNamespace(kind='plate', thickness=.02,
+        contact_height=.02, contact_band=.025)
+    skill.solvers['right'].world = SimpleNamespace(objects={})
+    skill.ctx.note = lambda *args, **kwargs: None
+    def fail(reason, kind=RuntimeError, **details):
+        raise kind(None, reason, **details)
+    skill.ctx.fail = fail
+    def blocked(*args):
+        raise Unreachable(None, 'no reachable pressure drag', rejected=[
+            {'stage': 'target drag sweep', 'obstacle': 'other:cover',
+             'edge': [0., -.5, 0.], 'arm': 'right'},
+            {'stage': 'target drag sweep', 'obstacle': 'other:spine',
+             'edge': [0., -.5, 0.], 'arm': 'left'}])
+    skill.grasp_at_edge = blocked
+    with pytest.raises(Unreachable, match='clear the obstacles.*retry pick') as error:
+        skill.grasp_thin(target)
+    assert error.value.details['edges'] == [{'edge': [0., -.5, 0.], 'clear_objects': ['other']}]
+
+
+@pytest.mark.parametrize('rejected', [{'grasp IK': 4, 'need': 2}, ['holder:wall']])
+def test_plate_edge_keeps_grasp_requirement_failure(flat_thin, rejected):
+    from table_1000.experts.skills.common import Unmet
+    skill, target, _ = flat_thin
+    skill.thin_geometry = lambda target: SimpleNamespace(kind='plate', thickness=.02,
+        contact_height=.02, contact_band=.025)
+    skill.solvers['right'].world = SimpleNamespace(objects={})
+    skill.ctx.note = lambda *args, **kwargs: None
+    failure = Unmet(None, 'no reachable grasp', rejected=rejected, blocked_by=['holder:wall'])
+    def blocked(*args):
+        raise failure
+    skill.grasp_at_edge = blocked
+    with pytest.raises(Unmet) as error:
+        skill.grasp_thin(target)
+    assert error.value is failure
+
+
+def test_prepared_plate_area_uses_opposing_local_faces_with_tip_margin(flat_thin):
+    from table_1000.experts.grasps import _held_area
+    from table_1000.experts.thin_objects import ExposedSection
+    skill, target, _ = flat_thin
+    faces = [Box((.03, .002, .02)).points() + [0., sign * .009, 0.]
+             for sign in (-1., 1.)]
+    # A thicker, remote spine must not demand its width under these pads.
+    faces.append(Box((.002, .024, .02)).points() + [.04, 0., 0.])
+    target.shape = ExposedSection(np.vstack(faces), faces)
+    skill.thin_geometry = lambda target: SimpleNamespace(kind='plate')
+    assert _held_area(target.shape, np.eye(4), np.eye(4), skill.hands['right'], .02) == 0.
+    assert skill.measured_held_area(target, 'right', np.eye(4), np.eye(4), .02) > 5e-6
+    remote = np.eye(4)
+    remote[2, 3] = .1
+    assert skill.measured_held_area(target, 'right', np.eye(4), remote, .02) == 0.
+
+
+def test_plate_preserves_lookahead_grasp_rejection(flat_thin):
+    from table_1000.experts.skills.common import Unmet
+    skill, target, _ = flat_thin
+    skill.thin_geometry = lambda target: SimpleNamespace(kind='plate', thickness=.02,
+        contact_height=.02, contact_band=.025)
+    skill.solvers['right'].world = SimpleNamespace(objects={})
+    skill.ctx.note = lambda *args, **kwargs: None
+    failure = Unmet(None, 'no reachable grasp', rejected={'grasp IK': 0, 'need': 3})
+    def rejected(*args):
+        raise failure
+    skill.grasp_at_edge = rejected
+    with pytest.raises(Unmet) as error:
+        skill.grasp_thin(target)
+    assert error.value is failure
 
 
 def test_grasp_rejects_unprepared_flat_thin_target(flat_thin):
@@ -289,12 +426,15 @@ def test_exposed_closure_cache_shares_tip_geometry_but_keeps_area_checks(hand, m
 
 
 def test_translation_sweep_checks_middle_without_bridging_empty_space():
+    from table_1000.experts.thin_objects import swept_obstacles
     from table_1000.planning.world import box_object
     transform = np.eye(4)
     transform[0, 3] = .5
     obstacle, pose = box_object('middle', (.1, .1, .1), transform)
     pieces = [Box((.1, .1, .1)).points()]
     assert swept_obstacle(pieces, np.array([1., 0., 0.]), [('middle', obstacle.fcl(pose))]) == 'middle'
+    assert swept_obstacles(pieces, np.array([1., 0., 0.]),
+        [('first', obstacle.fcl(pose)), ('second', obstacle.fcl(pose))]) == ['first', 'second']
     # The obstacle lies between two separately swept pieces, not in material.
     pieces = [piece + [0., offset, 0.] for piece in pieces for offset in (-.2, .2)]
     assert swept_obstacle(pieces, np.array([1., 0., 0.]), [('middle', obstacle.fcl(pose))]) is None
@@ -405,9 +545,11 @@ def test_supported_extraction_restores_departure_permissions_when_motion_fails()
     assert permissions[-1] == ('departure', ['table'])
 
 
-def test_optional_extraction_at_a_joint_limit_keeps_vertical_departure():
+@pytest.mark.parametrize('reason', ['joint_limit', 'collision'])
+def test_optional_plate_extraction_keeps_vertical_departure(reason):
     from table_1000.experts.solver import PlanningFailed
     skill = ThinPicking()
+    skill.thin_geometry = lambda target: SimpleNamespace(kind='plate')
     notes, permissions = [], []
     skill.ctx = SimpleNamespace(
         env=SimpleNamespace(center_of_mass=lambda body: [np.array([.005, 0., 0.])]),
@@ -418,7 +560,7 @@ def test_optional_extraction_at_a_joint_limit_keeps_vertical_departure():
         allow=lambda names: permissions.append(('departure', names)))}
     def unavailable(arm, command):
         skill.held[arm]['supports'] = []
-        raise PlanningFailed(None, 'joint_limit', plan={'iterations': 4})
+        raise PlanningFailed(None, reason, plan={'iterations': 4})
     skill.move_by_displacement = unavailable
     result = {'arm': 'right', 'supports': ['table'],
               'preparation': {'edge_outward': [-1., 0., 0.], 'edge_point': [0., 0., 0.]}}
@@ -532,3 +674,16 @@ def test_exposed_section_runs_shared_candidate_and_contact_queries(hand, monkeyp
     view = remote.closing_span(np.array([0., 1., 0.]), -.02, .02)
     low, high = view.interval(np.zeros((1, 3)), np.array([0., 1., 0.]))
     assert low[0] == pytest.approx(-.0005) and high[0] == pytest.approx(.0005)
+
+
+def test_broad_plate_uses_edge_route_but_tall_hollow_container_does_not(hand):
+    from dataclasses import replace
+    hand.max_gap = .08
+    plate = Box((.15, .10, .021)).points()
+    assert classify(plate, [plate], hand).kind == 'plate'
+    turn = Rotation.from_euler('xyz', [.4, .8, .2]).as_matrix()
+    assert classify(plate @ turn.T, [plate @ turn.T], hand).kind == 'plate'
+    too_thick = Box((.2, .15, .09)).points()
+    assert classify(too_thick, [too_thick], hand) is None
+    walls = [Box((.003, .10, .13)).points() + [x, 0., 0.] for x in (-.05, .05)]
+    assert classify(np.vstack(walls), walls, hand) is None

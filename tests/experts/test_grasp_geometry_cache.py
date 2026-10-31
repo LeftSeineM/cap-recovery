@@ -49,6 +49,30 @@ def test_hand_reuses_shape_geometry_across_openings(monkeypatch):
     assert first and len(calls) == first
 
 
+def test_vertices_cache_reuses_convex_hull_and_tracks_content(monkeypatch):
+    from table_1000.experts import grasps
+
+    grasps._cached_vertices.cache_clear()
+    original = grasps._mesh
+    calls = []
+    monkeypatch.setattr(grasps, '_mesh', lambda shape: (calls.append(shape) or original(shape)))
+    transform = np.eye(4)
+    data = np.array([[x, y, z] for x in (-.01, .01) for y in (-.02, .02) for z in (-.03, .03)])
+    shape = (transform, 'convex', data, False)
+
+    first = grasps._vertices(shape)
+    second = grasps._vertices((transform.copy(), 'convex', data.copy(), True))
+    assert len(calls) == 1
+    np.testing.assert_array_equal(first, second)
+    assert not first.flags.writeable
+
+    changed = data.copy()
+    changed[0, 0] += .001
+    third = grasps._vertices((transform, 'convex', changed, False))
+    assert len(calls) == 2
+    assert not np.array_equal(first, third)
+
+
 def test_cached_geometry_preserves_candidates_and_rejections():
     """Compare complete candidate streams with freshly rebuilt FCL shapes."""
     from table_1000.planning.world import box_object
@@ -125,33 +149,3 @@ def test_contact_math_scopes_blas_and_restores_after_failure(monkeypatch):
                 hand(), .05, [], .05)
         assert grasps._CONTACT_MATH.info() == before
     assert seen and set(seen) == {1}
-
-
-def test_angle_probe_and_phase_stream_keep_geometry_ids_and_full_cost_order(monkeypatch):
-    from table_1000.experts import grasps
-    calls = []
-    def placed(shape, transform, target, pose, *args):
-        calls.append(pose.copy())
-        # The closest approach is deliberately more expensive. The phase
-        # needs its angle, rather than the angle of the cheapest full head.
-        closest = pose[2, 0] < -.99
-        contact = np.array([.1, 0., 0.]) if closest else np.zeros(3)
-        return pose, 0., .02, contact, grasps.HOLD_AREA
-    monkeypatch.setattr(grasps, '_placed', placed)
-    args = Box((.02,) * 3), np.eye(4), hand(), [], (0., 0., -1.)
-    full = list(grasps.grasp_candidates(*args, step=np.pi / 2))
-    original_calls = len(calls)
-    calls.clear()
-    cache = {}
-    kw = dict(step=np.pi / 2, _placement_cache=cache)
-    probe = next(grasps.grasp_candidates(*args, **kw, _first_angle=True))
-    assert probe.info['approach_deg'] == 0. and full[0].info['approach_deg'] > 0.
-    phase = list(grasps.grasp_candidates(*args, **kw, max_angle=np.radians(15.)))
-    expected = [g for g in full if g.info['approach_deg'] <= 15. + 1e-6]
-    assert [g.choice for g in phase] == [g.choice for g in expected]
-    for actual, original in zip(phase, expected):
-        np.testing.assert_array_equal(actual.pose, original.pose)
-        assert (actual.cost, actual.info) == (original.cost, original.info)
-    movable = list(grasps.grasp_candidates(*args, **kw))
-    assert [g.choice for g in movable] == [g.choice for g in full]
-    assert len(calls) == original_calls  # each geometry is placed only once

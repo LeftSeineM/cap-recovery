@@ -89,6 +89,7 @@ def test_route_query_restores_the_world_when_collision_query_raises():
 
 def test_make_room_does_not_drive_when_stowing_still_leaves_both_routes_blocked():
     skill = Base()
+    skill.braced = False
     actions, stowed = [], []
     def fail(reason, **details):
         raise ExpertFailed('make room', reason, **details)

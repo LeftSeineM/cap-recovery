@@ -47,6 +47,21 @@ class ExpertFailed(RuntimeError):
         self.subtask, self.reason, self.details = subtask, reason, details
 
 
+class WallBudgetExceeded(ExpertFailed):
+    """A caller's cooperative wall deadline expired between planning operations."""
+
+
+def remaining_wall(ctx):
+    """Seconds left in an optional ``ctx.wall_deadline``; fail when it expires."""
+    deadline = getattr(ctx, 'wall_deadline', None)
+    if deadline is None:
+        return None
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0.:
+        raise WallBudgetExceeded(getattr(ctx, 'current', None), 'wall budget exceeded')
+    return remaining
+
+
 @dataclass
 class Step:
     """A step of an expert, between two states in which the hands hold nothing: ``run(ctx)`` does
@@ -135,6 +150,7 @@ class Context:
 
     @timed('control_step')
     def step(self, action=None):
+        remaining_wall(self)
         obs = self.env.step(action or {})
         self.sync_model()
         for observer in self.observers:

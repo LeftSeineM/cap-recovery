@@ -27,6 +27,27 @@ def encode(value):
         return {key: encode(item) for key, item in value.items()}
     if type(value).__name__ == 'InHand':
         return {'$': 'InHand', 'value': encode(value.recipe)}
+    if type(value).__name__ == 'FlatReleaseGeometry':
+        # These caches contain native objects and hand identity keys. Replay
+        # rebuilds them from the same live hulls and logical release inputs.
+        return {'$': 'FlatReleaseGeometry', 'value': encode(dict(
+            obstacles=value.obstacles, wall_height=value.wall_height,
+            released=value.released, backoff=value.backoff, ceiling=value.ceiling,
+            blocked_by=sorted(value.blocked_by)))}
+    if type(value).__name__ == 'FCLObject':
+        shapes = []
+        for shape, pose in zip(value.shapes, value.shape_poses):
+            geometry = shape.get_collision_geometry()
+            if type(geometry).__name__ != 'Convex':
+                raise TypeError(f'cannot record FCLObject geometry {type(geometry).__name__}')
+            faces = np.asarray(geometry.get_faces(), dtype=np.int32).reshape(-1, 4)
+            if np.any(faces[:, 0] != 3):
+                raise TypeError('cannot record FCLObject with nontriangular convex faces')
+            shapes.append(dict(vertices=np.asarray(geometry.get_vertices()),
+                               faces=faces[:, 1:],
+                               pose=pose.to_transformation_matrix()))
+        return {'$': 'FCLObject', 'value': encode(dict(name=value.name,
+            pose=value.pose.to_transformation_matrix(), shapes=shapes))}
     if is_dataclass(value):
         return {'$': type(value).__name__, 'value': {f.name: encode(getattr(value, f.name)) for f in fields(value)}}
     if callable(value):
@@ -54,6 +75,19 @@ def decode(value, ctx=None):
         return tuple(decode(item, ctx) for item in value['value'])
     if kind == 'InHand':
         return ctx.skills().restore_need(decode(value['value'], ctx))
+    if kind == 'FlatReleaseGeometry':
+        from table_1000.experts.skills.flat_release import FlatReleaseGeometry
+        arguments = decode(value['value'], ctx)
+        arguments['blocked_by'] = set(arguments['blocked_by'])
+        return FlatReleaseGeometry(**arguments)
+    if kind == 'FCLObject':
+        from mplib.collision_detection import fcl
+        from table_1000.planning.world import pose
+        arguments = decode(value['value'], ctx)
+        shapes = [fcl.CollisionObject(fcl.Convex(shape['vertices'], shape['faces']))
+                  for shape in arguments['shapes']]
+        return fcl.FCLObject(arguments['name'], pose(arguments['pose']), shapes,
+                             [pose(shape['pose']) for shape in arguments['shapes']])
     from table_1000.experts.grasps import Box, Cylinder
     from table_1000.experts.skills.common import Target
     return {'Box': Box, 'Cylinder': Cylinder, 'Target': Target}[kind](**decode(value['value'], ctx))
@@ -63,8 +97,9 @@ def planner_state(ctx):
     return {arm: {'attached': encode(solver.attachments),
                   'poses': encode(solver.world.poses), 'frame': encode(solver.world.frame),
                   'qpos': encode(solver.planner.robot.get_qpos()),
-                  'permissions': [sorted(pair) for pair in sorted(solver.world.permissions, key=lambda p: sorted(p))],
-                  'padding': solver.world.padding, 'object_padding': getattr(solver.world, 'object_padding', {}).copy(),
+                  'permissions': [sorted(pair) for pair in sorted(solver.world.local_permissions, key=lambda p: sorted(p))],
+                  'shared_permissions': [sorted(pair) for pair in sorted(solver.world.shared_permissions, key=lambda p: sorted(p))],
+                  'padding': solver.world.padding, 'object_padding': solver.world.object_padding.copy(),
                   'extra_objects': [dict(name=obj.name, body=obj.body, raw=encode(obj.raw), padded=obj.padded,
                                          pose=encode(solver.world.poses[name]))
                                     for name, obj in solver.world.objects.items()
@@ -222,27 +257,28 @@ def restore(ctx, entry, restore_rng=True):
         solver = ctx.solver(arm)
         for obj in state['extra_objects']:
             solver.world.add(PlanningObject(obj['name'], obj['body'], decode(obj['raw']), obj['padded']), decode(obj['pose']))
+        solver.world.set_shared_permissions(())
         for pair in list(solver.world.permissions):
             names = sorted(pair)
             solver.world.allow(names[:1], names[1:] or names[:1], False)
         # IK can run before sync(): preserve the exact planning world seen by the
         # original call, including obstacles last updated by an earlier plan.
-        if 'frame' in state:
-            solver.world.frame = decode(state['frame'])
+        solver.world.frame = decode(state['frame'])
         solver.world.set_padding(state['padding'])
-        for name, pose in decode(state.get('poses', {})).items():
+        for name, pose in decode(state['poses']).items():
             solver.world.set_pose(name, pose)
-        for name, padding in state.get('object_padding', {}).items():
+        for name, padding in state['object_padding'].items():
             default = solver.world.padding
             solver.world.padding = padding
             solver.world.set_pose(name, solver.world.poses[name])
             solver.world.padding = default
         for name, relative in decode(state['attached']).items():
             solver.attach_at(name, relative)
+        shared = {frozenset(pair) for pair in state['shared_permissions']}
         for pair in state['permissions']:
             solver.world.allow(pair[:1], pair[1:] or pair[:1])
-        if 'qpos' in state:
-            solver.planner.robot.set_qpos(decode(state['qpos']), True)
+        solver.world.set_shared_permissions(shared)
+        solver.planner.robot.set_qpos(decode(state['qpos']), True)
     ctx.current = entry['current']
     ctx.env.contacts.phase = ctx.current
     if restore_rng:

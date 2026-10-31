@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from table_1000.experts.asset_grasp import displacement, inventory, summarize
+from table_1000.experts.skills.common import Target
 
 
 def test_repeated_instances_run_once_and_exclusions_are_explicit():
@@ -157,7 +158,7 @@ def test_hollow_assembly_tries_real_parts_before_filled_bounding_box():
 
 
 def test_diagonal_thin_part_keeps_its_actual_width():
-    from table_1000.experts.asset_grasp import oriented_shape
+    from table_1000.experts.skills.targets import oriented_shape
     from table_1000.experts.grasps import Box
     from scipy.spatial.transform import Rotation
     rotation = Rotation.from_euler('z', 30, degrees=True).as_matrix()
@@ -253,8 +254,9 @@ def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thi
     from table_1000.experts.grasps import Box
     pose = np.eye(4)
     attempts, released = [], []
-    candidates = [types.SimpleNamespace(shape=Box((.02,.03,.04)),
-                  names=[name], body='object:body') for name in ('handle', 'head')]
+    box = Box((.02, .03, .04))
+    candidates = [Target('object', [name], 'object:body', box, np.eye(4), box.points())
+                  for name in ('handle', 'head')]
     candidates[1].fallback = True
     monkeypatch.setattr(asset_grasp, 'targets', lambda skill: iter(candidates))
     def fail(reason, **details):
@@ -306,7 +308,8 @@ def test_thin_search_exhaustion_ends_acceptance_without_restarting_on_another_pa
     from table_1000.experts.context import ExpertFailed
     from table_1000.experts.grasps import Box
     import pytest
-    candidates = [types.SimpleNamespace(shape=Box((.02, .01, .001)), names=[name])
+    box = Box((.02, .01, .001))
+    candidates = [Target('object', [name], 'object:body', box, np.eye(4), box.points())
                   for name in ('patch1', 'patch2')]
     monkeypatch.setattr(asset_grasp, 'targets', lambda skill: iter(candidates))
     attempts = []
@@ -326,7 +329,8 @@ def test_whole_envelope_is_only_a_planning_fallback():
     from table_1000.experts.asset_grasp import pick, target_groups
     from table_1000.experts.context import ExpertFailed
     from table_1000.experts.grasps import Box
-    parts = [types.SimpleNamespace(shape=Box((.02,) * 3), names=[name], body='object:body', fallback=fallback)
+    box = Box((.02,) * 3)
+    parts = [Target('object', [name], 'object:body', box, np.eye(4), box.points(), fallback=fallback)
              for name, fallback in [('whole', True), ('part_a', False), ('part_b', False)]]
     assert [[t.names[0] for t in group] for group in target_groups(parts)] == [['part_a', 'part_b'], ['whole']]
     calls = []
@@ -343,7 +347,6 @@ def test_whole_envelope_is_only_a_planning_fallback():
 def test_solid_whole_envelope_also_follows_authored_parts(monkeypatch):
     from table_1000.experts import asset_grasp
     from table_1000.experts.grasps import Box
-    from table_1000.experts.skills.common import Target
     box = Box((.02,) * 3)
     geometry = types.SimpleNamespace(solid=lambda part, **kw: True,
         parts=lambda: [('body', 'body.a'), ('body', 'body.b')], shapes=[], points=lambda *args: box.points())
@@ -351,7 +354,7 @@ def test_solid_whole_envelope_also_follows_authored_parts(monkeypatch):
         names = ['object:body.a', 'object:body.b'] if part is None else ['object:' + part]
         return Target(obj, names, 'object:body', box, np.eye(4), box.points())
     skill = types.SimpleNamespace(ctx=types.SimpleNamespace(geometry={'object': geometry}), target=target)
-    monkeypatch.setattr(asset_grasp, 'oriented_shape', lambda points: (box, np.eye(4)))
+    monkeypatch.setattr('table_1000.experts.skills.targets.oriented_shape', lambda points: (box, np.eye(4)))
     groups = asset_grasp.target_groups(list(asset_grasp.targets(skill)))
     assert [[t.names for t in group] for group in groups] == [
         [['object:body.a'], ['object:body.b']], [['object:body.a', 'object:body.b']]]

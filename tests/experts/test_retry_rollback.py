@@ -15,7 +15,7 @@ def context(limit):
     env=SimpleNamespace(targets=lambda:{'commands':state['commands']},contacts=SimpleNamespace(phase='pick'))
     skill=SimpleNamespace(held={},reaches={},log=[])
     ctx=SimpleNamespace(env=env,steps=0,current='pick',_skills=skill,solvers={},rng=np.random.default_rng(7),
-        skills=lambda:skill,events=[],subtasks=[],subtask_wall_s=[],subtask_profiles=[],checkpoints=[],skill_attempts=limit,scene=SimpleNamespace(OBJECTS={}))
+        skills=lambda:skill,requirements=[],events=[],subtasks=[],subtask_wall_s=[],subtask_profiles=[],checkpoints=[],skill_attempts=limit,scene=SimpleNamespace(OBJECTS={}))
     ctx.trace=CallTrace(ctx,7,0)
     def capture():return deepcopy(state)
     def restore(saved):

@@ -8,7 +8,7 @@ from table_1000.common.timing import timed
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from table_1000.experts.context import DT, steps
+from table_1000.experts.context import DT, remaining_wall, steps
 from table_1000.experts.skills.common import IK_ATTEMPTS, collisions
 from table_1000.experts.solver import PlanningFailed
 from table_1000.experts.problems import decision, mark
@@ -100,7 +100,7 @@ class Base:
     def base_pose(self):
         return np.asarray(self.ctx.env.obs['agent']['base_pose'][0], dtype=float)
 
-    def move_base(self, forward=0., turn=0.):
+    def move_base(self, forward=0., turn=0., settle=BASE_SETTLE):
         """Drive the base straight by ``forward`` (m along its heading, back when negative), then turn
         it in place by ``turn`` (rad); the arms keep their joints."""
         ctx = self.ctx
@@ -120,14 +120,14 @@ class Base:
                 break
             ctx.step({'base': [[0., np.clip(BASE_GAIN * error, -BASE_TURN, BASE_TURN)]]})
         ctx.step({'base': [[0., 0.]]})
-        ctx.hold(BASE_SETTLE)
+        ctx.hold(settle)
         for solver in self.solvers.values():
             solver.sync()
         ctx.note('base moved', forward=forward, turn=turn, pose=self.base_pose().tolist())
 
     @decision
     @timed('base_search')
-    def base_for(self, poses, arms=None, need=None, path=False, touch=None, relocate=False):
+    def base_for(self, poses, arms=None, need=None, path=False, touch=None, relocate=False, evaluate=None):
         """World pose ``(x, y, yaw)`` of the base from where one of ``arms`` (default the free ones)
         reaches ``need`` (default all) of ``poses`` with each joint ``BASE_MARGIN`` inside its limits:
         where it stands if they are reached from there, else the sampled pose (see the constants)
@@ -138,7 +138,9 @@ class Base:
         Each of ``poses`` is a world TCP pose or a list of them
         along a straight move, each solved from the one before at the torso height of the first
         (``path``: ``poses`` are one such list); ``{arm: poses}`` gives each arm its own. The fingers
-        may touch the planning objects ``touch`` there (default: any; see :meth:`reached`)."""
+        may touch the planning objects ``touch`` there (default: any; see :meth:`reached`).
+        Optional ``evaluate(groups, need, touch)`` replaces the reach evaluator and returns
+        ``(reached, margin)`` when both arms must share one torso/base stance."""
         model, ctx = self.model, self.ctx
         if not isinstance(poses, dict):
             arms = list(arms) if arms else [a for a in self.arms if a not in self.held]
@@ -168,6 +170,7 @@ class Base:
         try:
             mark(self, 'samples', samples=[current, *samples], groups=groups, need=need)
             for index, pose in enumerate([current, *samples]):
+                remaining_wall(ctx)
                 mark(self, 'candidate', index, pose=pose)
                 if len(checked) >= BASE_CHECKS[most[0] <= 0]:
                     break
@@ -190,7 +193,7 @@ class Base:
                     continue
                 checked.append(pose)
                 mark(self, 'IK')
-                reached, margin = self.reached(groups, need, touch)
+                reached, margin = (evaluate or self.reached)(groups, need, touch)
                 if reached < need:
                     mark(self, 'IK', outcome='rejected', reached=reached, margin=margin)
                     rejected['IK'] += 1
@@ -276,6 +279,7 @@ class Base:
             try:
                 reached, margins = 0, []
                 for group in own:
+                    remaining_wall(getattr(self, 'ctx', None))
                     margins.append(self.path_margin(arm, group, attempts=BASE_IK_ATTEMPTS))
                     reached += margins[-1] >= BASE_MARGIN
                     if reached >= need:
@@ -296,15 +300,18 @@ class Base:
         starts = [index for index, straight in enumerate(linear) if not straight] + [len(poses)]
         overall = np.inf
         for begin, end in zip(starts[:-1], starts[1:]):
+            remaining_wall(getattr(self, 'ctx', None))
             status, goals = model.ik(arm, poses[begin], world=True, lift=True, attempts=attempts, closest=False)
             if status != 'Success':
                 return -np.inf
             best = -np.inf
             for first in sorted(goals, key=lambda q: np.linalg.norm(q - model.q)):
+                remaining_wall(getattr(self, 'ctx', None))
                 q = first.copy()
                 margin = float(np.min(np.minimum(q[indices] - model.limits[indices, 0],
                                                   model.limits[indices, 1] - q[indices])))
                 for pose in poses[begin + 1:end]:
+                    remaining_wall(getattr(self, 'ctx', None))
                     result = model.plan_screw(arm, pose, q, world=True, time_step=DT)
                     if result['status'] != 'Success':
                         break
@@ -321,13 +328,16 @@ class Base:
                 return -np.inf
         return overall
 
-    def make_room(self, poses, arms=None, need=None, path=False, touch=None, relocate=False):
+    def make_room(self, poses, arms=None, need=None, path=False, touch=None, relocate=False, evaluate=None):
         """Move the base (see :meth:`base_for`) to where ``poses`` are reachable with a margin: the
         free arms in where they would sweep something on the way, turned in place, straight on,
         turned in place."""
+        if self.braced:
+            self.ctx.fail('cannot move the base while bracing; release the brace and reposition first')
         if not self.ctx.spec.base:
             return
-        chosen = self.base_for(poses, arms, need, path, touch, relocate=relocate)
+        chosen = self.base_for(poses, arms, need, path, touch, relocate=relocate,
+                               **({"evaluate": evaluate} if evaluate is not None else {}))
         self.ctx.note('room', chosen=None if chosen is None else [float(v) for v in chosen])
         if chosen is None:
             return
@@ -344,8 +354,12 @@ class Base:
         self.ctx.note('base route', waypoints=[pose.tolist() for pose in route])
         for goal in route:
             first, distance, last = drive(self.base_pose(), goal)
-            self.move_base(0., first)
-            self.move_base(distance, last)
+            turning = abs(first) >= BASE_TOLERANCE[1]
+            travelling = abs(distance) >= BASE_TOLERANCE[0] or abs(last) >= BASE_TOLERANCE[1]
+            if turning:
+                self.move_base(0., first, 0. if travelling else BASE_SETTLE)
+            if travelling:
+                self.move_base(distance, last)
         self.note_relocated(before)
 
     def clear_way(self, start, goal):
@@ -385,7 +399,11 @@ class Base:
         """The free ``arms`` (default all) that are out back at their ready pose (see :meth:`ready`),
         as a skill does before it moves the base when nothing is in reach as the arms are, or when a
         move runs into them; whether any was out."""
-        out = [arm for arm in (self.arms if arms is None else arms) if arm not in self.held
+        arms = self.arms if arms is None else arms
+        if self.braced:
+            # The support hand is excluded from the selectable arms while bracing.
+            arms = [arm for arm in arms if arm in self.arms]
+        out = [arm for arm in arms if arm not in self.held
                and np.abs(self.home - self.model.q)[self.model.arm_indices(arm)].max() >= READY_TOLERANCE]
         if out:
             self.ctx.note('arms stowed', arms=out, why=why)
@@ -412,10 +430,12 @@ class Base:
             solver, indices = self.solvers[arm], self.model.arm_indices(arm)
             goal = self.model.q.copy()
             goal[indices] = self.home[indices]
-            if np.abs(goal - self.model.q).max() < READY_TOLERANCE:
-                continue
-            try:
-                solver.open_gripper()
-                solver.move_to_pose_with_RRTConnect(None, goals=[goal])
-            except PlanningFailed as error:
-                self.ctx.note('not ready', arm=arm, reason=error.reason)
+            if np.abs(goal - self.model.q).max() >= READY_TOLERANCE:
+                try:
+                    solver.move_to_pose_with_RRTConnect(None, goals=[goal])
+                except PlanningFailed as error:
+                    self.ctx.note('not ready', arm=arm, reason=error.reason)
+                    continue
+            # Keep the release gap until withdrawal has succeeded. At the
+            # ready pose the empty hand can already open without an arm move.
+            solver.open_gripper()
