@@ -25,6 +25,7 @@ class RetryState:
         self.skill_log = len(ctx.skills().log)
         self.lengths = {name:len(getattr(ctx,name)) for name in ('events','subtasks','subtask_wall_s','subtask_profiles','checkpoints')}
         self.frames = len(ctx.trace.frames)
+        self.failure_start = ctx.trace.search.serial
         self.record = ctx.trace.problems
         if self.record:
             self.problem_lengths = {name:len(getattr(self.record,name)) for name in ('operations','decisions','events')}
@@ -38,7 +39,9 @@ class RetryState:
         ctx, trace = self.ctx, self.ctx.trace
         # The archive owns the failed trajectory and frames; the main episode retains
         # only a continuous prefix followed by the successful/final attempt.
+        observed = trace.search.rollback(self.control, retry, failure, self.failure_start)
         attempt = ctx.archive_retry(self.control, retry, failure)
+        attempt.update(failure_id=observed['failure_id'], branch=observed['branch'])
         self.attempts.append(attempt)
         ctx.env.restore_retry(self.physical)
         ctx.sync_model()
@@ -69,6 +72,7 @@ class RetryState:
             del getattr(ctx,name)[length:]
         del trace.frames[self.frames:]
         trace.failure_frame = None
+        trace.search.next_branch(self.control, retry)
         if self.record:
             for name,length in self.problem_lengths.items():
                 del getattr(self.record,name)[length:]

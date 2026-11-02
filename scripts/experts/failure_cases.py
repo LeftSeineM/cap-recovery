@@ -1,7 +1,7 @@
 """Failed expert episodes as cases to look at: views of the scene where the failing subtask began
 and where the episode stopped, with the numbers of its report.
 
-``uv run python scripts/experts/failure_cases.py runs/expert/000002/<run> [--seeds 4 44] [--out DIR]``
+``uv run python scripts/experts/failure_cases.py runs/expert/000002/x1pro/0000/<run> [--seeds 4 44] [--out DIR]``
 
 Runs on a GPU. For every failed seed of the batch (``--seeds``: only those), into
 ``<out>/<seed>/`` (``<out>`` = ``<batch>/cases``):
@@ -10,7 +10,7 @@ Runs on a GPU. For every failed seed of the batch (``--seeds``: only those), int
   last run) and the final state, from the robot's head camera (``face_view``), the scene's own views (``wide``, ``close``)
   and four around the scene's ``wide`` target (``top``, ``right``, ``left``, ``front``);
 - ``start.jpg``, ``end.jpg``: those views tiled;
-- ``case.json``: the commit and seed, the failure (subtask, reason, details), what the motion
+- ``summary.json``: the canonical root/all-attempt case manifest, with preview numbers of what the motion
   planners rejected in that subtask, the events it noted, and the steps the frames are at.
 
 To see whether a case fails again with the same code, rerun its seed from the checkpoint of the
@@ -26,6 +26,8 @@ import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+
+from table_1000.common.serialization import dumps
 
 # Views around the target of the scene's wide view: (offset of the camera from it, focal length mm).
 AROUND = {
@@ -114,7 +116,8 @@ def main(argv=None):
             subtask, last = report['failure']['subtask'], episode.length     # state(length): after the last step
             start = min(failing_start(report), last)
             out = args.out / str(seed)
-            out.mkdir(parents=True, exist_ok=True)
+            from table_1000.experts.audit.records import export_case
+            canonical = export_case([args.batch], seed, out)
             for moment, t in (('start', start), ('end', last)):
                 replay.set_state(env, episode.state(t))
                 for _ in range(FIRST_FRAME_RENDERS):     # each frame follows another state
@@ -124,10 +127,8 @@ def main(argv=None):
                 for name, image in images.items():
                     image.save(out / f'{moment}_{name}.jpg', quality=88)
                 tile([images[name] for name in names], CELL_HEIGHT).save(out / f'{moment}.jpg', quality=85)
-            (out / 'case.json').write_text(json.dumps({'commit': summary['commit'], 'batch': str(args.batch.resolve()),
-                                                       **{key: summary[key] for key in ('robot', 'expert', 'layout')},
-                                                       **case(report), 'frames': {'start': start, 'end': last}},
-                                                      indent=1, default=str))
+            canonical['preview'] = {**case(report), 'frames': {'start': start, 'end': last}}
+            (out / 'summary.json').write_text(dumps(canonical, indent=1))
             print(seed, subtask, report['failure']['reason'], flush=True)
         env.close()
     except Exception:

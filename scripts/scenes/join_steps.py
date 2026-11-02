@@ -19,10 +19,10 @@ The joined episodes are the scene's batch like one run of the whole expert: ``DI
 last part's status) and a ``summary.json``; ``render.py <scene> --physics <backend>``
 renders them. ``episodes/<seed>.json`` is the last part's report placed in the joined episode
 (control steps shifted, ``status`` and ``failure`` as the joined episode's, ``parts``, the
-summed ``wall_s``). The last part's call and solve records are copied alongside,
+summed ``wall_s``). All parts' call, solve and retry records are copied in trace-parts namespaces; the last part's records are also copied alongside,
 with ``call_trace_offset`` mapping their control steps and ``call_trace_initial_state``
-keeping that part's own initial state for entry at local step zero. Earlier parts'
-records and later repeats stay in their source batches. ``summary.json`` counts
+keeping that part's own initial state for entry at local step zero. Source frame ranges
+remain local inside each namespace; trace_parts maps them to the joined trajectory. ``summary.json`` counts
 the joined reports as ``run_expert.py`` does, with the commits
 joined. Into the scene's data (no ``--output``) only a join of every seed through every step
 goes.
@@ -60,7 +60,7 @@ def step_count(batch):
 def shifted(report, offset, length):
     """An episode report of a part that starts at control step ``offset`` of the joined episode."""
     report = dict(report)
-    report['events'] = [{**event, 'step': event['step'] + offset} for event in report.get('events', [])]
+    report['events'] = [{**event, 'step': event['step'] + offset} for event in report.get('events', []) if event['step'] <= length]
     report['plans'] = [{**plan, 'step': plan['step'] + offset} for plan in report.get('plans', [])]
     report['subtasks'] = [{**entry, 'start': entry['start'] + offset,
                            'end': None if entry['end'] is None else entry['end'] + offset}
@@ -97,6 +97,7 @@ def main(argv=None):
     from table_1000.experts.generate import summarize
     from table_1000.scenes.recordings import clear_batch, concatenate, decoded_attrs
     from table_1000.sim import CONTROL_HZ
+    from table_1000.scenes import batch_ref, resolve_batch_ref, rebase_batch_refs
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('batches', type=Path, nargs='+', help='batch directories, in step order')
     parser.add_argument('--output', type=Path,
@@ -108,7 +109,8 @@ def main(argv=None):
         if not (batch / 'summary.json').is_file():
             parser.error(f'{batch} has no summary.json')
         summary = json.loads((batch / 'summary.json').read_text())
-        if index and Path(summary.get('from') or '').resolve() != args.batches[index - 1].resolve():
+        if index and (not summary.get('from') or
+                      resolve_batch_ref(summary['from'], batch) != args.batches[index - 1].resolve()):
             parser.error(f'{batch} did not start from {args.batches[index - 1]}')
         summaries.append(summary)
     first = summaries[0]
@@ -179,20 +181,65 @@ def main(argv=None):
             out_file.create_group('data').attrs.update(dict(env_file['data'].attrs))
         for seed, chain in chains.items():
             sources, subtasks, steps, records, offset = [], [], [], [], 0
+            events, plans, trace_parts = [], [], []
             for index, group, _, length, done in chain:
                 sources.append((group, length))
                 subtasks += [{**entry, 'start': entry['start'] + offset,
                               'end': None if entry['end'] is None else min(entry['end'], length) + offset}
                              for entry in decoded_attrs(group).get('subtasks', []) if entry['start'] < length]
                 steps += [{**entry, 'at': entry['at'] + offset} for entry in done if entry['at'] <= length]
-                records.append({'batch': str(args.batches[index].resolve()), 'commit': summaries[index].get('commit'),
+                records.append({'batch': batch_ref(args.batches[index], args.output), 'commit': summaries[index].get('commit'),
                                 'steps_run': summaries[index].get('steps_run'), 'start': offset, 'length': length})
+                source_report = json.loads((args.batches[index] / 'episodes' / f'{seed}.json').read_text())
+                shifted_report = shifted(source_report, offset, length)
+                events.extend(shifted_report.get('events', []))
+                plans.extend(p for p in shifted_report.get('plans', []) if p['step'] <= offset + length)
+                if source_report.get('call_trace'):
+                    namespace = Path('trace-parts') / str(seed) / str(len(trace_parts))
+                    target = args.output / namespace
+                    target.mkdir(parents=True)
+                    for directory in ('calls', 'problems', 'attempts', 'repeat-trajectories'):
+                        parent = args.batches[index] / directory
+                        if parent.is_dir():
+                            (target / directory).mkdir()
+                            for path in parent.iterdir():
+                                if path.name.split('-', 1)[0].split('.', 1)[0] != str(seed):
+                                    continue
+                                if path.is_dir():
+                                    shutil.copytree(path, target / directory / path.name)
+                                else:
+                                    shutil.copyfile(path, target / directory / path.name)
+                    (target / 'episodes').mkdir()
+                    # Keep each part independently usable, including discarded
+                    # suffixes that do not belong to the joined physical path.
+                    copied_summary = rebase_batch_refs(summaries[index], args.batches[index], target)
+                    (target / 'summary.json').write_text(json.dumps(copied_summary, indent=1))
+                    for filename in ('trajectories.hdf5', 'trajectories_failed.hdf5'):
+                        if (args.batches[index] / filename).is_file():
+                            with h5py.File(args.batches[index] / filename) as original, h5py.File(target / filename, 'w') as copied:
+                                data = copied.create_group('data')
+                                data.attrs.update(dict(original['data'].attrs))
+                                name = f'demo_{seed}'
+                                if name in original['data']:
+                                    original.copy(original['data'][name], data, name)
+                    if source_report.get('trace_parts'):
+                        (target / 'trace-parts').mkdir()
+                        shutil.copytree(args.batches[index] / 'trace-parts' / str(seed), target / 'trace-parts' / str(seed))
+                    for path in (args.batches[index] / 'episodes').glob('*.json'):
+                        value = json.loads(path.read_text())
+                        if value['seed'] == seed:
+                            value = rebase_batch_refs(value, args.batches[index], target)
+                            (target / 'episodes' / path.name).write_text(json.dumps(value, indent=1))
+                    trace_parts.append(dict(directory=str(namespace), source=batch_ref(args.batches[index], args.output),
+                                            commit=summaries[index].get('commit'), offset=offset, length=length))
                 offset += length
             index, last, status, length = chain[-1][:4]
             if status == 'success' and index + 1 < len(found):
                 status = 'not run further'
             out = concatenate(sources, files['trajectories' if status == 'success' else 'trajectories_failed'],
                               f'demo_{seed}')
+            if out.attrs.get('from'):
+                out.attrs['from'] = batch_ref(resolve_batch_ref(out.attrs['from'], args.batches[chain[0][0]]), args.output)
             for key in ('status', 'failure'):
                 if key in last.attrs:
                     out.attrs[key] = last.attrs[key]
@@ -210,8 +257,10 @@ def main(argv=None):
             # The last part's report, placed in the joined episode, for the tools that read reports.
             report = shifted(json.loads((args.batches[index] / 'episodes' / f'{seed}.json').read_text()),
                              records[-1]['start'], length)
+            report = rebase_batch_refs(report, args.batches[index], args.output)
             carry_traces(args.batches[index], report, last, args.output, records[-1]['start'])
-            report.update(status=status, parts=records, duration_s=offset / CONTROL_HZ,
+            report.update(status=status, parts=records, events=events, plans=plans, subtasks=subtasks, steps=steps,
+                          trace_parts=trace_parts, duration_s=offset / CONTROL_HZ,
                           wall_s=sum(json.loads((args.batches[part] / 'episodes' / f'{seed}.json').read_text())['wall_s']
                                      for part, *_ in chain))
             if 'failure' in out.attrs:
@@ -233,7 +282,7 @@ def main(argv=None):
     summary = {**{key: first[key] for key in ('expert', 'scope', 'layout')},
                'outside_scope': any(item['outside_scope'] for item in summaries),
                'scene': summaries[0].get('scene'), 'robot': summaries[0].get('robot'),
-               'physics': summaries[0].get('physics'), 'joined': [str(batch.resolve()) for batch in args.batches],
+               'physics': summaries[0].get('physics'), 'joined': [batch_ref(batch, args.output) for batch in args.batches],
                'commit': commits[0] if len(commits) == 1 else None, 'commits': commits,
                **summarize(reports, sorted(chains)), 'failed': counts.get('failed', 0), 'error': counts.get('error', 0),
                'steps': summaries[-1].get('steps'), 'videos': {}, 'fails': {}}

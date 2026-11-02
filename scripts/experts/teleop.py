@@ -3,7 +3,7 @@
 ``uv run python scripts/experts/teleop.py 000002 --gpu 0 --port 8765``
 then open ``http://<server>:8765/`` (for example through ``ssh -L 8765:localhost:8765 <server>``).
 
-The page lists the cases of ``--runs`` (``runs/expert/<scene>/*``, see
+The page lists the cases of ``--runs`` (``runs/expert/<scene>/<robot>/<expert>/*``, see
 ``table_1000/experts/teleop.py``), lowest success rate over the ``--repeats`` runs first. Loading
 one resets the simulation to its start (the checkpoint before the failed step); the operator then
 does the step by hand, watching an outside view (the scene's first, which they can turn, pan and
@@ -31,6 +31,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+
+from table_1000.common.serialization import dumps
 
 DISPLAY_WIDTH = 640    # px, the widest robot camera rendered
 
@@ -125,18 +127,19 @@ def save_attempt(output, report, case, log, metadata):
     """Save an operated step, keeping the checkpoint's source batch through cleanup."""
     from table_1000.common.batch import load_record
     from table_1000.experts.generate import merge_checkpoints, summarize
+    from table_1000.scenes import batch_ref
     source_batch = Path(case['start']).parent.parent if log['start']['kind'] == 'step' else Path(case['batch'])
     report['teleop'] = {'case': case, **log}
-    (output / 'episodes' / f"{report['seed']}.json").write_text(json.dumps(report, indent=1, default=float))
+    (output / 'episodes' / f"{report['seed']}.json").write_text(dumps(report, indent=1))
     sources = list((output / 'checkpoints').glob('*.hdf5'))
     merge_checkpoints(sources, output, {key: metadata[key] for key in ('scene', 'robot', 'expert', 'physics', 'commit')})
     for checkpoint in sources:
         checkpoint.unlink()
-    summary = {**metadata, 'from': str(source_batch), **summarize([report], [report['seed']]),
+    summary = {**metadata, 'from': batch_ref(source_batch, output), **summarize([report], [report['seed']]),
                'teleop': {'case': case, 'start': log['start'], 'verdict': log.get('verdict'),
                          'final_check': log.get('final_check')},
                'load': load_record([report]), 'videos': {}, 'fails': {}}
-    (output / 'summary.json').write_text(json.dumps(summary, indent=1, ensure_ascii=False, default=float) + '\n')
+    (output / 'summary.json').write_text(dumps(summary, indent=1, ensure_ascii=False) + '\n')
     return summary
 
 
@@ -204,7 +207,7 @@ def run(args, argv):
     state = {'message': 'pick a case on the left'}
 
     def json_reply(value):
-        return json.dumps(value, default=float).encode(), 'application/json'
+        return dumps(value).encode(), 'application/json'
 
     def on_drag(event):
         operator.drag(event['view'], event.get('dx', 0.), event.get('dy', 0.), event.get('wheel', 0.))

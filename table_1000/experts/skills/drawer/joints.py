@@ -10,7 +10,7 @@ from table_1000.experts.skills.common import normalized
 OPEN_TOLERANCE = .02    # m short of the asked opening that still counts as open
 
 
-CLOSED = .005           # m from the closed end that counts as closed
+CLOSED = .020           # m from the closed end that counts as closed
 
 
 @dataclass

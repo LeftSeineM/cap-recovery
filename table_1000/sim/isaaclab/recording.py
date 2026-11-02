@@ -19,7 +19,7 @@ seed, instruction, subtasks, ...) to its group, JSON-encoded where they are not
 numbers or strings; ``data`` carries the environment's (``env_args``).
 """
 
-import json
+from table_1000.common.serialization import attribute
 
 import torch
 
@@ -50,7 +50,7 @@ class TrajectoryFile(HDF5DatasetFileHandler):
         super().write_episode(episode, demo_id)
         group = self._hdf5_data_group[name]
         for key, value in getattr(episode, 'attrs', {}).items():
-            group.attrs[key] = value if isinstance(value, (int, float, str)) else json.dumps(value)
+            group.attrs[key] = attribute(value)
 
 
 @configclass

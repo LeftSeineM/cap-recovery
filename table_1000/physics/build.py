@@ -27,7 +27,8 @@ def author(geometry_path, output_path):
 def rigid_assets(config=RIGID_CONFIG):
     """``{asset path: values}`` of the assets built as one rigid body, from ``configs/rigid_physics.json``:
     ``mass_kg`` in total, ``friction`` ``[static, dynamic]``, optional ``angular_damping`` (1/s) and
-    ``center_of_mass`` (m, body frame) and ``position_iterations`` (default 16); the keyword arguments
+    ``center_of_mass`` (m, body frame), ``diagonal_inertia`` (kg m²),
+    ``principal_axes`` (w, x, y, z) and ``position_iterations`` (default 16); the keyword arguments
     of :func:`table_1000.physics.rigid.author`."""
     return json.loads(Path(config).read_text())
 

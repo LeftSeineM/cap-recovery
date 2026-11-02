@@ -129,6 +129,10 @@ def write_batch(directory, episodes, summary):
         if 'failure' in attrs:
             report['failure'] = attrs['failure']
         (directory / 'episodes' / f'{seed}.json').write_text(json.dumps(report))
+    from table_1000.scenes import batch_ref
+    summary = dict(summary)
+    if summary.get('from'):
+        summary['from'] = batch_ref(summary['from'], directory)
     (directory / 'summary.json').write_text(json.dumps({'robot': 'test', 'expert': '0000', 'scope': {0: None}, 'layout': 0,
                                                      'seeds': seeds_record(episodes),
                                                      'outside_scope': False, **summary}))
@@ -177,7 +181,7 @@ def test_join_cuts_each_part_at_the_checkpoint_the_next_started_from(tmp_path, m
     assert summary['failures'] == {'a: r': [1], 'a: error': [3]} and summary['commits'] == ['c1', 'c2']
     # Each seed's report is its last part's, placed in the joined episode (the second part starts at 2).
     report = json.loads((joined / 'episodes' / '0.json').read_text())
-    assert report['events'][0]['step'] == 3 and [entry['at'] for entry in report['steps']] == [3, 5]
+    assert [event['step'] for event in report['events']] == [1, 3] and [entry['at'] for entry in report['steps']] == [2, 3, 5]
     assert report['control_steps'] == 5 and report['wall_s'] == 20. and len(report['parts']) == 2
     assert summary['seeds']['count'] == 4
     with pytest.raises(SystemExit):     # the first batch must start from the initial states
@@ -294,7 +298,7 @@ def test_successful_step_teleop_keeps_source_batch_and_can_be_joined(tmp_path):
     summary = save_attempt(output, episode, case, {'start': {'kind': 'step'}, 'verdict': 'done'},
                            {'scene': 'scene', 'robot': 'r', 'expert': '0000', 'physics': 'isaac-cpu', 'commit': 'abc',
                             'scope': {0: None}, 'layout': 0, 'outside_scope': False, 'steps_run': [2, 2]})
-    assert summary['from'] == str(source)
+    assert summary['from'] == '../source-batch'
     assert start_checkpoint(output, summary, 2) == source / 'checkpoints/step1.hdf5'
     assert start_checkpoint(output, summary, 2).is_file()
     assert not (output / 'checkpoints/4.hdf5').exists()
@@ -334,7 +338,7 @@ def test_joined_failure_keeps_traces_entry_state_and_offline_problems(tmp_path, 
     model.set_state(model.spec.keyframe('ready'))
     ctx = types.SimpleNamespace(model=model, spec=model.spec, steps=enter, current='pick', _skills=None,
                                 rng=np.random.default_rng(4), scene=types.SimpleNamespace(OBJECTS={}),
-                                env=types.SimpleNamespace(targets=lambda: {'gripper': np.array([[.03]])}))
+                                env=types.SimpleNamespace(audit_state=lambda: {'x': np.array([[19 + enter]])}, targets=lambda: {'gripper': np.array([[.03]])}))
     ctx.solvers = {'left': MotionSolver(ctx, 'left')}
     ctx.trace = CallTrace(ctx, 4, 0)
     record = ctx.trace.problems = Problems(ctx)
@@ -371,7 +375,7 @@ def test_joined_failure_keeps_traces_entry_state_and_offline_problems(tmp_path, 
     assert snapshot['frame']['id'] == 1 and snapshot['step'] == 2
     assert state['targets']['gripper'][0, 0] == .03
     snapshots([str(again), '--output', str(tmp_path / 'snapshots')])
-    (checkpoint,) = (tmp_path / 'snapshots').glob('scene/*/checkpoints/step1.hdf5')
+    (checkpoint,) = (tmp_path / 'snapshots').glob('scene/x1pro_rm001/0000/*/checkpoints/step1.hdf5')
     saved = read_checkpoints(checkpoint)[1][4][1]
     assert saved['x'][0, 0] == expected
     assert json.loads(saved['_expert_frame'])['frame']['enter'] == 2 + enter
@@ -380,3 +384,37 @@ def test_joined_failure_keeps_traces_entry_state_and_offline_problems(tmp_path, 
         result = json.load(file)
     assert result['selected'] == [0]
     assert result['operations'][0]['frame'] == 1 and result['operations'][0]['successes'] == 1
+
+
+def test_join_preserves_both_search_trees_and_events_after_sources_are_removed(tmp_path):
+    from scripts.scenes.join_steps import main as join
+    from table_1000.experts.audit.trace import CallTrace, frame
+    from table_1000.experts.audit.records import documents, statistics
+    first, last, joined = (tmp_path / name for name in ('first-tree', 'last-tree', 'joined-tree'))
+    for batch, step, parent in ((first, 1, None), (last, 2, first)):
+        write_batch(batch, {4: ('success', [1, 2], {'steps': [{'step': step, 'at': 2}], 'subtasks': []})},
+                    {'scene': 'scene', 'physics': 'isaac-cpu', 'steps_run': [step, step], 'from': str(parent) if parent else None})
+        ctx = types.SimpleNamespace(steps=0, current='solve', _skills=None, solvers={},
+            rng=np.random.default_rng(4), scene=types.SimpleNamespace(OBJECTS={}),
+            env=types.SimpleNamespace(audit_state=lambda: {'x': np.ones((1, 1))}, targets=lambda: {}))
+        ctx.trace = CallTrace(ctx, 4, 0)
+        with frame(ctx, 'step', 'solve', {'index': step}):
+            with pytest.raises(ExpertFailed):
+                with frame(ctx, 'skill', 'pick', concrete=True):
+                    raise ExpertFailed('solve', 'zero candidates', kind='planning')
+            ctx.steps = 2
+        path = batch / 'episodes/4.json'
+        report = json.loads(path.read_text())
+        report.update(call_trace='calls/4.json.gz', retry_archives=[])
+        path.write_text(json.dumps(report))
+        ctx.trace.save(batch / report['call_trace'])
+        (batch / 'calls/99.json.gz').write_text('another seed must not be duplicated')
+    join([str(first), str(last), '--output', str(joined)])
+    assert not list((joined / 'trace-parts/4').rglob('99.json.gz'))
+    first.rename(tmp_path / 'removed-first')
+    last.rename(tmp_path / 'removed-last')
+    trees = list(documents(joined, 4))
+    assert len(trees) == 2 and [tree['frames'][0]['arguments']['index'] for _, _, tree in trees] == [1, 2]
+    report = json.loads((joined / 'episodes/4.json').read_text())
+    assert [event['step'] for event in report['events']] == [1, 3]
+    assert statistics([joined])['categories']['a1']['count'] == 2

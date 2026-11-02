@@ -3,6 +3,8 @@
 from importlib.metadata import version
 import json
 from pathlib import Path
+
+from table_1000.common.serialization import dumps
 import runpy
 import shutil
 import sys
@@ -22,7 +24,7 @@ from table_1000.sim import PHYSICS_DT, CONTROL_HZ
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.part')
-    temporary.write_text(json.dumps(value, indent=2, default=float, ensure_ascii=False) + '\n')
+    temporary.write_text(dumps(value, indent=2, ensure_ascii=False) + '\n')
     temporary.replace(path)
 
 

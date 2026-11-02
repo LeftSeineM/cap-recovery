@@ -10,7 +10,7 @@ allows it (:meth:`MotionSolver.allow`), and held objects move with the hand
 (:meth:`MotionSolver.attach`, :meth:`MotionSolver.carry`). A plan that cannot be
 made raises :class:`PlanningFailed` with the reason (``IK Failed``,
 ``RRTConnect ...``, ``joint_limit``, ``collision``, ``path collision``,
-``tracking``).
+``task space goal not reached``).
 """
 
 from contextlib import nullcontext
@@ -20,7 +20,8 @@ from table_1000.common.timing import timed
 
 import numpy as np
 
-from table_1000.experts.context import DT, ExpertFailed, remaining_wall, steps
+from table_1000.experts.context import Context, DT, ExpertFailed, remaining_wall, steps
+from table_1000.experts.audit.search import observed_motion
 from table_1000.planning.world import PlanningScene, asset_objects, box_object, pose
 
 # Free-space (RRTConnect) plans keep this clearance from padded objects (its edges are checked
@@ -29,8 +30,10 @@ PADDING = .01
 # RRTConnect checks its edges coarsely; its time-parameterized path is re-checked
 # at this joint step and re-planned if any check collides.
 VALIDATION_STEP = .01
-ARRIVAL_TOLERANCE = .01   # rad, final joint error before a move counts as done
-SETTLE_LIMIT = .5         # s of extra holding allowed to reach it
+ARRIVAL_TOLERANCE = .01   # rad, final joint lag that starts the settling diagnostic
+SETTLE_LIMIT = .5         # s before evaluating the stopped task-space result
+TASK_POSITION_TOLERANCE = .020  # m, visible endpoint error
+TASK_ANGLE_TOLERANCE = np.radians(5.)
 GRIPPER_TIME = .6         # s for the fingers to close or open
 OPEN_GAP = .08            # m
 GRIPPER_THERE = .002     # m from a commanded opening the fingers count as there
@@ -66,6 +69,7 @@ class MotionSolver:
         self.timings = {'planning_s': 0., 'executing_s': 0.}
         self.attachments = {}
         self.overlaps = []      # pairs allowed for the plan being made (see _plan)
+        self.constraint_arrival = None  # scoped measured joint-result predicate for a drawer move
         self.lock_lift = False  # a second hand is supporting an external body
 
     # -- planning world --------------------------------------------------------------
@@ -176,6 +180,7 @@ class MotionSolver:
         return self.arm.gap(self.ctx.env.qpos(self.arm.fingers)[0])
 
     # -- planning ------------------------------------------------------------------------
+    @observed_motion
     @timed('motion_plan')
     def _plan(self, kind, function, goals=(), problem=None):
         remaining_wall(self.ctx)
@@ -414,8 +419,8 @@ class MotionSolver:
             final, held = positions[-1], 0
             while np.abs(self.qpos(lift is not None) - final).max() > ARRIVAL_TOLERANCE:
                 if held * DT >= SETTLE_LIMIT:
-                    raise PlanningFailed(self.ctx.current, 'tracking',
-                                         final_error_rad=float(np.abs(self.qpos(lift is not None) - final).max()))
+                    self.stopped_arrival(final, lift is not None, held)
+                    break
                 self.ctx.step()
                 held += 1
                 if monitor is not None and not monitor():
@@ -433,6 +438,63 @@ class MotionSolver:
             measured = self.qpos(lift is not None)
             self._tracking(max(worst, float(np.abs(measured[:len(target)] - target).max())), held,
                            float(np.abs(measured - final).max()), time.perf_counter() - started)
+
+    def stopped_arrival(self, final, lift, held):
+        """Stop a lagging joint command and accept only its measured task result.
+
+        Joint error is diagnostic. A visible pose miss, unintended collision,
+        or lost payload is a physical check failure; callers may select another plan.
+        A scoped drawer predicate can accept its measured opening at the stop.
+        """
+        q = self.model.q.copy()
+        count = len(self.arm.joints)
+        q[self.model.arm_indices(self.arm.name)] = final[:count]
+        if lift:
+            q[self.model.lift_indices()] = final[count:]
+        goal = self.model.tcp(self.arm.name, q, world=True)
+        measured = self.qpos(lift)
+        error = float(np.abs(measured - final).max())
+        stop = {self.arm.name: measured[:count][None]}
+        if lift:
+            stop['lift'] = measured[count:][None]
+        # Replace the unreachable position command before judging the stop;
+        # continued PD pressure against an obstacle is not a recovery plan.
+        for _ in range(steps(.2)):
+            self.ctx.step(stop)
+        actual = self.tcp()
+        position = float(np.linalg.norm(actual[:3, 3] - goal[:3, 3]))
+        angle = float(np.arccos(np.clip((np.trace(actual[:3, :3] @ goal[:3, :3].T) - 1) / 2, -1., 1.)))
+        predicate = getattr(self, 'constraint_arrival', None)
+        joint_done = bool(predicate is not None and predicate())
+        self.sync()
+        collisions = self.model.collisions(self.arm.name, self.model.q)
+        skills = getattr(self.ctx, '_skills', None)
+        payload = None
+        if skills is not None and self.arm.name in skills.held:
+            target = skills.held[self.arm.name]['target']
+            if not skills.constrained(target):
+                payload = skills.check_hold(target, self.arm.name)
+        reached = position <= TASK_POSITION_TOLERANCE and angle <= TASK_ANGLE_TOLERANCE or joint_done
+        details = dict(final_error_rad=error, joint_settle_s=held * DT,
+                       position_error_m=position, angle_error_deg=float(np.degrees(angle)),
+                       joint_result_reached=joint_done, task_reached=bool(reached),
+                       collisions=collisions, payload=payload)
+        self.ctx.note('motion tracking measured', arm=self.arm.name, **details)
+        self.log[-1].update(task_position_error_m=position, task_angle_error_deg=float(np.degrees(angle)),
+                            joint_result_reached=joint_done)
+        if payload is not None and not payload['held']:
+            self.ctx.note('missed grasp', arm=self.arm.name, closure=payload)
+            try:
+                skills.release(self.arm.name)
+            except ExpertFailed as error:
+                self.ctx.note('lost payload release failed', reason=error.reason, details=error.details)
+            # This grip no longer exists. Motion alternatives must not resume
+            # transport after release as they can for an unreached endpoint.
+            Context.fail(self.ctx, 'object lost while stopping', kind='check', **details)
+        if collisions:
+            Context.fail(self.ctx, 'collision', PlanningFailed, kind='check', **details)
+        if not reached:
+            Context.fail(self.ctx, 'task space goal not reached', PlanningFailed, kind='check', **details)
 
     def _tracking(self, worst, held, final, elapsed):
         record = getattr(getattr(self.ctx, 'trace', None), 'problems', None)

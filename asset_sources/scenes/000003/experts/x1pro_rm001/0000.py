@@ -49,18 +49,18 @@ def close_drawer(ctx):
 
 
 def pen_inside(ctx):
-    semantic.require(ctx, semantic.inside(ctx, 'pen', 'cabinet', 'cabinet.drawer3'), 'pen not in the drawer')
+    semantic.require(ctx, semantic.inside(ctx, 'pen', 'cabinet', 'cabinet.drawer3'), 'pen not in the drawer', kind='check')
 
 
 def closed_with_pen(ctx):
-    semantic.require(ctx, drawer_joints.is_closed(ctx, 'cabinet', DRAWER), 'drawer not closed')
+    semantic.require(ctx, drawer_joints.is_closed(ctx, 'cabinet', DRAWER), 'drawer not closed', kind='check')
     pen_inside(ctx)
 
 
 # Pick checks that the pen was lifted; pick and place share one step so that
 # checkpoints between steps never leave an object in hand (as in 000002).
 STEPS = [Step('open the bottom drawer', open_drawer,
-              lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'cabinet', DRAWER, OPENING), 'drawer not opened')),
+              lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'cabinet', DRAWER, OPENING), 'drawer not opened', kind='check')),
          Step('move the pen from the table to the bottom drawer', put_pen_inside, pen_inside),
          Step('close the bottom drawer', close_drawer, closed_with_pen)]
 

@@ -32,6 +32,8 @@ import traceback
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from table_1000.common.serialization import dumps
+
 WIDE = {'position': (1.5, -1.45, 1.6), 'target': (0., -.1, .8), 'focal_length_mm': 18, 'resolution': (960, 720)}
 SCENARIOS = ('open', 'box', 'side', 'back', 'corner')
 CLOSE = {'position': (.5, .6, 1.2), 'target': (0., 0., .8), 'focal_length_mm': 24, 'resolution': (960, 720)}
@@ -109,7 +111,7 @@ def worker(args):
                     encode(work / 'frames', 25, directory / 'videos' / f'{index:03d}_{name}_{report["status"]}.mp4')
                 path = trial_path(directory, index)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.with_suffix('.part').write_text(json.dumps(report, default=float))
+                path.with_suffix('.part').write_text(dumps(report))
                 path.with_suffix('.part').replace(path)
                 print(args.robot, args.scenario, seed, index, name, placement['pose'], report['status'],
                       report.get('failure', {}).get('reason', ''), f"{report['wall_s']:.0f} s", flush=True)
@@ -243,14 +245,14 @@ def main(argv=None):
         reports.sort(key=lambda report: report['index'])
         with open(path / 'trials.jsonl', 'w') as out:
             for report in reports:
-                out.write(json.dumps(report, default=float) + '\n')
+                out.write(dumps(report) + '\n')
         robot, scenario, seed = members[0][:3]
         summary = {'robot': robot, 'scenario': scenario, 'seed': seed, **summarize(reports)}
-        (path / 'summary.json').write_text(json.dumps(summary, indent=1, default=float) + '\n')
+        (path / 'summary.json').write_text(dumps(summary, indent=1) + '\n')
         overall['groups'][str(path.relative_to(args.output))] = {
             key: summary[key] for key in ('trials', 'success', 'unreachable', 'reachable_rate', 'rate')}
     overall['total_s'] = time.perf_counter() - started
-    (args.output / 'summary.json').write_text(json.dumps(overall, indent=1, default=float) + '\n')
+    (args.output / 'summary.json').write_text(dumps(overall, indent=1) + '\n')
     for name, entry in overall['groups'].items():
         print(f"{name:28s} {entry['success']}/{entry['trials']}  unreachable {entry['unreachable']}  "
               f"reachable success {entry['reachable_rate'] if entry['reachable_rate'] is None else round(entry['reachable_rate'], 3)}")

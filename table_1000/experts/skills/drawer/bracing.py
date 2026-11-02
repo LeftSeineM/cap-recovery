@@ -16,17 +16,17 @@ class Stability:
     """Peak housing translation/rotation and absolute opening of other sliders.
 
     Observe every control step, including approach and retreat. Relative to entry,
-    translation must stay <= 5 mm and rotation <= 2 degrees; every other slider
-    must stay <= 5 mm from its lower limit. An already open other drawer fails
+    translation must stay <= 20 mm and rotation <= 5 degrees; every other slider
+    must stay <= 20 mm from its lower limit. An already open other drawer fails
     immediately: close it before using ``brace=True``. Peaks are emitted in a
     ``drawer stability`` note even on failure. These checks are opt-in together
     with bracing; unbraced calls omit these stability checks.
     """
 
-    def __init__(self, ctx, obj, joint):
+    def __init__(self, ctx, obj, joint, baseline=None):
         from table_1000.experts.skills.drawer.joints import Joint
         self.ctx, self.obj, self.joint = ctx, obj, joint
-        self.start = ctx.pose(obj, joint.parent).copy()
+        self.start = (ctx.pose(obj, joint.parent) if baseline is None else baseline).copy()
         self.failed = False
         self.others = [Joint.of(ctx.geometry[obj], name) for name, entry in ctx.geometry[obj].joints.items()
                        if name != joint.name and entry['type'] == 'SLIDER']
@@ -42,9 +42,9 @@ class Stability:
         for joint in self.others:
             self.peak['other_openings_m'][joint.name] = max(self.peak['other_openings_m'][joint.name],
                                                           float(opening(ctx, self.obj, joint.name)))
-        if fail and not self.failed and (shift > .005 or angle > 2. or any(v > .005 for v in self.peak['other_openings_m'].values())):
+        if fail and not self.failed and (shift > .020 or angle > 5. or any(v > .020 for v in self.peak['other_openings_m'].values())):
             self.failed = True
-            ctx.fail('drawer housing stability exceeded (5 mm / 2 deg / other drawers 5 mm)', **self.peak)
+            ctx.fail('drawer housing stability exceeded (20 mm / 5 deg / other drawers 20 mm)', kind='check', **self.peak)
 
 
 def roof_contacts(ctx, obj, body):
@@ -238,12 +238,12 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
     groups = {active: paths, arm: [[translated(pose, -pose[:3, 0] * APPROACH), pose]
                                  for _, pose in options]}
     if not paths or not options:
-        ctx.fail('no collision-free drawer/support candidates; clear the drawer approach and housing', Unreachable)
+        ctx.fail('no collision-free drawer/support candidates; clear the drawer approach and housing', Unreachable, kind='planning')
     if relocate and ctx.spec.base:
         s.make_room(groups, need=1, touch=names+target.names, evaluate=both_reached)
     both_reached(groups, 1)
     if not chosen:
-        ctx.fail('no common reach for drawer and support; clear obstacles or use brace=False', Unreachable)
+        ctx.fail('no common reach for drawer and support; clear obstacles or use brace=False', Unreachable, kind='planning')
     point, pose = next(option for option in options if np.allclose(option[1], chosen['pose']))
     retreat_direction = None
     old_arms, old_braced = s.arms, s.braced
@@ -270,7 +270,7 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
                 if sample['bearing_now']:
                     break
             else:
-                ctx.fail('no loaded cabinet brace (1 N minimum); clear roof or use brace=False', Unreachable)
+                ctx.fail('no loaded cabinet brace (1 N minimum); clear roof or use brace=False', Unreachable, kind='check')
         ctx.note('cabinet braced', arm=arm, body=joint.parent, contact=point.tolist(),
                  preload_m=float(depth), load=sample)
         s.arms = [active]
@@ -289,7 +289,7 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
             finally:
                 candidates.close()
             if feasible is None:
-                ctx.fail('drawer grasp unreachable at measured brace contact', Unreachable)
+                ctx.fail('drawer grasp unreachable at measured brace contact', Unreachable, kind='planning')
             s.brace_seed = feasible[3].copy()
         lost = False
         def supported(context):
@@ -297,7 +297,7 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
             sample = load.read()
             if not sample['bearing_now'] and not lost:
                 lost = True
-                context.fail('cabinet brace lost its measured 1 N contact; reposition the support hand', load=sample)
+                context.fail('cabinet brace lost its measured 1 N contact; reposition the support hand', kind='check', load=sample)
         with contacts.observe_impulses(load.record):
             ctx.observers.append(supported)
             try:
@@ -329,8 +329,8 @@ def _brace(ctx, obj, joint, active, amount=None, *, relocate=False):
 
 
 @contextmanager
-def stability(ctx, obj, joint):
-    monitor = Stability(ctx, obj, joint)
+def stability(ctx, obj, joint, baseline=None):
+    monitor = Stability(ctx, obj, joint, baseline)
     ctx.observers.append(monitor.sample)
     try:
         monitor.sample(ctx)

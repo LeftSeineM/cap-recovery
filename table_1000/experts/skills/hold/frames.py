@@ -308,9 +308,9 @@ class Hand:
         theta = 0. if pivot is None else abs(next(iter(self.side.finger_targets(gap).values())))
         depth = min(float(np.ptp(points[pads, 0])) for _, points, pads in self.inner(gap))
         band = depth if abs(np.sin(theta)) < 1e-12 else min(depth, 2 * CONTACT_TOLERANCE / abs(np.sin(theta)))
-        return {'pad_angle_rad': 2 * theta, 'contact_band_m': band,
-                'edge_only': band < 2 * self.hold_margin,
-                'pad_alignment_cost': 1 - band / depth if depth else 1.}
+        return {'pad_angle_rad': float(2 * theta), 'contact_band_m': float(band),
+                'edge_only': bool(band < 2 * self.hold_margin),
+                'pad_alignment_cost': float(1 - band / depth if depth else 1.)}
 
     def moment_radius(self):
         """Equivalent circular radius of the existing desired pad holding area."""

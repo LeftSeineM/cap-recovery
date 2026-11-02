@@ -162,19 +162,26 @@ def blue_click_pen():
     root = asset('pen', 'barrel midpoint; axis at origin',
                  '+X rear/button; -X writing tip; Z up', 'writing tip at -X')
     shell = body('pen.shell', root)
-    tube('Blue barrel', 0.0048, 0.0028, 0.106, (0.010, 0, 0), blue, shell, segments=SEGMENTS)
+    tube('Blue barrel', 0.0048, 0.0028, 0.106, (0.010, 0, 0), blue, shell,
+         segments=SEGMENTS, solid_collision=True)
     tube('Black tapered grip', 0.0009, 0.00065, 0.033, (-0.0595, 0, 0), black, shell,
-         outer_end=0.0048, inner_end=0.0028, segments=SEGMENTS)
-    tube('Black rear collar', 0.0050, 0.0035, 0.006, (0.066, 0, 0), black, shell, segments=SEGMENTS)
+         outer_end=0.0048, inner_end=0.0028, segments=SEGMENTS, solid_collision=True)
+    tube('Black rear collar', 0.0050, 0.0035, 0.006, (0.066, 0, 0), black, shell,
+         segments=SEGMENTS, solid_collision=True)
     box('Black pocket clip', (0.038, 0.0015, 0.0010), (0.040, 0, 0.00545),
         black, shell)
     box('Clip bridge', (0.004, 0.0025, 0.0015), (0.057, 0, 0.00525),
         black, shell)
     moving = body('pen.refill', root)
     cylinder('Black push button', 0.0026, 0.005, (0.0695, 0, 0), black, moving, segments=SEGMENTS)
-    cylinder('Refill shaft', 0.0008, 0.131, (0.0005, 0, 0), refill, moving, segments=SEGMENTS)
-    cylinder('Fine ballpoint', 0.0003, 0.010, (-0.070, 0, 0), steel, moving, segments=SEGMENTS)
-    joint('button_press', 'SLIDER', shell, moving, (0.067, 0, 0), (-0.003, 0))
+    # Fully enclosed after the fixed shell/refill bodies are merged by physics.
+    cylinder('Refill shaft', 0.0008, 0.131, (0.0005, 0, 0), refill, moving,
+             segments=SEGMENTS, collision=False)
+    cylinder('Fine ballpoint', 0.0003, 0.010, (-0.070, 0, 0), steel, moving,
+             segments=SEGMENTS, collision=False)
+    # Physics merges these bodies; the visual slider must not test their filled interiors.
+    slider = joint('button_press', 'SLIDER', shell, moving, (0.067, 0, 0), (-0.003, 0))
+    slider.rigid_body_constraint.disable_collisions = True
     organize_parts([
         ('pen.shell', 'barrel', ['Blue barrel']),
         ('pen.shell', 'grip', ['Black tapered grip']),

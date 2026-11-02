@@ -23,7 +23,9 @@ MAX_PLANS = 6           # candidates whose motion is tried per grasp attempt, wi
 # With the torso lift held, only grasps approaching within HELD_SLACK (deg) of the closest a candidate
 # of either arm comes to the approach: a worse grasp is not worth sparing the torso.
 HELD_SLACK = 15.
-MIN_RISE = .05          # m the object must rise in pick's lift
+MIN_RISE = .05          # m the object must rise in pick's full lift
+PROBE_LIFT = .02        # m: expose a missed grip before committing to transport
+FOLLOW_TOLERANCE = .01  # m: held material may settle within a pad, not remain on its support
 WHY_LIMIT = 20          # rejected grasps per choice whose collisions are counted for the report
 
 
@@ -206,24 +208,26 @@ class Grasping:
         body_pose, tcp, gap = self.ctx.poses()[target.body], self.ctx.tcp(arm), solver.finger_gap()
         return closure(hand, surface, body_pose, tcp, gap, open_gap, contacts, target.body)
 
-    def check_closure(self, target, arm, grasp):
+    def check_closure(self, target, arm, grasp, *, kind='check'):
         checked = self.pad_closure(target, arm, grasp.open_gap)
-        solver, hand = self.solvers[arm], self.hands[arm]
+        solver = self.solvers[arm]
         body_pose, tcp, gap = self.ctx.poses()[target.body], self.ctx.tcp(arm), solver.finger_gap()
-        # Actual-surface contacts add evidence; they do not replace the expert's
-        # existing planned-gap and interior-area checks from #60.
+        # Finite geometric coverage and planned gap rank/describe the grip.
+        # They cannot overrule actual following during the controlled lift.
         actual_held = self.measured_held_area(target, arm, body_pose @ target.offset, tcp, gap,
                                              open_gap=grasp.open_gap)
         planned_gap_held = bool(gap >= grasp.info['contact_gap'] - HELD_TOLERANCE)
-        area_held = actual_held >= MIN_HOLD_AREA
-        if not planned_gap_held:
-            checked['reasons'].append('closed past planned contact gap')
-        if not area_held:
-            checked['reasons'].append('insufficient held area')
-        checked.update(held=checked['held'] and planned_gap_held and area_held,
-                       planned_contact_gap_m=grasp.info['contact_gap'], held_gap_tolerance_m=HELD_TOLERANCE,
-                       actual_held_area_m2=actual_held, min_hold_area_m2=MIN_HOLD_AREA,
+        area_held = bool(actual_held >= MIN_HOLD_AREA)
+        checked.update(planned_contact_gap_m=grasp.info['contact_gap'], held_gap_tolerance_m=HELD_TOLERANCE,
+                       actual_held_area_m2=float(actual_held), min_hold_area_m2=MIN_HOLD_AREA,
                        planned_gap_held=planned_gap_held, area_held=area_held)
+        from table_1000.experts.audit.search import check, measurement
+        check(self.ctx, 'Grasping.check_closure', checked['held'], kind=kind, family_id='grasp.closure',
+              measurements=[measurement('finger_gap', gap, 'm', '>=', grasp.info['contact_gap'] - HELD_TOLERANCE,
+                                        planned_gap_held, 'observed.finger_gap'),
+                            measurement('held_area', actual_held, 'm2', '>=', MIN_HOLD_AREA,
+                                        area_held, 'observed.geometry')],
+              closure=checked, predicted_grasp=grasp.info)
         return checked
 
     def measured_held_area(self, target, arm, transform, tcp, gap, *, open_gap=None):
@@ -477,7 +481,9 @@ class Grasping:
         """Grasp ``target`` (:class:`Target`, or a list ranked together) with ``arm`` (default either); see the module docstring.
         ``need``: only grasps holding it as that :class:`~table_1000.experts.skills.chain.InHand` asks
         (:class:`Unmet` where no other is in reach); ``base``: whether the base may move.
-        ``closure_only_record`` records the check without retrying, for measured asset tests only.
+        ``closure_only_record`` defers physical proof to the caller's measured lift (pick and asset tests).
+        Free-body closure is provisional until a controlled lift; joint-constrained handles
+        use actual opposing pad contact without a vertical probe.
         A flat, unprepared thin body on the table raises ``ValueError``: use :meth:`pick`, or
         :meth:`slide_to_edge` before :meth:`grasp`; overhanging and already held bodies are allowed.
         Returns ``{'arm', 'grasp', 'supports', 'finger_gap', 'regrasps', 'choice_s', 'tcp_object', 'closure_check'}``."""
@@ -545,7 +551,7 @@ class Grasping:
                 blocked = (need.recipe or {}).get('blocked_by', ()) if need is not None else ()
                 release_limit = ((need.recipe or {}).get('origin', {}).get('release_limit_m')
                                  if need is not None else None)
-                ctx.fail('no reachable grasp', Unmet if unmet else Unreachable, target=target.names,
+                ctx.fail('no reachable grasp', Unmet if unmet else Unreachable, kind='planning', target=target.names,
                          candidates_tried=len(skip), rejected=self.rejected,
                          **({'maximum_flat_release_m': release_limit, 'recoverable': True,
                              'recovery': 'pick again with a hold compatible with low flat release'}
@@ -559,9 +565,9 @@ class Grasping:
             else:
                 close(target, arm, grasp)
             gap = solver.finger_gap()
-            checked = self.check_closure(target, arm, grasp)
+            checked = self.check_closure(target, arm, grasp, kind='record' if closure_only_record else 'check')
             ctx.note('closure checked', arm=arm, only_record=closure_only_record, **checked)
-            if checked['held'] or closure_only_record:
+            if checked['held'] or closure_only_record or not self.constrained(target):
                 break
             # Missed: back out, re-observe the object and choose again.
             ctx.note('missed grasp', arm=arm, finger_gap=gap, width=grasp.width, pose=grasp.pose.tolist(),
@@ -571,7 +577,7 @@ class Grasping:
             solver.allow([*target.names, *supports], False)
             regrasps += 1
             if regrasps > MAX_REGRASPS:
-                ctx.fail('object not held', finger_gap=gap, width=grasp.width)
+                ctx.fail('object not held', kind='check', finger_gap=gap, width=grasp.width)
         poses = ctx.poses()
         # A free body moves as one rigid collision assembly. Joint-constrained
         # bodies continue to use Motion.dragged for their separate riders.
@@ -626,6 +632,8 @@ class Grasping:
                   'tcp_object': (np.linalg.inv(solver.tcp()) @ poses[target.body]).tolist(),
                   'closure_check': checked}
         self.log.append(result)
+        if not closure_only_record and not self.constrained(target):
+            self.lift_grasp(target, result, PROBE_LIFT)
         return result
 
     def grasp_paths(self, target, arms, point=None, approach=None, then=None, max_angle=None, need=None):
@@ -726,13 +734,13 @@ class Grasping:
         profile = self.thin_geometry(target)
         if profile is None:
             result = self.grasp(alternatives, arm, point, approach, then=(0., 0., height), max_angle=max_angle, need=need,
-                                base=base)
+                                base=base, closure_only_record=True)
         elif profile.kind == 'plate':
             # Authored narrow features can already offer a legal grasp (a
             # bookmark/spine). Keep that route before moving a broad plate.
             try:
                 result = self.grasp(alternatives, arm, point, approach, then=(0., 0., height),
-                                    max_angle=max_angle, need=need, base=base,
+                                    max_angle=max_angle, need=need, base=base, closure_only_record=True,
                                     close=lambda selected, arm, grasp: self.solvers[arm].close_gripper())
             except Unreachable as error:
                 # A chain's requested next hold has not been met at this stance.
@@ -742,30 +750,90 @@ class Grasping:
                 if point is not None or approach is not None or max_angle is not None:
                     raise ValueError('plate edge preparation chooses its own grasp geometry; '
                                      'remove point, approach and max_angle') from error
-                target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base)
+                target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base, closure_only_record=True)
         else:
             if point is not None or approach is not None or max_angle is not None:
                 raise ValueError('the thin-object pick route does not support point, approach or max_angle '
                                  'because preparation chooses its own grasp geometry; remove these arguments')
-            target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base)
+            target, result = self.grasp_thin(target, arm=arm, height=height, need=need, base=base, closure_only_record=True)
         target = self.held[result['arm']]['target']
-        before = ctx.poses()[target.body]
         if 'preparation' in result:
             self.prepare_thin_lift(target, result)
-        self.move_by_displacement(result['arm'], (0., 0., height))
-        ctx.hold(.2)
-        after = ctx.poses()[target.body]
-        rise = float(after[2, 3] - before[2, 3])
-        if rise < MIN_RISE:
-            self.release(result['arm'])     # so that it can be picked again
-            ctx.fail('object not lifted', rise=rise, finger_gap=self.solvers[result['arm']].finger_gap(),
-                     arm=result['arm'], grasp=result['grasp'], object_before=before.tolist())
-        # An object can settle or pivot in the pads while being lifted. Its
-        # collision attachment must match the measured hold returned below,
-        # including the adjacent parts and any loaded container's contents.
-        solver, poses = self.solvers[result['arm']], ctx.poses()
+        self.lift_grasp(target, result, height)
+        return result
+
+    def check_hold(self, target, arm, reference=None):
+        """Physical contact and material following, independent of projected held area.
+
+        Track the material point initially at the TCP, so a pen may pivot about
+        its grip without its far end being mistaken for translational slip.
+        """
+        solver = self.solvers[arm]
+        relative = np.linalg.inv(solver.tcp()) @ self.ctx.poses()[target.body]
+        reference = self.held[arm].get('verified_hold') if reference is None else reference
+        following = 0. if reference is None else float(np.linalg.norm(
+            (relative @ np.linalg.inv(reference))[:3, 3]))
+        checked = self.pad_closure(target, arm, self.held[arm]['grasp']['open_gap'])
+        contacts = bool(checked['pad_contacts']) and all(checked['pad_contacts'].values())
+        held = (contacts and 'closed past collision surfaces' not in checked['reasons']
+                and following <= FOLLOW_TOLERANCE)
+        checked.update(held=bool(held), following_error_m=following,
+                       following_tolerance_m=FOLLOW_TOLERANCE)
+        self.ctx.note('hold measured', obj=target.obj, arm=arm, **checked)
+        return checked
+
+    def lift_grasp(self, target, result, height=LIFT):
+        """Shared pick/asset-test lift: a 20 mm probe, then the remaining departure.
+
+        A 100 mm pickup retains the existing 50 mm minimum rise. The short
+        probe requires half its travel in body rise plus two real pad contacts
+        and <=10 mm held-point slip after settling. Failed proof releases the
+        provisional planning attachment and never returns an empty-hand pick.
+        """
+        ctx, arm = self.ctx, result['arm']
+        if height <= 0.:
+            raise ValueError('a grasp proof needs a positive lift')
+        solver = self.solvers[arm]
+        before = ctx.poses()[target.body].copy()
+        reference = np.linalg.inv(solver.tcp()) @ before
+        probe = min(PROBE_LIFT, height)
+        requested = 0.
+        supports = list(self.held[arm]['supports'])
+        for distance in (probe, height - probe):
+            if distance <= 0.:
+                continue
+            self.move_by_displacement(arm, (0., 0., distance))
+            ctx.hold(.2)
+            after = ctx.poses()[target.body]
+            rise = float(after[2, 3] - before[2, 3])
+            checked = self.check_hold(target, arm, reference)
+            requested += distance
+            minimum = min(MIN_RISE, requested / 2)
+            result.update(rise=rise, lift_check=checked)
+            ctx.note('grasp lift measured', obj=target.obj, arm=arm, rise_m=rise,
+                     minimum_rise_m=minimum, requested_m=requested, held=checked['held'])
+            if rise < minimum or not checked['held']:
+                ctx.note('missed grasp', arm=arm, closure=result.get('closure_check'),
+                         rise_m=rise, lift_check=checked)
+                # Detach/open even when the withdrawal itself cannot be planned.
+                from table_1000.experts.context import ExpertFailed
+                try:
+                    self.release(arm)
+                except ExpertFailed as error:
+                    ctx.note('missed grasp release failed', reason=error.reason, details=error.details)
+                ctx.fail('object not lifted' if rise < minimum else 'object slipped during lift', kind='check',
+                         rise=rise, finger_gap=solver.finger_gap(), arm=arm,
+                         grasp=result['grasp'], object_before=before.tolist(), lift_check=checked)
+            if requested < height:
+                # The original full departure allowed these same supports.
+                solver.allow(supports)
+                self.held[arm]['supports'] = supports
+                if self.held[arm]['carried']:
+                    solver.world.allow(self.held[arm]['carried'], supports)
+        poses = ctx.poses()
         for name in list(solver.attachments):
             solver.attach(name, poses[solver.world.objects[name].body])
-        result.update(rise=rise, finger_gap=self.solvers[result['arm']].finger_gap(),
-                      tcp_object=(np.linalg.inv(self.solvers[result['arm']].tcp()) @ after).tolist())
+        self.held[arm]['verified_hold'] = np.linalg.inv(solver.tcp()) @ poses[target.body]
+        result.update(finger_gap=solver.finger_gap(),
+                      tcp_object=self.held[arm]['verified_hold'].tolist())
         return result

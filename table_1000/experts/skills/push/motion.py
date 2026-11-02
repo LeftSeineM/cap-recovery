@@ -2,6 +2,8 @@
 
 from table_1000.experts.world import geometry as world_geometry
 
+from itertools import combinations
+
 import numpy as np
 from mplib.collision_detection import fcl
 
@@ -34,26 +36,52 @@ class Motion:
         held = self.held.get(arm)
         supports = held['supports'] if held else []
         dragged, riders, contacts = self.dragged(arm, drag) if drag else ([], [], [])
+        previous_arrival = getattr(solver, 'constraint_arrival', None)
+        solver.constraint_arrival = self.drawer_arrival(drag, displacement) if drag else None
+        rider_permissions = []
         if dragged:
             solver.carry(dragged, contacts + riders)
             solver.carry(riders, contacts)
+            for first, second in combinations(riders, 2):
+                if frozenset((first, second)) not in solver.world.permissions:
+                    solver.world.allow([first], [second])
+                    rider_permissions.append((first, second))
         try:
             return self.straight(arm, displacement, least)
         finally:
+            solver.constraint_arrival = previous_arrival
             if dragged:
                 solver.release(riders, contacts)
                 solver.release(dragged, contacts + riders)
+                for first, second in rider_permissions:
+                    solver.world.allow([first], [second], False)
             if held:
                 if held['carried']:
                     solver.world.allow(held['carried'], supports, False)
                 solver.allow(supports, False)
                 held['supports'] = []
 
+    def drawer_arrival(self, drag, displacement):
+        """Measured slider goal of this move, without requiring an exact hand pose."""
+        from table_1000.experts.skills.drawer.joints import CLOSED, OPEN_TOLERANCE, Joint, opening
+        obj, body = drag
+        geometry = self.ctx.geometry[obj]
+        for name in geometry.joints:
+            joint = Joint.of(geometry, name)
+            if joint.kind != 'SLIDER' or joint.child != body:
+                continue
+            delta = float(displacement @ joint.direction(self.ctx.pose(obj, body)))
+            goal = float(np.clip(opening(self.ctx, obj, name) + delta, 0., joint.limits[1] - joint.limits[0]))
+            return (lambda: opening(self.ctx, obj, name) >= goal - OPEN_TOLERANCE) if delta > 0. else (
+                lambda: opening(self.ctx, obj, name) <= goal + CLOSED)
+        return None
+
     def dragged(self, arm, drag):
         """``(own, riders, contacts)``: the planning objects of body ``drag`` (``(object, body)``) not
-        yet held, every part of the other objects resting on or against it (a pen in a drawer rides
-        along), and what they may touch besides each other and the rest of their objects: the
-        objects within ``SUPPORT_DISTANCE`` of them."""
+        yet held, every part of objects supported inside it, including stacks
+        reached through contacts with other riders, and their nearby supports. External
+        neighbours above the dragged body's bottom remain obstacles even within
+        ``SUPPORT_DISTANCE``."""
         solver = self.solvers[arm]
         solver.sync()
         world, key = solver.world, f'{drag[0]}:{drag[1]}'
@@ -66,7 +94,6 @@ class Motion:
                         fcl.distance(body, obj.fcl(world.poses[name])).min_distance < SUPPORT_DISTANCE
                         for body in bodies)]
 
-        objects = {name.split(':')[0] for name in touching(names, bodies, drag[0] + ':') if ':' in name}
         # A supporting object below the dragged body is not its payload. In
         # particular, pushing an item atop a book must not attach that book
         # (and then collide it with every neighbour) to the pushing hand.
@@ -74,14 +101,24 @@ class Motion:
         pose = self.ctx.poses()[key]
         points = self.ctx.geometry[drag[0]].points(drag[1], drag[1])
         bottom = (points @ pose[:3, :3].T + pose[:3, 3])[:, 2].min()
-        objects = {obj for obj in objects
-                   if world_geometry.object_points(self.ctx, obj)[:, 2].min() >= bottom - SUPPORT_DISTANCE}
+        frontier, objects, outside = names, set(), set()
+        while frontier:
+            candidates = {name.split(':')[0] for name in touching(frontier, bodies, drag[0] + ':')
+                          if ':' in name} - objects - outside
+            nearby = {obj for obj in candidates
+                      if world_geometry.object_points(self.ctx, obj)[:, 2].min() >= bottom - SUPPORT_DISTANCE}
+            added = {obj for obj in nearby if semantic.supported_inside(self.ctx, obj, drag[0], drag[1])}
+            objects.update(added)
+            outside.update(nearby - added)
+            frontier = [name for name in world.objects
+                        if ':' in name and name.split(':')[0] in added and not attached(name)]
+            bodies = [world.objects[name].fcl(world.poses[name]) for name in frontier]
         riders = [name for name in world.objects
                   if ':' in name and name.split(':')[0] in objects and not attached(name)]
         carried = names + riders
         bodies = [world.objects[name].fcl(world.poses[name]) for name in carried]
         return names, riders, [name for name in touching(carried, bodies, drag[0] + ':')
-                               if name.split(':')[0] not in objects]
+                               if name.split(':')[0] not in objects | outside]
 
     def straight(self, arm, displacement, least=1.):
         """Straight by ``displacement`` with the arm, else (``least`` < 1) by the largest of
@@ -250,7 +287,7 @@ class Motion:
                                                          if obj.body == target.body] or target.names)
                     tried, stowed = set(), True
                 else:
-                    ctx.fail('no reachable push', Unreachable, target=target.names)
+                    ctx.fail('no reachable push', Unreachable, kind='planning', target=target.names)
         moved = float((ctx.poses()[target.body][:3, 3] - before) @ direction)
         # Back off: straight back or up, else along a planned path. The push is done either way.
         tcp = solver.tcp()

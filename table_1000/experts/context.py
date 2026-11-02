@@ -42,9 +42,10 @@ DT = 1 / CONTROL_HZ
 
 
 class ExpertFailed(RuntimeError):
-    def __init__(self, subtask, reason, **details):
+    def __init__(self, subtask, reason, *, kind=None, criterion_id=None, **details):
         super().__init__(f'{subtask}: {reason}')
         self.subtask, self.reason, self.details = subtask, reason, details
+        self.kind, self.criterion_id = kind, criterion_id
 
 
 class WallBudgetExceeded(ExpertFailed):
@@ -209,8 +210,17 @@ class Context:
     def note(self, text, **values):
         self.events.append({'step': self.steps, 'subtask': self.current, 'note': text, **values})
 
-    def fail(self, reason, failure=ExpertFailed, **details):
-        raise failure(self.current, reason, **details)
+    def fail(self, reason, failure=ExpertFailed, *, kind, failure_id=None, **details):
+        import inspect
+        caller = inspect.currentframe().f_back.f_code.co_qualname
+        error = failure(self.current, reason, kind=kind, criterion_id=caller, **details)
+        if failure_id is not None:
+            error.search_failure_id = failure_id
+        trace = getattr(self, 'trace', None)
+        if trace and trace.stack:
+            # Keep a failure even when an untraced helper catches it locally.
+            trace.search.exception(trace.frames[trace.stack[-1]], error)
+        raise error
 
     # -- state and geometry queries --------------------------------------------------
     def poses(self):

@@ -8,7 +8,8 @@ import h5py
 import pytest
 
 from table_1000.scenes import (robot_config, load_expert, parse_scope, outside_scope,
-                               initial_dir, data_dir, case_dir)
+                               initial_dir, data_dir, case_dir, dev_dir, dev_batches,
+                               batch_ref, resolve_batch_ref)
 from table_1000.experts.identity import check_identity
 from scripts.scenes.run_expert import resume_steps, check_checkpoint_name, main
 
@@ -88,6 +89,55 @@ def test_checkpoint_next_step_and_name(tmp_path):
     check_checkpoint_name({'step': 1, 'name': 'open'}, steps)
     with pytest.raises(ValueError, match='current steps with that name: 2'):
         check_checkpoint_name({'step': 1, 'name': 'pick'}, steps)
+
+
+def test_dev_batches_follow_robot_expert_layout_only(tmp_path):
+    paths = [dev_dir(tmp_path, scene, robot, expert, 'run') for scene, robot, expert in
+             [('s', 'x1pro', '0000'), ('s', 'x1pro_rm001', '0001'), ('t', 'x1pro', '0000')]]
+    ignored = [tmp_path / 's/flat', tmp_path / 's/x1pro/not-numbered/run',
+               tmp_path / 's/iterations/x1pro-0000-v2']
+    for path in paths + ignored:
+        path.mkdir(parents=True)
+        (path / 'summary.json').write_text('{}')
+    assert dev_dir(tmp_path, 's', 'x1pro', '0000', 'run') == tmp_path / 's/x1pro/0000/run'
+    assert dev_batches(tmp_path) == sorted(paths)
+    assert dev_batches(tmp_path, 's') == sorted(paths[:2])
+
+
+def test_relative_batch_references_survive_whole_round_rename(tmp_path):
+    root = tmp_path / 'checkout'
+    parent = dev_dir(root / 'runs/expert', 's', 'r', '0000', 'first')
+    child = parent.with_name('second')
+    parent.mkdir(parents=True)
+    child.mkdir()
+    reference = batch_ref(parent, child, root)
+    assert reference == '../first'
+    namespace = child / 'trace-parts/0/1'
+    nested_reference = batch_ref(parent, namespace, root)
+    assert not nested_reference.startswith('runs/')
+    assert resolve_batch_ref(reference, child, root) == parent
+    archive = parent.parent.with_name('0000-legacy-1101')
+    parent.parent.rename(archive)
+    assert resolve_batch_ref(reference, archive / 'second', root) == archive / 'first'
+    assert resolve_batch_ref(nested_reference, archive / 'second/trace-parts/0/1', root) == archive / 'first'
+    other = dev_dir(root / 'runs/expert', 's', 'other', '0000', 'run')
+    reference = batch_ref(other, archive / 'second', root)
+    assert reference == 'runs/expert/s/other/0000/run'
+    assert resolve_batch_ref(reference, archive / 'second', root) == other
+    with pytest.raises(ValueError, match='absolute batch reference'):
+        resolve_batch_ref(str(other), child, root)
+
+
+def test_batch_references_resolve_shared_root_symlinks(tmp_path):
+    root, shared = tmp_path / 'checkout', tmp_path / 'shared'
+    root.mkdir()
+    shared.mkdir()
+    (root / 'runs').symlink_to(shared)
+    source = shared / 'expert/s/r/0000/first'
+    owner = shared / 'expert/s/other/0000/second'
+    reference = batch_ref(source, owner, root)
+    assert reference == 'runs/expert/s/r/0000/first'
+    assert resolve_batch_ref(reference, owner, root) == source
 
 
 @pytest.mark.parametrize('saved, message', [
@@ -211,7 +261,7 @@ def test_partial_scope_development_runs_and_records_available_seeds(tmp_path, mo
     monkeypatch.setattr(batch, 'run_jobs', jobs)
     main([*args, '--dev', *(['--seeds', '0'] if explicit else [])])
     assert scheduled == [0]
-    (summary,) = (tmp_path / 'runs/expert/demo').glob('*/summary.json')
+    (summary,) = (tmp_path / 'runs/expert/demo').glob('a/0002/*/summary.json')
     assert json.loads(summary.read_text())['seeds'] == {'range': '0', 'count': 1}
 
 

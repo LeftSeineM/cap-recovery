@@ -4,7 +4,7 @@
 
 前提：专家由步骤组成（`Step` 与 `run_steps`，见[步骤与检查点](../specs/experts.md#步骤与检查点)）。步骤之间手里不拿东西，每步的 `check` 检查结束状态是否满足下一步的起始条件。
 
-迭代时的运行都是开发运行（`--dev`）：每次写到新目录 `runs/expert/<场景>/<日期>-<时间>-<提交>-<机器人>-<专家编号>[-<标签>]/`，不会覆盖以前的结果，`--name` 给运行加一个标签。不带 `--dev` 的运行生成场景的数据 `data/scenes/<场景>/<机器人>/<专家编号>/<后端>/`，只能跑所有 seed 和所有步骤。
+迭代时的运行都是开发运行（`--dev`）：每次写到新目录 `runs/expert/<场景>/<机器人>/<专家编号>/<日期>-<时间>-<提交>-<机器人>-<专家编号>-layout<n>[-<标签>]/`，不会覆盖以前的结果，`--name` 给运行加一个标签。同一专家的开发运行可以在[浏览站点](../specs/expert-data.md#开发线浏览)里按 step 看搜索树。不带 `--dev` 的运行生成场景的数据 `data/scenes/<场景>/<机器人>/<专家编号>/<后端>/`，只能跑所有 seed 和所有步骤。
 
 ## 1. 迭代第 1 步
 
@@ -13,7 +13,7 @@ uv run python scripts/scenes/run_expert.py 000002 --physics isaac-cpu --dev --na
 ```
 
 - 先用 20 个 seed 的初态（`--seeds 0:20`），改专家、重跑。每轮都是新目录，可以直接和上一轮对比。
-- 失败按 `summary.json` 的 `failures` 和 `episodes/<seed>.json` 分析，找到根因再改通用代码，不为个别 seed 调参数（见[开发原则](../conventions/development.md#修根因不调参)）；录像用 `render.py 000002 --physics isaac-cpu --batch <data-dir>`，`<data-dir>`指`data/scenes/<场景>/<后端>/`或者`runs/expert/<场景>/<日期>-<时间>-<提交>[-<标签>]/`。失败案例的查看方法见[第六章](06-failure-cases.md)。
+- 失败按 `summary.json` 的 `failures` 和 `episodes/<seed>.json` 分析，找到根因再改通用代码，不为个别 seed 调参数（见[开发原则](../conventions/development.md#修根因不调参)）；录像用 `render.py 000002 --physics isaac-cpu --batch <data-dir>`，`<data-dir>`指`data/scenes/<场景>/<机器人>/<专家编号>/<后端>/`或者`runs/expert/<场景>/<机器人>/<专家编号>/<运行>/`。失败案例的查看方法见[第六章](06-failure-cases.md)。
 - 成功率提高后增加 seed（约 90% 时 100 个，约 98% 时 300 个，见[开发原则](../conventions/development.md#seed-数随成功率增加)）。最后一批的 `checkpoints/step1.hdf5` 就是第 2 步的起始状态。
 
 ## 2. 下一步从检查点开始

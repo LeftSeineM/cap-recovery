@@ -88,11 +88,11 @@ def closed(drawer):
 
 
 def is_open(drawer):
-    return lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'cabinet', drawer, OPENING), 'drawer not opened')
+    return lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'cabinet', drawer, OPENING), 'drawer not opened', kind='check')
 
 
 def is_closed(drawer):
-    return lambda ctx: semantic.require(ctx, drawer_joints.is_closed(ctx, 'cabinet', drawer), 'drawer not closed')
+    return lambda ctx: semantic.require(ctx, drawer_joints.is_closed(ctx, 'cabinet', drawer), 'drawer not closed', kind='check')
 
 
 def take_out(ctx):
@@ -112,14 +112,14 @@ STEPS = [
          subtask('take the pen out of the top drawer', take_out)(ctx),
          subtask('put the pen on the table', put_on_table)(ctx)),
          lambda ctx: semantic.require(ctx, semantic.on(ctx, 'pen', 'table', keep_out=clear(ctx)),
-                                      'pen not on the table')),
+                                      'pen not on the table', kind='check')),
     Step('close the top drawer', subtask('close the top drawer', closed(TOP)), is_closed(TOP)),
     Step('open the bottom drawer', subtask('open the bottom drawer of the cabinet', opened(BOTTOM)),
          is_open(BOTTOM)),
     Step('move the pen from the table to the bottom drawer', lambda ctx: (
          reopened(BOTTOM, 'open the bottom drawer of the cabinet')(ctx), into_bottom_drawer(ctx)),
          lambda ctx: semantic.require(ctx, semantic.inside(ctx, 'pen', 'cabinet', 'cabinet.drawer3'),
-                                      'pen not in the drawer')),
+                                      'pen not in the drawer', kind='check')),
     Step('close the bottom drawer', subtask('close the bottom drawer', closed(BOTTOM)), is_closed(BOTTOM)),
 ]
 

@@ -234,9 +234,9 @@ def test_live_drop_is_checked_before_opening_and_recorded(measured_drop, upright
     skill, opened, notes = measured_release(measured_drop)
     if not upright_ok:
         from table_1000.experts.skills import semantic
-        monkeypatch.setattr(semantic, 'upright_inside', lambda *args: False)
+        monkeypatch.setattr(semantic, 'storage_result', lambda *args: False)
         region = (np.eye(4), None, None, {'upright_container': 'cabinet', 'part': 'drawer'})
-        with pytest.raises(ExpertFailed, match='not upright inside'):
+        with pytest.raises(ExpertFailed, match='not supported inside'):
             skill.low_release('tool', region, 'left', None, (), .02, .01, 'strict failed', 'upright')
         assert opened
     elif 0. <= measured_drop <= .05:

@@ -4,6 +4,7 @@ import json
 import types
 
 import h5py
+import pytest
 
 import numpy as np
 
@@ -48,11 +49,11 @@ def test_the_failed_step_is_the_first_not_completed():
 
 
 def test_cases_come_by_success_rate_and_start_before_the_failed_step(tmp_path):
-    whole = tmp_path / 'expert' / '000002' / 'a-whole'
+    whole = tmp_path / 'expert' / '000002' / 'test' / '0000' / 'a-whole'
     write(whole, {'run': 'a-whole', 'scene': '000002', 'layout': 3, 'outside_scope': True},
           {'0': report(0, [1, 2, 3], status='success'), '1': report(1, [1])})
-    repeated = tmp_path / 'expert' / '000002' / 'b-repeats'
-    write(repeated, {'run': 'b-repeats', 'scene': '000002', 'steps_run': [2, 2], 'from': str(whole),
+    repeated = tmp_path / 'expert' / '000002' / 'test' / '0000' / 'b-repeats'
+    write(repeated, {'run': 'b-repeats', 'scene': '000002', 'steps_run': [2, 2], 'from': '../a-whole',
                      'repeats': {'count': 3, 'succeeded': {'4': 1, '5': 2, '6': 3}}},
           {'4': report(4, [], steps_run=[2, 2]), '4-1': report(4, [2], status='success', steps_run=[2, 2]),
            '5': report(5, [2], status='success', steps_run=[2, 2]), '5-2': report(5, [], steps_run=[2, 2], reason='drop'),
@@ -132,23 +133,15 @@ def test_a_recorded_failure_gives_the_state_at_the_failure(tmp_path):
     assert found[3]['run'].endswith('/batch')
 
 
-def test_failure_snapshots_are_the_checkpoints_the_failed_steps_start_from(tmp_path):
+def test_failure_snapshots_reject_old_untraced_batches(tmp_path):
     from scripts.experts.failure_snapshots import main
-    from scripts.scenes.run_expert import check_checkpoint_name
-    from table_1000.experts.generate import read_checkpoints
     batch = tmp_path / 'batch'
     write(batch, {'scene': '000002', 'physics': 'isaac-cpu', 'commit': 'abc'},
-          {'3': {**report(3, [1]), 'steps': [{'step': 1, 'name': 'open', 'at': 4}]}, '5': report(5, [1, 2, 3], status='success')})
+          {'3': {**report(3, [1]), 'steps': [{'step': 1, 'name': 'open', 'at': 4}]}})
     write_trajectory(batch / 'trajectories_failed.hdf5', 3, 30)
-    main([str(batch), '--before', '1', '--output', str(tmp_path / 'runs')])
-    (snapshots,) = (tmp_path / 'runs' / '000002').iterdir()
-    attrs, found = read_checkpoints(snapshots / 'checkpoints' / 'step1.hdf5')   # seed 3 failed in step 2
-    assert attrs['physics'] == 'isaac-cpu' and list(found) == [3]
-    check_checkpoint_name(attrs, [types.SimpleNamespace(name=name) for name in NAMES])
-    # 1 s (25 control steps) before the last sample, not before the step began (sample 4).
-    np.testing.assert_array_equal(found[3][1]['rigid_object']['pen']['root_pose'], [np.arange(4 * 7., 5 * 7.)])
-    np.testing.assert_array_equal(found[3][1]['targets']['gripper'], [[14.]])
-    assert json.loads((snapshots / 'summary.json').read_text())['snapshots'] == {'2': [3]}
+    with pytest.raises(SystemExit) as error:
+        main([str(batch), '--output', str(tmp_path / 'runs')])
+    assert error.value.code == 2
 
 
 def test_step_start_operates_first_ik_without_a_solver(tmp_path, monkeypatch):
@@ -161,7 +154,7 @@ def test_step_start_operates_first_ik_without_a_solver(tmp_path, monkeypatch):
     model = RobotModel(load_spec('x1pro_rm001'), tmp_path / 'planning')
     model.set_state(model.spec.keyframe('ready'))
     ready = model.q.copy()
-    env = types.SimpleNamespace(spec=model.spec, joints=model.joints, steps=0,
+    env = types.SimpleNamespace(audit_state=lambda: {}, spec=model.spec, joints=model.joints, steps=0,
                                 contacts=types.SimpleNamespace(phase=None, intervals=lambda: []),
                                 privileged=lambda: {'joints': {}, 'poses': {}})
     def reset(state):
@@ -210,7 +203,7 @@ def test_resolve_outputs_stay_outside_the_teleop_case_scan(tmp_path, monkeypatch
     from scripts.experts import resolve
     from table_1000.experts.audit import problems
 
-    batch = tmp_path / 'runs/expert/000002/failed'
+    batch = tmp_path / 'runs/expert/000002/x1pro/0000/failed'
     episode = {**report(4, [1]), 'solve_trace': 'problems/4.json.gz'}
     write(batch, {'scene': '000002'}, {'4': episode})
     (batch / 'problems').mkdir()

@@ -45,7 +45,7 @@ def pick(skill, report, candidates=None, excluded=()):
     candidates = list(targets(skill) if candidates is None else candidates)
     available = [target for index, target in enumerate(candidates) if index not in excluded]
     if not available:
-        ctx.fail('no reachable grasp', candidates_tried=0)
+        ctx.fail('no reachable grasp', kind='planning', candidates_tried=0)
     attempt = None
     try:
         groups = target_groups(available)
@@ -96,24 +96,15 @@ def pick(skill, report, candidates=None, excluded=()):
         try:
             if 'preparation' in result:
                 skill.prepare_thin_lift(target, result)
-            skill.move_by_displacement(result['arm'], (0., 0., .10))
-            ctx.hold(.2)
+            skill.lift_grasp(target, result, .10)
         finally:
             ctx.observers.remove(observe)
             attempt['lift_trace'] = trace
-        rise = float(ctx.poses()[target.body][2, 3] - before[2, 3])
-        attempt['lift'] = {'rise_m': rise, 'tcp_pose': ctx.tcp(result['arm']).tolist(),
-                          'object_pose': ctx.poses()[target.body].tolist(),
-                          'finger_gap_m': solver.finger_gap()}
-        report['lift'] = attempt['lift']
-        if rise < .05:
-            try:
-                skill.release(result['arm'])
-            except ExpertFailed as error:
-                attempt['release_failure'] = {'reason': error.reason, 'details': error.details}
-            ctx.note('missed lift', rise=rise)
-            ctx.fail('object not lifted', rise=rise, grasp=result['grasp'])
-        result.update(rise=rise)
+            rise = float(ctx.poses()[target.body][2, 3] - before[2, 3])
+            attempt['lift'] = {'rise_m': rise, 'tcp_pose': ctx.tcp(result['arm']).tolist(),
+                              'object_pose': ctx.poses()[target.body].tolist(),
+                              'finger_gap_m': solver.finger_gap()}
+            report['lift'] = attempt['lift']
         return target, result
     except ExpertFailed as error:
         attempt['failure'] = {'reason': error.reason, 'details': error.details}
@@ -526,7 +517,7 @@ class Evaluator:
                               'reference_preflight': reference_plan}
                 plan['relocation'] = relocation
                 if reference_commands is None:
-                    ctx.fail('transport motion unreachable', arm=arm, preflight=plan)
+                    ctx.fail('transport motion unreachable', kind='planning', arm=arm, preflight=plan)
                 phase['text'] = 'transport relocation'
                 ctx.note('transport relocation', **relocation)
                 try:
@@ -542,7 +533,7 @@ class Evaluator:
                     if trace and not classify(trace)['held']:
                         return result(False)
                     if error.reason != 'tracking':
-                        ctx.fail('transport motion unreachable', arm=arm, preflight=plan)
+                        ctx.fail('transport motion unreachable', kind='planning', arm=arm, preflight=plan)
                     # Arrival is a reference for this test, not its criterion.
                     # Retain the tracking failure; the actual pose must still
                     # preflight and execute every unchanged acceptance stroke.
@@ -553,7 +544,7 @@ class Evaluator:
                 relocation['actual_preflight'] = relocated_plan
                 ctx.note('transport relocated preflight', **relocated_plan)
                 if commands is None:
-                    ctx.fail('transport motion unreachable', arm=arm, preflight=plan)
+                    ctx.fail('transport motion unreachable', kind='planning', arm=arm, preflight=plan)
             # Execute only after the entire path has passed local continuation.
             # Keep the planned endpoint across segments, not lagging measured q.
             for segment, command, lift in commands:

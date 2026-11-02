@@ -7,7 +7,7 @@ bodies' common parent prim (the asset root when they are siblings under it): the
 original bodies lose ``RigidBodyAPI`` and their joints are deactivated, so caps,
 lids, clip handles and buttons stay where they were modelled. The merged body
 takes ``table1000:name`` of that parent, or ``object`` at the asset root. PhysX
-derives centre of mass and inertia from the colliders.
+derives centre of mass and inertia from the colliders unless explicitly supplied.
 
 PhysX has no rolling resistance: a pen on its round barrel rolls on until it
 hits something. Round assets give ``angular_damping`` (1/s) as a stand-in.
@@ -20,11 +20,13 @@ ROOT_NAME = 'object'
 
 
 def author(geometry_path, output_path, mass_kg, friction, *, restitution=0., angular_damping=0., center_of_mass=None,
-           position_iterations=16):
+           diagonal_inertia=None, principal_axes=None, position_iterations=16):
     """Write the physics layer over ``geometry_path`` into ``output_path``: ``mass_kg`` in total,
     ``friction`` ``(static, dynamic)`` on every collider, ``angular_damping`` in 1/s, and
     ``center_of_mass`` (m, in the body's frame) where the colliders' uniform density would put it
-    wrong (light reeds or flowers over a heavy base). ``position_iterations`` controls the
+    wrong (light reeds or flowers over a heavy base). ``diagonal_inertia`` (kg m²)
+    and ``principal_axes`` (w, x, y, z) preserve mass properties when simplifying
+    collision geometry. ``position_iterations`` controls the
     body's position solver (default 16); the velocity solver stays at 4 iterations."""
     from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
     layer = Sdf.Layer.CreateNew(str(Path(output_path).resolve()))
@@ -51,6 +53,10 @@ def author(geometry_path, output_path, mass_kg, friction, *, restitution=0., ang
     mass.CreateMassAttr(float(mass_kg))
     if center_of_mass is not None:
         mass.CreateCenterOfMassAttr(Gf.Vec3f(*center_of_mass))
+    if diagonal_inertia is not None:
+        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(*diagonal_inertia))
+    if principal_axes is not None:
+        mass.CreatePrincipalAxesAttr(Gf.Quatf(principal_axes[0], Gf.Vec3f(*principal_axes[1:])))
     body = PhysxSchema.PhysxRigidBodyAPI.Apply(root)
     body.CreateLinearDampingAttr(0)
     body.CreateAngularDampingAttr(float(angular_damping))

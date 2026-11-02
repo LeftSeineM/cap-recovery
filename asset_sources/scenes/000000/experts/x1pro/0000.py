@@ -178,7 +178,7 @@ class Expert:
         arm.close_gripper()
         gap = arm.finger_gap()
         if not HANDLE_HELD_GAP[0] <= gap <= HANDLE_HELD_GAP[1]:
-            self.ctx.fail('handle not held', finger_gap=gap)
+            self.ctx.fail('handle not held', kind='check', finger_gap=gap)
 
     def release_handle(self):
         arm = self.arm
@@ -206,18 +206,18 @@ class Expert:
             moved = self.ctx.joint('cabinet', SLIDE) - start
             shift = float(np.linalg.norm(self.ctx.pose('cabinet')[:2, 3] - self.cabinet_xy))
             if shift > CABINET_MOVE_LIMIT:
-                self.ctx.fail('cabinet moved instead of the drawer', cabinet_shift=shift, moved=moved)
+                self.ctx.fail('cabinet moved instead of the drawer', kind='check', cabinet_shift=shift, moved=moved)
             segments = max(1, segments - 1)
             if abs(moved - step) > SLIP_TOLERANCE:
                 if self.regrasps >= MAX_REGRASPS:
-                    self.ctx.fail('drawer did not follow the hand', moved=moved, commanded=step)
+                    self.ctx.fail('drawer did not follow the hand', kind='check', moved=moved, commanded=step)
                 self.regrasps += 1
                 self.ctx.note('regrasp', moved=moved, commanded=step)
                 self.release_handle()
                 self.grasp_handle()
         remaining = target - self.ctx.joint('cabinet', SLIDE)
         if abs(remaining) > .003:
-            self.ctx.fail('drawer motion limit reached', remaining=remaining, moves=MAX_SLIDE_MOVES)
+            self.ctx.fail('drawer motion limit reached', kind='check', remaining=remaining, moves=MAX_SLIDE_MOVES)
 
     # -- pen ---------------------------------------------------------------------------
     def pick_pen(self):
@@ -239,14 +239,14 @@ class Expert:
         arm.close_gripper()
         gap = arm.finger_gap()
         if not PEN_HELD_GAP[0] <= gap <= PEN_HELD_GAP[1]:
-            ctx.fail('pen not held', finger_gap=gap)
+            ctx.fail('pen not held', kind='check', finger_gap=gap)
         arm.attach('pen:pen', ctx.pose('pen', 'body'))
         grasped = arm.tcp()
         arm.first_reachable([translated(grasped, [0., 0., h]) for h in PEN_LIFTS])
         ctx.hold(.2)
         pen = ctx.pose('pen', 'body')
         if pen[2, 3] < self.table_height + .03:
-            ctx.fail('pen not lifted', pen_height=float(pen[2, 3]))
+            ctx.fail('pen not lifted', kind='check', pen_height=float(pen[2, 3]))
         # The carried geometry follows the pen as it actually sits in the hand.
         arm.detach('pen:pen')
         arm.world.set_pose('pen:pen', pen)
@@ -293,7 +293,7 @@ class Expert:
         arm.allow(['pen:pen'], False)
         inside, local = self.cabinet.pen_inside(self.drawer(), ctx.pose('pen', 'body'))
         if not inside:
-            ctx.fail('pen not in the drawer', pen_in_drawer=local.tolist())
+            ctx.fail('pen not in the drawer', kind='check', pen_in_drawer=local.tolist())
 
 
 def solve(ctx):
@@ -315,4 +315,4 @@ def solve(ctx):
         expert.slide(0.)
         expert.release_handle()
         if ctx.joint('cabinet', SLIDE) > CLOSED:
-            ctx.fail('drawer not closed', opening=ctx.joint('cabinet', SLIDE))
+            ctx.fail('drawer not closed', kind='check', opening=ctx.joint('cabinet', SLIDE))

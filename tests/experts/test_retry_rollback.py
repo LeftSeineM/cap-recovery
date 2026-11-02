@@ -12,7 +12,7 @@ from table_1000.experts.retrying import copy_recorded
 
 def context(limit):
     state={'position':0,'commands':0,'steps':0,'record':[0]}
-    env=SimpleNamespace(targets=lambda:{'commands':state['commands']},contacts=SimpleNamespace(phase='pick'))
+    env=SimpleNamespace(audit_state=lambda: deepcopy(state), targets=lambda:{'commands':state['commands']},contacts=SimpleNamespace(phase='pick'))
     skill=SimpleNamespace(held={},reaches={},log=[])
     ctx=SimpleNamespace(env=env,steps=0,current='pick',_skills=skill,solvers={},rng=np.random.default_rng(7),
         skills=lambda:skill,requirements=[],events=[],subtasks=[],subtask_wall_s=[],subtask_profiles=[],checkpoints=[],skill_attempts=limit,scene=SimpleNamespace(OBJECTS={}))
@@ -179,3 +179,164 @@ def test_callback_check_failure_archives_its_control_and_concrete_children():
         assert archived['frames'][control['id']]['exception']['reason']=='callback postcondition'
         selected,check=select_frame(archived)
         assert selected['name']=='move' and not check
+
+
+def test_numpy_failure_roundtrips_through_retry_archive_calls_and_episode(tmp_path):
+    import json
+    import time
+    import h5py
+    import torch
+    from table_1000.common.serialization import attribute
+    from table_1000.experts.audit.codec import load_document, save_document
+    from table_1000.experts.context import ExpertFailed
+    from table_1000.experts.generate import Generator
+
+    # Exercise the real archive/export path without starting a physics app.
+    # Only Isaac Lab's recorder storage is replaced; HDF5 attrs use the same
+    # serializer as TrajectoryFile.write_episode.
+    class Episode:
+        def __init__(self):
+            self.data = {'states': {'x': [torch.tensor([0.]), torch.tensor([1.])]}}
+
+        def pre_export(self):
+            self.data['states']['x'] = torch.stack(self.data['states']['x'])
+
+    class File:
+        def create(self, path):
+            self.file = h5py.File(path + '.hdf5', 'w')
+
+        def add_env_args(self, args):
+            self.file.attrs['env_args'] = attribute(args)
+
+        def write_episode(self, episode, seed):
+            group = self.file.create_group(f'data/demo_{seed}')
+            for key, value in episode.attrs.items():
+                group.attrs[key] = attribute(value)
+
+        def close(self):
+            self.file.close()
+
+    ctx, state, _ = context(2)
+    ctx.start = {'qpos': np.zeros(2), 'base_pose': np.zeros(3)}
+    ctx.initial_state, ctx.step_names, ctx.retry_archives = {'x': np.zeros((1, 1))}, ['pick'], []
+    generator = Generator.__new__(Generator)
+    generator.name, generator.output, generator.steps = '000002', tmp_path, (1, 1)
+    generator.identity = dict(robot='x1pro_rm001', expert='0000', scope={'0': None}, layout=0, outside_scope=False)
+    generator.spec = SimpleNamespace(name='x1pro_rm001')
+    generator.env_args = dict(scene='000002', physics='isaac-cpu')
+    generator.env = SimpleNamespace(env=SimpleNamespace(recorder_manager=SimpleNamespace(get_episode=lambda _: Episode())))
+    generator.recording = SimpleNamespace(TrajectoryFile=File)
+    ctx.archive_retry = lambda control, attempt, failure: generator.archive_retry(ctx, control, attempt, failure, 0)
+    details = dict(area_held=np.bool_(False), rise=np.float64(.0002), points=np.array([[1., 2., 3.]]),
+                   nested={'contacts': np.array([True, False]), 'count': np.int64(2)})
+    expected = dict(area_held=False, rise=.0002, points=[[1., 2., 3.]], nested={'contacts': [True, False], 'count': 2})
+    attempts = []
+
+    def callback():
+        attempts.append(1)
+        if len(attempts) == 1:
+            ctx.steps = state['steps'] = 3
+            ctx.note('measured', details=details)
+            raise ExpertFailed('pick', 'object not lifted', kind='check', criterion_id='lift', **details)
+        return 'completed'
+
+    with ctx.trace.frame('step', 'pick', {'index': 1}):
+        assert retry(ctx, callback) == 'completed'
+    assert len(attempts) == 2 and len(ctx.retry_archives) == 1
+    archive = tmp_path / ctx.retry_archives[0]['batch']
+    report = json.loads((archive / 'episodes/7.json').read_text())
+    assert report['failure']['details'] == report['events'][0]['details'] == expected
+    assert report['failure']['details']['area_held'] is False
+    with h5py.File(archive / 'trajectories_failed.hdf5') as file:
+        assert json.loads(file['data/demo_7'].attrs['failure'])['details'] == expected
+    tree = load_document(archive / report['call_trace'])
+    from table_1000.experts.audit.records import classify
+    assert any(f['category'] == 'a3' for f in classify(tree))
+    # Checks can also carry raw numerical values, not only trace.encode tags.
+    tree['checks'].append(details)
+    save_document(tmp_path / 'calls.json.gz', tree)
+    assert load_document(tmp_path / 'calls.json.gz')['checks'][-1] == expected
+    (tmp_path / 'episodes').mkdir()
+    generator.save(dict(seed=7, repeat=0, failure={'details': details}), time.perf_counter())
+    assert json.loads((tmp_path / 'episodes/7.json').read_text())['failure']['details'] == expected
+    from table_1000.sim.isaaclab.replay import write_episode
+    write_episode(tmp_path / 'replay.hdf5', [{'x': np.zeros((1, 1))}] * 2,
+                  dict(failure=details, accepted=np.bool_(False)))
+    with h5py.File(tmp_path / 'replay.hdf5') as file:
+        assert json.loads(file['data/demo_0'].attrs['failure']) == expected
+        assert not file['data/demo_0'].attrs['accepted']
+
+
+@pytest.mark.parametrize('unavailable', ['missing region', 'flat', 'zero candidates'])
+def test_retry_restores_an_unavailable_gravity_requirement_as_unsatisfiable(unavailable):
+    from table_1000.experts.skills.chain import InHand
+    from table_1000.experts.skills.place.strict import Placing
+    from table_1000.experts.audit.trace import encode
+    ctx, state, archives = context(2)
+    skill = Placing()
+    skill.ctx = ctx
+    skill.held, skill.reaches, skill.log = {}, {}, []
+    ctx.skills = lambda: skill
+    ctx._skills = skill
+    ctx.geometry = {'pen': SimpleNamespace(solid=lambda *args, **kwargs: True)}
+    skill.target = lambda obj: SimpleNamespace()
+    skill.low_release_options = lambda *args: []
+    origin = dict(near=np.zeros(3), keep_out=[], step=.02, margin=.002)
+    if unavailable != 'missing region':
+        origin['region'] = (np.eye(4), np.zeros(2), np.ones(2))
+    if unavailable == 'flat':
+        origin['orientation'] = 'flat'
+    recipe = dict(obj='pen', arms=['left'], gravity_release=True, hanging=True, origin=origin)
+    need = InHand('pen', lambda arm, pose: True, ['left'], recipe=recipe)
+    expected = encode(recipe)
+    ctx.requirements.append(need)
+    assert skill.low_release_need(need) is None  # optional creation still declines this relaxation
+    calls = []
+    def callback():
+        calls.append(1)
+        if len(calls) == 1:
+            state['steps'] = ctx.steps = 3
+            raise Unreachable('pick', 'release failed after motion')
+        assert ctx.requirements == [need]
+        assert need.obj == 'pen' and need.arms == ['left']
+        assert need.hands is need.rank is None
+        assert callable(need.accepts) and not need.accepts('left', np.eye(4))
+        assert encode(need.recipe) == expected
+    retry(ctx, callback)
+    assert len(calls) == 2 and len(archives) == 1
+
+
+def test_retry_archive_view_writes_the_same_logical_document_before_rollback(tmp_path):
+    from table_1000.experts.audit.codec import save_document, load_document
+    from table_1000.experts.audit.trace import encode
+    ctx, state, _ = context(2)
+    with ctx.trace.frame('skill', 'retry', concrete=False) as control:
+        try:
+            move(ctx, state, True)
+        except Unreachable as error:
+            payload = encode(np.arange(2400, dtype=float).reshape(800, 3))
+            with ctx.trace.search.decision('lookahead', {'options': payload}):
+                ctx.trace.search.mark('cache', origin=payload)
+            ctx.trace.search.failures.append(dict(id=1, frame=control['id'], branch='main',
+                                                  kind='check', state={'physical': payload}))
+            expected_frames = deepcopy(ctx.trace.frames)
+            expected_frames[error.skill_frame_id]['exception'] = dict(
+                type=type(error).__name__, reason=error.reason, details=encode(error.details),
+                kind=error.kind, branch=ctx.trace.search.branch, unreachable=True)
+            for entry in expected_frames:
+                entry.pop('_snapshot', None)
+                entry.pop('_clock', None)
+                if entry['exit'] is None:
+                    entry['exit'] = ctx.steps
+            expected = dict(version=2, failure_frame=error.skill_frame_id, frames=expected_frames,
+                            **deepcopy(ctx.trace.search.document()))
+            archived = ctx.trace.failed_branch(error, control['id'])
+            assert archived == expected
+            assert '_snapshot' in ctx.trace.frames[control['id']]
+            assert ctx.trace.frames[control['id']]['exit'] is None
+            path = tmp_path/'calls.json.gz'
+            save_document(path, archived)
+            # The synchronous writer has finished before rollback changes live metadata.
+            ctx.trace.search.failures[0]['reason'] = 'changed after write'
+            ctx.trace.search.decisions[0]['events'].append({'stage': 'later candidate'})
+            assert load_document(path) == expected

@@ -335,6 +335,6 @@ def closure(hand, surface, body_pose, tcp, gap, open_gap, contacts, body):
         reasons.append('closed past collision surfaces')
     if alignment['edge_only']:
         reasons.append('pad edge only')
-    return {'held': not reasons, 'reasons': reasons, 'expected_gap_m': expected,
-            'measured_gap_m': gap, 'gap_tolerance_m': GAP_TOLERANCE,
+    return {'held': not reasons, 'reasons': reasons, 'expected_gap_m': None if expected is None else float(expected),
+            'measured_gap_m': float(gap), 'gap_tolerance_m': GAP_TOLERANCE,
             'pad_contacts': pads, **alignment}

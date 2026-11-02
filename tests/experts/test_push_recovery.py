@@ -65,8 +65,8 @@ def test_braced_unreachable_push_keeps_the_support_and_base_fixed():
     motion = Motion()
     motion.braced, motion.brace_seed = True, None
     motion.arms, motion.held = ['left'], {}
-    def fail(reason, kind, **details):
-        raise kind(None, reason, **details)
+    def fail(reason, failure, *, kind, **details):
+        raise failure(None, reason, **details)
     motion.ctx = SimpleNamespace(poses=lambda: {'part:body': np.eye(4)},
         spec=SimpleNamespace(base=object(), arms={'left': SimpleNamespace(finger_targets=lambda _: {})}),
         fail=fail, note=lambda *a, **kw: None)
@@ -89,6 +89,7 @@ def test_dragging_an_object_does_not_carry_its_lower_support(monkeypatch):
     from table_1000.experts.skills.common import SUPPORT_DISTANCE
     monkeypatch.setattr(module.fcl, 'distance', lambda *a: SimpleNamespace(min_distance=0.))
     heights = {'book': 0., 'payload': .03}
+    monkeypatch.setattr(semantic, 'supported_inside', lambda ctx, obj, *args: obj == 'payload')
     monkeypatch.setattr(world_geometry, 'object_points',
                         lambda ctx, obj: np.array([[0., 0., heights[obj]]]))
     pieces = {name: SimpleNamespace(body=body, fcl=lambda _: object()) for name, body in

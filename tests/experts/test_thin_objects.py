@@ -42,11 +42,13 @@ def flat_thin(hand):
         scene=SimpleNamespace(TABLE={'center': (.5, 0.), 'size': (1., 1.), 'height': 0.}),
         poses=lambda: {'sheet:body': pose.copy()}, base_transform=lambda: np.eye(4),
         env=SimpleNamespace(objects={}, center_of_mass=lambda body: [pose[:3, 3]]),
-        hold=lambda seconds: None, skills=lambda: skill)
+        hold=lambda seconds: None, note=lambda *a, **k: None, skills=lambda: skill)
     skill.target = lambda *args, **kwargs: target
     skill.solvers = {'right': SimpleNamespace(finger_gap=lambda: .001, tcp=lambda: np.eye(4), attachments={})}
     skill.move_by_displacement = lambda arm, command: pose.__setitem__((2, 3), pose[2, 3] + command[2])
     skill.release = lambda arm: None
+    skill.check_hold = lambda *args: {'held': True}
+    skill.solvers['right'].allow = lambda *args: None
     return skill, target, pose
 
 
@@ -66,12 +68,12 @@ def test_thin_pick_defaults_still_use_preparation_and_lift(flat_thin):
     skill, target, _ = flat_thin
     calls = []
     def grasp_thin(chosen, **options):
-        skill.held['right'] = {'target': chosen}
+        skill.held['right'] = {'target': chosen, 'supports': [], 'carried': []}
         calls.append((chosen, options))
         return chosen, {'arm': 'right'}
     skill.grasp_thin = grasp_thin
     assert skills.pick(skill.ctx, 'sheet', point=None, approach=None, max_angle=None)['rise'] == pytest.approx(.1)
-    assert calls == [(target, {'arm': None, 'height': .1, 'need': None, 'base': True})]
+    assert calls == [(target, {'arm': None, 'height': .1, 'need': None, 'base': True, 'closure_only_record': True})]
 
 
 def test_ordinary_pick_keeps_custom_arguments(flat_thin):
@@ -79,7 +81,7 @@ def test_ordinary_pick_keeps_custom_arguments(flat_thin):
     skill.thin_geometry = lambda target: None
     calls = []
     def grasp(*args, **kwargs):
-        skill.held['right'] = {'target': target}
+        skill.held['right'] = {'target': target, 'supports': [], 'carried': []}
         calls.append((args, kwargs))
         return {'arm': 'right'}
     skill.grasp = grasp
@@ -89,7 +91,7 @@ def test_ordinary_pick_keeps_custom_arguments(flat_thin):
     args, kwargs = calls[0]
     assert args[:2] == (target, None)
     assert np.array_equal(args[2], point) and np.array_equal(args[3], approach)
-    assert kwargs == {'then': (0., 0., .1), 'max_angle': angle, 'need': None, 'base': True}
+    assert kwargs == {'then': (0., 0., .1), 'max_angle': angle, 'need': None, 'base': True, 'closure_only_record': True}
 
 
 def test_thin_candidate_hand_preserves_container_opening_margin(flat_thin):
@@ -161,8 +163,8 @@ def test_blocked_plate_reports_edge_and_objects_to_clear(flat_thin):
         contact_height=.02, contact_band=.025)
     skill.solvers['right'].world = SimpleNamespace(objects={})
     skill.ctx.note = lambda *args, **kwargs: None
-    def fail(reason, kind=RuntimeError, **details):
-        raise kind(None, reason, **details)
+    def fail(reason, failure=RuntimeError, *, kind, **details):
+        raise failure(None, reason, **details)
     skill.ctx.fail = fail
     def blocked(*args):
         raise Unreachable(None, 'no reachable pressure drag', rejected=[
@@ -454,7 +456,7 @@ def test_thin_close_does_not_finish_on_speculative_pad_contact():
     skill.solvers = {'arm': SimpleNamespace(finger_gap=lambda: .001)}
     # The ordinary closure diagnostic accepts early PhysX contact generation;
     # actual pad surfaces first touch after 0.8 s of this closure.
-    skill.check_closure = lambda *args: {
+    skill.check_closure = lambda *args, kind: {
         'held': True,
         'pad_contacts': {finger: [{'separation_m': .0004 if len(calls) * DT < .8 else -.00001}]
                          for finger in ('left', 'right')}}

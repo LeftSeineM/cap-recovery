@@ -9,6 +9,8 @@ would do on a second run.
 import json
 
 import h5py
+
+from table_1000.common.serialization import attribute, dumps
 import torch
 
 from table_1000.scenes.recordings import decoded_attrs, subtask
@@ -70,11 +72,11 @@ def write_episode(path, states, attrs):
 
     with h5py.File(path, 'w') as file:
         data = file.create_group('data')
-        data.attrs['env_args'] = json.dumps({key: value for key, value in attrs.items()})
+        data.attrs['env_args'] = dumps(attrs)
         demo = data.create_group('demo_0')
         demo.attrs['num_samples'] = len(states) - 1
         for key, value in attrs.items():
-            demo.attrs[key] = value if isinstance(value, (int, float, str)) else json.dumps(value)
+            demo.attrs[key] = attribute(value)
         write(demo.create_group('initial_state'), states[:1])
         write(demo.create_group('states'), states[1:])
 

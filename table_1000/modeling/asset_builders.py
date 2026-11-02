@@ -179,8 +179,14 @@ def cylinder(name, radius, depth, position, surface, parent, radius_end=None,
 
 
 def tube(name, outer, inner, depth, position, surface, parent, axis="X",
-         outer_end=None, inner_end=None, segments=16, collision=True):
-    """Closed hollow tube; each collision sector is a closed convex prism."""
+         outer_end=None, inner_end=None, segments=16, collision=True, solid_collision=False):
+    """Hollow visual tube with closed convex sectors, or one solid outer collision hull.
+
+    Use ``solid_collision`` only when the cavity has no function (a fixed pen
+    barrel occupied by its refill); containers and removable caps stay hollow.
+    Future moving button/refill mechanisms need separate jointed rigid bodies,
+    with collision disabled between the connected bodies.
+    """
     outer_end = outer if outer_end is None else outer_end
     inner_end = inner if inner_end is None else inner_end
     vertices = [axis_point(end, r * math.cos(i * math.tau / segments),
@@ -196,7 +202,7 @@ def tube(name, outer, inner, depth, position, surface, parent, axis="X",
                         (i, 2 * segments + i, 2 * segments + j, j),
                         (segments + i, segments + j, 3 * segments + j, 3 * segments + i)]
         faces.extend(sector_faces)
-        if collision:
+        if collision and not solid_collision:
             indices = [i, j, segments + i, segments + j,
                        2 * segments + i, 2 * segments + j, 3 * segments + i, 3 * segments + j]
             local = {index: n for n, index in enumerate(indices)}
@@ -206,6 +212,13 @@ def tube(name, outer, inner, depth, position, surface, parent, axis="X",
                          [tuple(local[k] for k in face) for face in closed], parent,
                          shape="CONVEX_HULL")
             proxy.location = position
+    if collision and solid_collision:
+        closed = [tuple(range(segments - 1, -1, -1)), tuple(range(segments, 2 * segments))]
+        closed.extend((i, (i + 1) % segments, segments + (i + 1) % segments, segments + i)
+                      for i in range(segments))
+        proxy = mesh(f"Collision_{name}", vertices[:2 * segments], closed, parent,
+                     shape="CONVEX_HULL")
+        proxy.location = position
     obj = mesh(name, vertices, faces, parent, surface)
     obj.location = position
     for i, face in enumerate(obj.data.polygons):

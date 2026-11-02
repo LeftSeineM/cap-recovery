@@ -96,8 +96,9 @@ data/scenes/000000/<机器人>/<专家编号>/<后端>/   场景的数据：一�
   videos/<seed>/<相机>.mp4                       成功轨迹的录像，每个相机一条；--merge 时为 videos/<seed>/merge.mp4
   fails/                                         失败轨迹的录像，结构同 videos/
   checkpoints/step<k>.hdf5                       由步骤组成的专家：每个 seed 第 k 步结束时的场景状态，step0 为初态
-runs/expert/000000/<运行>/        一次开发运行（run_expert.py --dev）：结构同上，以后的运行不会替换它；
-                                  <运行> = <日期>-<时间>-<提交>-<机器人>-<专家编号>[-<标签>]
+runs/expert/000000/<机器人>/<专家编号>/<运行>/   一次开发运行（run_expert.py --dev）：结构同上，以后的运行不会替换它；
+                                  <运行> = <日期>-<时间>-<提交>-<机器人>-<专家编号>-layout<n>[-<标签>]；
+                                  上一轮开发线改名为 <专家编号>-legacy-<MMDD>/；.iteration/ 为浏览站点的派生文件
   cases/<seed>/                   可选，failure_cases.py 渲染的失败案例
 data/cases/000000/<机器人>/<专家编号>/<用例名>/   长期用例：只含一个检查点的最小批次（summary.json、checkpoints/step<k>.hdf5），可直接作为 --from；failure_snapshots.py --case 写入
 runs/resolve/000000/<运行>/       离线数值重解（scripts/experts/resolve.py），运行名同专家开发运行；

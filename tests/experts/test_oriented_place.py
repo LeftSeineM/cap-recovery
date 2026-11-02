@@ -186,46 +186,32 @@ def test_keepout_hull_handles_settled_nearly_coplanar_vertices(fixture):
     assert fcl.distance(obstacle, obstacle).min_distance <= 0.
 
 
-def test_upright_inside_uses_same_measured_tilt_and_containment(monkeypatch):
+@pytest.mark.parametrize('degrees', [0., 35., 50.])
+def test_storage_result_accepts_internally_supported_lean(monkeypatch, degrees):
     from table_1000.experts.skills import semantic
+    from table_1000.experts.skills.hold.frames import Box
+    points = Box((.008, .008, .10)).points()
     pose = np.eye(4)
-    pose[:3,:3] = Rotation.from_euler('y',np.pi/2).as_matrix()
-    pose[2,3] = .025
-    target = SimpleNamespace(points=box((.14,.01,.01)),body='rod:body')
-    ctx = SimpleNamespace(skills=lambda:SimpleNamespace(target=lambda obj:target),
-                          poses=lambda:{'rod:body':pose})
-    wall = world_geometry.Shape('holder','body','wall',np.eye(4),box((.1,.1,.1)))
-    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx:[wall])
-    monkeypatch.setattr(semantic,'_inside_point',lambda *args:True)
-    assert semantic.upright_inside(ctx,'rod','holder')
-    pose[:3,:3] = np.eye(3)
-    assert not semantic.upright_inside(ctx,'rod','holder')
-    pose[:3,:3] = Rotation.from_euler('y',np.pi/2).as_matrix()
-    monkeypatch.setattr(semantic,'_inside_point',lambda *args:False)
-    assert not semantic.upright_inside(ctx,'rod','holder')
-
-
-def test_upright_inside_checks_immersed_segment_above_mouth(monkeypatch):
-    from table_1000.experts.skills import semantic
-    pose = np.eye(4)
-    pose[:3,:3] = Rotation.from_euler('y',np.pi/2).as_matrix()
-    pose[2,3] = .108
-    target = SimpleNamespace(points=box((.15,.01,.01)),body='rod:body')
-    ctx = SimpleNamespace(skills=lambda:SimpleNamespace(target=lambda obj:target),
-                          poses=lambda:{'rod:body':pose})
-    parts = [(box((.1,.1,.003)),[0,0,0])]
-    parts += [(box((.003,.1,.1)),[x,0,.05]) for x in (-.05,.05)]
-    parts += [(box((.1,.003,.1)),[0,y,.05]) for y in (-.05,.05)]
-    shapes = [world_geometry.Shape('holder','body',str(i),np.eye(4),p+offset)
-              for i,(p,offset) in enumerate(parts)]
-    monkeypatch.setattr(world_geometry,'scene_shapes',lambda ctx:shapes)
-    # The body centre is above the rim, but the lower end is well enclosed.
-    assert semantic.upright_inside(ctx,'rod','holder')
-    pose[2,3] = .17
-    assert not semantic.upright_inside(ctx,'rod','holder')
-    pose[2,3] = .108
-    pose[0,3] = .1
-    assert not semantic.upright_inside(ctx,'rod','holder')
+    pose[:3, :3] = Rotation.from_euler('y', degrees, degrees=True).as_matrix()
+    pose[2, 3] = .003 - (points @ pose[:3, :3].T)[:, 2].min()
+    target = SimpleNamespace(points=points, body='rod:body')
+    parts = [(box((.12, .12, .004)), [0., 0., 0.])]
+    parts += [(box((.004, .12, .15)), [x, 0., .075]) for x in (-.06, .06)]
+    parts += [(box((.12, .004, .15)), [0., y, .075]) for y in (-.06, .06)]
+    shapes = [world_geometry.Shape('holder', 'body', str(i), np.eye(4), p + offset)
+              for i, (p, offset) in enumerate(parts)]
+    shapes.append(world_geometry.Shape('rod', 'body', 'rod', pose,
+                                       points @ pose[:3, :3].T + pose[:3, 3]))
+    events = []
+    ctx = SimpleNamespace(skills=lambda: SimpleNamespace(target=lambda obj: target),
+                          poses=lambda: {'rod:body': pose},
+                          note=lambda note, **kw: events.append((note, kw)))
+    monkeypatch.setattr(world_geometry, 'scene_shapes', lambda ctx: shapes)
+    assert semantic.storage_result(ctx, 'rod', 'holder')
+    assert events[-1][1]['tilt_deg'] == pytest.approx(degrees)
+    # An exterior-supported object and an object still floating above the floor fail.
+    shapes[-1].points[:, 0] += .2
+    assert not semantic.supported_inside(ctx, 'rod', 'holder')
 
 
 def test_stack_region_uses_live_support_top(monkeypatch):
@@ -313,7 +299,7 @@ def test_oriented_motion_rejects_lost_hold_before_updating_attachments(monkeypat
     skill.solvers = {'left':solver}
     skill.held = {'left':{'target':target, 'grasp':{'open_gap':.03}}}
     skill.hands = {'left':None}
-    skill.pad_closure = lambda *args: {'held':False}
+    skill.check_hold = lambda *args: {'held':False}
     with pytest.raises(RuntimeError,match='pick it again'):
         skill.lower('left',np.eye(4),np.zeros(3),np.eye(4),.01,.15,False,
                     {'ik_checked':0},'upright')
@@ -333,7 +319,7 @@ def test_oriented_low_projected_area_keeps_measured_opposing_pad_contact(monkeyp
     skill.ctx = SimpleNamespace(trace=None, poses=lambda:{target.body:np.eye(4)}, note=lambda *a,**k:None)
     skill.solvers, skill.hands = {'left':solver}, {'left':None}
     skill.held = {'left':{'target':target, 'grasp':{'open_gap':.03}}}
-    skill.pad_closure = lambda *args: {'held':True}
+    skill.check_hold = lambda *args: {'held':True}
     skill.down_goals = lambda *a,**k: []
     assert not skill.lower('left', np.eye(4), np.zeros(3), np.eye(4), .002, .15, False,
                            {'ik_checked':0}, 'upright')
@@ -416,9 +402,9 @@ def test_flat_release_rechecks_measured_bottom_against_live_support(monkeypatch)
     frame = np.eye(4);frame[2,3]=.8
     pose = np.eye(4);pose[2,3]=.807
     events=[]
-    def fail(reason, kind=RuntimeError, **details):
+    def fail(reason, failure=RuntimeError, *, kind, **details):
         assert details['recoverable']
-        raise kind(None, reason, **details)
+        raise failure(None, reason, **details)
     skill.ctx = SimpleNamespace(poses=lambda:{target.body:pose},
         env=SimpleNamespace(center_of_mass=lambda body:(pose[:3,3],0.)),
         note=lambda *a,**k:events.append(k),fail=fail)

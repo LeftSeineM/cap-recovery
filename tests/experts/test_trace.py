@@ -16,7 +16,7 @@ from table_1000.experts.audit.trace import CallTrace, decode, encode, frame, sel
 def context(seed=4, repeat=0):
     ctx = SimpleNamespace(steps=0, current='put the pen', _skills=None, solvers={},
                           rng=np.random.default_rng(seed), scene=SimpleNamespace(OBJECTS={}),
-                          env=SimpleNamespace(targets=lambda: {'gripper': np.array([[0.]])}, contacts=SimpleNamespace(phase=None)))
+                          env=SimpleNamespace(audit_state=lambda: {'x': np.array([[10 if ctx.steps == 0 else 19 + ctx.steps]])}, targets=lambda: {'gripper': np.array([[0.]])}, contacts=SimpleNamespace(phase=None)))
     ctx.trace = CallTrace(ctx, seed, 2, repeat)
     return ctx
 
@@ -48,8 +48,8 @@ def test_tree_bound_arguments_rng_and_failure_path(tmp_path):
     assert entry['exception']['unreachable'] and entry['exception']['details'] == {'obj': 'pen'}
     path = tmp_path / 'calls.json.gz'
     ctx.trace.save(path)
-    with gzip.open(path, 'rt') as file:
-        assert json.load(file)['frames'] == ctx.trace.frames
+    from table_1000.experts.audit.codec import load_document
+    assert load_document(path)['frames'] == ctx.trace.frames
 
 
 def test_checks_and_explicit_control_frame_select_last_concrete_skill():
@@ -171,7 +171,7 @@ def test_snapshot_takes_entry_state_and_command_not_failure_state(tmp_path, ente
     ctx = context()
     ctx.steps = enter
     failed(ctx)
-    report = {'seed': 4, 'status': 'failed', 'step_names': ['move pen'], 'steps': [], 'call_trace': 'calls/4.json.gz',
+    report = {'seed': 4, 'attempt': 2, 'start': {'qpos': [0., 0.], 'base_pose': [0., 0., 0.]}, 'status': 'failed', 'step_names': ['move pen'], 'steps': [], 'call_trace': 'calls/4.json.gz',
               'failure': {'reason': 'no grasp'}}
     ctx.trace.save(tmp_path / report['call_trace'])
     with h5py.File(tmp_path / 'trajectories_failed.hdf5', 'w') as file:
@@ -214,7 +214,7 @@ def test_frame_snapshot_checkpoint_roundtrip_and_cli(tmp_path):
     ctx = context()
     failed(ctx)
     batch = tmp_path / 'batch'
-    report = {'seed': 4, 'status': 'failed', 'step_names': ['move pen'], 'steps': [], 'call_trace': 'calls/4.json.gz',
+    report = {'seed': 4, 'attempt': 2, 'start': {'qpos': [0., 0.], 'base_pose': [0., 0., 0.]}, 'status': 'failed', 'step_names': ['move pen'], 'steps': [], 'call_trace': 'calls/4.json.gz',
               'failure': {'reason': 'no grasp', 'subtask': 'pick'}}
     ctx.trace.save(batch / report['call_trace'])
     (batch / 'episodes').mkdir()
@@ -232,7 +232,9 @@ def test_frame_snapshot_checkpoint_roundtrip_and_cli(tmp_path):
     _, states = read_checkpoints(path)
     state = states[4][1]
     assert state['x'][0, 0] == 10
-    assert json.loads(state['_expert_frame'])['frame']['name'] == 'pick'
+    assert '_expert_frame' not in state
+    case = json.loads((path.parent.parent / 'summary.json').read_text())['case']
+    assert case['category'] == 'b' and case['root']['frame'] == 0
     assert states[4][2]['qpos'].shape == (2,)
 
 
@@ -289,20 +291,20 @@ def test_snapshot_of_resumed_episode_keeps_original_robot_start(tmp_path):
         group.attrs['attempt'] = 2
         write_tree(group.create_group('state'), {'x': np.zeros((1, 1))})
         write_tree(group.create_group('start'), start)
-    report = {'seed': 4, 'status': 'failed', 'step_names': ['move pen'], 'steps': [], 'steps_run': [1, 1],
+    report = {'seed': 4, 'attempt': 2, 'start': {'qpos': [0., 0.], 'base_pose': [0., 0., 0.]}, 'status': 'failed', 'step_names': ['move pen'], 'steps': [], 'steps_run': [1, 1],
               'call_trace': 'calls/4.json.gz', 'failure': {'reason': 'no grasp', 'subtask': 'pick'}}
     ctx.trace.save(batch / report['call_trace'])
     (batch / 'episodes').mkdir()
     (batch / 'episodes/4.json').write_text(json.dumps(report))
     (batch / 'summary.json').write_text(json.dumps({'scene': '000002', 'robot': 'x1pro', 'expert': '0000', 'scope': {0: None}, 'layout': 0,
                                                   'outside_scope': False, 'physics': 'isaac-cpu',
-                                                  'steps_run': [1, 1], 'from': str(parent)}))
+                                                  'steps_run': [1, 1], 'from': '../parent'}))
     with h5py.File(batch / 'trajectories_failed.hdf5', 'w') as file:
         demo = file.create_group('data/demo_4')
         demo.attrs['num_samples'] = 0
         demo.create_dataset('initial_state/x', data=[[10]])
     main([str(batch), '--output', str(tmp_path / 'snapshots')])
-    path = next((tmp_path / 'snapshots').glob('000002/*/checkpoints/step0.hdf5'))
+    path = next((tmp_path / 'snapshots').glob('000002/x1pro/0000/*/checkpoints/step0.hdf5'))
     _, states = read_checkpoints(path)
     assert states[4][2]['qpos'].tolist() == [7., 8.]
     assert states[4][2]['base_pose'].tolist() == [1., 2., 3.]

@@ -113,7 +113,11 @@ class LowRelease:
         return safe
 
     def low_release_need(self, need):
-        """Geometric hold constraint after a shared pick/place stance failed."""
+        """Propose a bounded-release hold constraint, or None when unavailable.
+
+        This optional relaxation may fail. Restoring an existing requirement is
+        handled by restore_need, which must retain it even when no hold works.
+        """
         origin = (need.recipe or {}).get('origin', {})
         region = origin.get('region')
         if region is None or origin.get('orientation') == 'flat':
@@ -165,22 +169,22 @@ class LowRelease:
             # Flat placement has additional level, COM and minimum-opening
             # conditions. Retain its strict path until those can be preserved
             # across an intentional change of release attitude.
-            ctx.fail('bounded gravity release does not replace flat release checks', Unreachable, obj=obj)
+            ctx.fail('bounded gravity release does not replace flat release checks', Unreachable, kind='planning', obj=obj)
         held = self.held[arm]
         if held.get('riders'):
-            ctx.fail('bounded release would risk container contents', Unreachable, obj=obj)
+            ctx.fail('bounded release would risk container contents', Unreachable, kind='planning', obj=obj)
         # Part grasps do not necessarily register the container's contents as
         # carried riders. Check live containment too before tilting anything.
         contents = [other for other in ctx.scene.OBJECTS
                     if other != obj and inside(ctx, other, obj)]
         if contents:
-            ctx.fail('bounded release would risk container contents', Unreachable, obj=obj, contents=contents)
+            ctx.fail('bounded release would risk container contents', Unreachable, kind='planning', obj=obj, contents=contents)
         target = held['target']
         options = self.low_release_options(target, region, near, keep_out, step, margin)
         ctx.note('placement relaxation attempted', obj=obj, level=1, relaxation='bounded gravity release',
                  strict_failure=reason, candidates=len(options), max_drop_m=ctx.geometry[obj].max_drop_m)
         if not options:
-            ctx.fail('no bounded gravity release candidates', Unreachable, obj=obj, strict_failure=reason)
+            ctx.fail('no bounded gravity release candidates', Unreachable, kind='planning', obj=obj, strict_failure=reason)
         names = [name for name in solver.world.objects if name.startswith(obj + ':')]
         held['target'] = target = replace(self.target(obj), names=names)
         def measured_drop():
@@ -188,12 +192,12 @@ class LowRelease:
             points = target.points @ current[:3,:3].T + current[:3,3]
             floor = self.release_floor(region)
             if floor is None:
-                ctx.fail('no live container floor for gravity release', Unreachable, obj=obj)
+                ctx.fail('no live container floor for gravity release', Unreachable, kind='planning', obj=obj)
             floor_frame = np.asarray(floor[0])
             drop = float(((points-floor_frame[:3,3]) @ floor_frame[:3,2]).min())
             limit = ctx.geometry[obj].max_drop_m
             if not np.isfinite(drop) or drop < 0. or drop > limit:
-                ctx.fail('measured gravity release exceeds drop limit', Unreachable,
+                ctx.fail('measured gravity release exceeds drop limit', Unreachable, kind='check',
                          obj=obj, drop_m=drop, max_drop_m=limit)
             return drop
         def attempt():
@@ -250,7 +254,7 @@ class LowRelease:
             self.make_room(releases, [arm], need=1, touch=[], relocate=True)
             result = attempt()
         if not result['done']:
-            ctx.fail('no reachable bounded gravity release', Unreachable, obj=obj,
+            ctx.fail('no reachable bounded gravity release', Unreachable, kind='planning', obj=obj,
                      options=len(options), **{k:v for k,v in result.items() if k!='done'})
         current = ctx.poses()[target.body]
         drop = measured_drop()
@@ -265,14 +269,14 @@ class LowRelease:
             points = target.points @ settled[:3, :3].T + settled[:3, 3]
             top = float(((points - frame[:3, 3]) @ frame[:3, 2]).max())
             if not np.isfinite(top) or top > metadata['maximum_height']:
-                ctx.fail('object above target height after gravity release; pick it again before placing',
+                ctx.fail('object above target height after gravity release; pick it again before placing', kind='check',
                          obj=obj, top_m=top, maximum_height_m=metadata['maximum_height'], recoverable=True)
         if orientation == 'upright' and 'upright_container' in metadata:
-            from table_1000.experts.skills.semantic import upright_inside
+            from table_1000.experts.skills.semantic import storage_result
             ctx.hold(.3)
             container = metadata['upright_container']
-            if not upright_inside(ctx, obj, container, metadata['part']):
-                ctx.fail('object not upright inside after release; pick it again before placing',
+            if not storage_result(ctx, obj, container, metadata['part']):
+                ctx.fail('object not supported inside after release; pick it again before placing', kind='check',
                          obj=obj, container=container, recoverable=True)
         return {'arm':arm, 'spot':result['spot'].tolist(), 'object':ctx.poses()[target.body].tolist(),
                 'relaxation_level':1, 'drop_m':drop}

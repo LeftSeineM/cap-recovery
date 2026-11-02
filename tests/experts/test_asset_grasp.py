@@ -269,7 +269,7 @@ def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thi
              carry=lambda *args: None, release=lambda *args: None, finger_gap=lambda: .02)
     def grasp(targets, **kwargs):
         target = targets[0]
-        skill.held = {"right": {"target": target}}
+        skill.held = {"right": {"target": target, "supports": []}}
         if attempts:
             assert released == ['right']
         attempts.append(target.names[0])
@@ -281,6 +281,10 @@ def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thi
     skill = types.SimpleNamespace(ctx=ctx, hands={'right':types.SimpleNamespace()},
             grasp=grasp, solvers={'right':solver}, move_by_displacement=move, release=released.append,
             thin_geometry=lambda target: object() if thin else None)
+    from table_1000.experts.skills.hold.pick import Grasping
+    solver.tcp = lambda: np.eye(4)
+    skill.lift_grasp = lambda target, result, height: Grasping.lift_grasp(skill, target, result, height)
+    skill.check_hold = lambda *args: {'held': False}
     selected = 1 if excluded else 0
     virtual = types.SimpleNamespace(**vars(candidates[selected]))
     skill.grasp_thin = lambda target, **kwargs: (virtual, grasp([virtual], **kwargs))
@@ -299,8 +303,7 @@ def test_failed_lift_ends_acceptance_without_trying_next_target(monkeypatch, thi
     with pytest.raises(ExpertFailed, match='object not lifted'):
         asset_grasp.pick(skill, report, excluded=excluded)
     assert attempts == [candidates[selected].names[0]]
-    assert report['target_attempts'][0]['release_failure'] == {
-        'reason': 'joint_limit', 'details': {'stage': 'retreat'}}
+    assert report['target_attempts'][0]['failure']['reason'] == 'object not lifted'
 
 
 def test_thin_search_exhaustion_ends_acceptance_without_restarting_on_another_patch(monkeypatch):

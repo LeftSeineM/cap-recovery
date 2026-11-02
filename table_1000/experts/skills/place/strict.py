@@ -14,7 +14,7 @@ from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
 from table_1000.experts.context import ExpertFailed, Unreachable, remaining_wall
-from table_1000.experts.skills.hold.frames import MIN_HOLD_AREA, OPEN_MARGIN, _close, _held_area, _vertices, translated
+from table_1000.experts.skills.hold.frames import OPEN_MARGIN, _close, _held_area, _vertices, translated
 from table_1000.experts.skills.chain import InHand
 from table_1000.experts.skills.place.flat import FlatReleaseGeometry, FLAT_LEVEL, FLAT_STEP
 from table_1000.experts.skills.place.low import LowRelease
@@ -133,13 +133,13 @@ class Placing(LowRelease):
         ctx = self.ctx
         floor, _ = support_region(scene_shapes(ctx, exclude=(target.obj,)), container, part, floor=True)
         if floor is None:
-            ctx.fail('container floor unavailable before release', obj=target.obj, container=container, recoverable=True)
+            ctx.fail('container floor unavailable before release', kind='planning', obj=target.obj, container=container, recoverable=True)
         pose = ctx.poses()[target.body]
         points = target.points @ pose[:3, :3].T + pose[:3, 3]
         gap = float(((points - floor[0][:3, 3]) @ floor[0][:3, 2]).min())
         ctx.note('insertion depth measured', obj=target.obj, container=container, floor_gap_m=gap)
         if gap > clearance + INSERT_MARGIN:
-            ctx.fail('object above container floor before release; pick it again before placing',
+            ctx.fail('object above container floor before release; pick it again before placing', kind='check',
                      obj=target.obj, container=container, floor_gap_m=gap, recoverable=True)
 
     def flat_release_geometry(self, target, region):
@@ -218,7 +218,7 @@ class Placing(LowRelease):
         if (minimum is None or not clear or gap > geometry.maximum + 1e-6
                 or abs(gap - minimum) > 2 * FLAT_STEP or tilt > FLAT_LEVEL or not supported):
             ctx.fail('flat release violates measured clearance, level or support; pick again with a compatible hold',
-                     Unreachable, obj=target.obj, support_gap_m=gap, minimum_m=minimum,
+                     Unreachable, kind='check', obj=target.obj, support_gap_m=gap, minimum_m=minimum,
                      maximum_m=geometry.maximum, tilt_deg=float(np.degrees(tilt)), com_inside=supported,
                      clearance_verified=clear,
                      blocked_by=sorted(geometry.blocked_by) if minimum is None else [], recoverable=True)
@@ -364,7 +364,8 @@ class Placing(LowRelease):
         """Move the held object down at the first of ``options`` (``(object pose, spot)``) in reach
         (IK above and at the release) whose motion plans; ``{'done', 'spot', 'ik_checked',
         'planned', 'last', ...collisions}``."""
-        result = {'done': False, 'spot': None, 'ik_checked': 0, 'planned': 0, 'last': 'no placement in reach'}
+        result = {'done': False, 'spot': None, 'ik_checked': 0, 'planned': 0, 'last': 'no placement in reach',
+                  'last_kind': 'planning', 'last_failure_id': None}
         obstacles, channels = [], {}
         if orientation in ('upright', 'insert'):
             obstacles = self.insertion_obstacles(self.held[arm]['target'])
@@ -419,7 +420,7 @@ class Placing(LowRelease):
     def lower(self, arm, placed, spot, tcp_object, clearance, above, lift, result, orientation=None):
         """Down at one of :meth:`put_down`'s options if it is in reach (``lift``: the torso lift
         moving too) and its motion plans; whether it is, counted in ``result``.
-        Oriented motion checks measured pad contact when projected coverage is low;
+        Oriented motion checks measured pad contact and following regardless of projected coverage;
         a lost object fails with an instruction to pick it again."""
         ctx, solver = self.ctx, self.solvers[arm]
         result['ik_checked'] += 1
@@ -428,14 +429,12 @@ class Placing(LowRelease):
             poses, tcp = ctx.poses(), solver.tcp()
             area = _held_area(target.shape, poses[target.body] @ target.offset,
                               tcp, self.hands[arm], solver.finger_gap())
-            if area < MIN_HOLD_AREA:
-                # A tilted end hold can have no widest projected section on
-                # the pads while both pads still touch the actual surface.
-                contact = self.pad_closure(target, arm, self.held[arm]['grasp']['open_gap'])
-                if not contact['held']:
-                    ctx.fail('object not held during oriented placement; pick it again before placing',
-                             obj=target.obj, arm=arm, held_area_m2=area, recoverable=True, closure=contact)
-                ctx.note('oriented hold confirmed by pad contacts', obj=target.obj, arm=arm, held_area_m2=area)
+            contact = self.check_hold(target, arm)
+            if not contact['held']:
+                ctx.fail('object not held during oriented placement; pick it again before placing', kind='check',
+                         obj=target.obj, arm=arm, held_area_m2=area, recoverable=True, closure=contact)
+            ctx.note('oriented hold confirmed by physical measurement', obj=target.obj, arm=arm,
+                     held_area_m2=area)
             for name in target.names:
                 solver.attach(name, poses[solver.world.objects[name].body])
             return np.linalg.inv(tcp) @ poses[target.body]
@@ -469,8 +468,11 @@ class Placing(LowRelease):
             result.update(done=True, spot=spot)
             return True
         except PlanningFailed as error:
-            mark(self, 'plan', outcome='rejected', reason=error.reason)
-            result.update(last=error.reason, **collisions(error))
+            # The exception type also carries failed physical arrival checks.
+            # Preserve the producer's kind and observation through aggregation.
+            mark(self, 'plan', outcome='rejected', reason=error.reason, kind=error.kind or 'planning')
+            result.update(last=error.reason, last_kind=error.kind or 'planning',
+                          last_failure_id=getattr(error, 'search_failure_id', None), **collisions(error))
             ctx.note('next placement', arm=arm, spot=spot.tolist(), reason=error.reason, stage=stage, **collisions(error))
             return False
 
@@ -515,9 +517,14 @@ class Placing(LowRelease):
                                                             'orientation': orientation, 'turns': turns}})
 
     def restore_need(self, recipe):
-        """Rebuild a Place requirement with its evaluated candidates and cached verdicts."""
+        """Rebuild a requirement, retaining an unsatisfiable one when release is unavailable."""
         if recipe.get('gravity_release'):
-            return self.low_release_need(InHand(recipe['obj'], None, recipe['arms'], recipe=recipe))
+            need = InHand(recipe['obj'], lambda arm, tcp_object: False, recipe['arms'], recipe=recipe)
+            restored = self.low_release_need(need)
+            if restored is not None:
+                return restored
+            self.ctx.requirements.append(need)
+            return need
         ctx = self.ctx
         obj, target, options = recipe['obj'], recipe['target'], recipe['options']
         clearance, above = recipe['clearance'], recipe['above']
@@ -717,7 +724,7 @@ class Placing(LowRelease):
             if orientation != 'flat' and len(region) > 3 and region[3].get('release_container'):
                 return self.low_release(obj, region, arm, np.asarray(near)[:3], keep_out, step, margin,
                                         'no room', orientation)
-            ctx.fail('no room', region=[frame.tolist(), low.tolist(), high.tolist()])
+            ctx.fail('no room', kind='planning', region=[frame.tolist(), low.tolist(), high.tolist()])
         # IK first (cheap) over many, then motion for those that have it. If
         # reach or transfer plans fail, try one alternative base stance before
         # giving up: a release IK alone does not imply a clear transfer path.
@@ -786,10 +793,12 @@ class Placing(LowRelease):
                                         result['last'], orientation)
             if orientation == 'flat':
                 ctx.fail('no flat placement at minimum collision-free opening height; pick again with a compatible hold',
-                         Unreachable, arm=arm, maximum_m=flat_geometry.maximum,
+                         Unreachable, kind=result['last_kind'], failure_id=result['last_failure_id'],
+                         arm=arm, maximum_m=flat_geometry.maximum,
                          recoverable=True, options=len(options),
                          **{k: v for k, v in result.items() if k != 'done'})
-            ctx.fail('no placement', Unreachable if result['planned'] == 0 else ExpertFailed, arm=arm,
+            ctx.fail('no placement', Unreachable if result['planned'] == 0 else ExpertFailed,
+                     kind=result['last_kind'], failure_id=result['last_failure_id'], arm=arm,
                      options=len(options), **{k: v for k, v in result.items() if k != 'done'})
         spot = result['spot']
         if orientation == 'upright' and len(region) > 3 and 'upright_container' in region[3]:
@@ -805,10 +814,10 @@ class Placing(LowRelease):
         ctx.hold(.3)
         if orientation == 'upright' and len(region) > 3 and 'upright_container' in region[3]:
             # semantic imports placement constants, so this dependency stays local.
-            from table_1000.experts.skills.semantic import upright_inside
+            from table_1000.experts.skills.semantic import storage_result
             container = region[3]['upright_container']
-            if not upright_inside(ctx, obj, container, region[3]['part']):
-                ctx.fail('object not upright inside after release; pick it again before placing',
+            if not storage_result(ctx, obj, container, region[3]['part']):
+                ctx.fail('object not supported inside after release; pick it again before placing', kind='check',
                          obj=obj, container=container, recoverable=True)
         result_out = {'arm': arm, 'spot': spot.tolist(), 'object': ctx.poses()[target.body].tolist()}
         if orientation == 'flat':

@@ -33,11 +33,11 @@ def test_transient_instability_fails_and_emits_peaks(cabinet, kind):
     with pytest.raises(ExpertFailed, match='stability exceeded'):
         with stability(ctx, 'cab', joints['top']):
             if kind == 'translation':
-                pose[0, 3] = .0051
+                pose[0, 3] = .0201
             elif kind == 'rotation':
-                pose[:3, :3] = Rotation.from_euler('z', 2.1, degrees=True).as_matrix()
+                pose[:3, :3] = Rotation.from_euler('z', 5.1, degrees=True).as_matrix()
             else:
-                gaps['middle'] = .0051
+                gaps['middle'] = .0201
             ctx.observers[0](ctx)
     assert ctx.observers == []
     assert notes[-1][0] == ('drawer stability',)
@@ -49,19 +49,19 @@ def test_active_drawer_is_excluded_and_failure_allows_cleanup(cabinet):
     monitor = Stability(ctx, 'cab', joints['top'])
     gaps['top'] = .16
     monitor.sample(ctx)
-    pose[0, 3] = .006
+    pose[0, 3] = .021
     with pytest.raises(ExpertFailed):
         monitor.sample(ctx)
     # Unwinding the failed action can now retract both hands.
     monitor.sample(ctx)
     pose[0, 3] = 0.
     monitor.sample(ctx)
-    assert monitor.peak['translation_m'] == .006
+    assert monitor.peak['translation_m'] == .021
 
 
 def test_other_drawer_already_open_fails_at_entry(cabinet):
     ctx, joints, pose, gaps, notes = cabinet
-    gaps['bottom'] = .01
+    gaps['bottom'] = .021
     with pytest.raises(ExpertFailed, match='stability exceeded'):
         with stability(ctx, 'cab', joints['top']):
             pytest.fail('must fail before any motion')
@@ -119,7 +119,7 @@ def test_braced_push_removes_only_its_observer_before_holding(monkeypatch, outco
 
     joint = SimpleNamespace(child='drawer', kind='SLIDER', name='slide')
     monkeypatch.setattr(drawer_joints.Joint, 'of', lambda *a: joint)
-    gap = [.01]
+    gap = [.04]
     monkeypatch.setattr(drawer_joints, 'opening', lambda *a: gap[0])
     events = []
     sentinel = lambda context: None
@@ -164,7 +164,7 @@ def test_braced_push_removes_only_its_observer_before_holding(monkeypatch, outco
 
 def test_moving_base_while_supported_is_rejected():
     from table_1000.experts.skills.base import Base
-    def fail(reason):
+    def fail(reason, *, kind):
         raise ExpertFailed(None, reason)
     s = SimpleNamespace(braced=True, ctx=SimpleNamespace(fail=fail))
     with pytest.raises(ExpertFailed, match='release the brace'):
@@ -272,3 +272,26 @@ def test_release_revokes_finger_contacts_for_every_carried_part_and_payload(with
     else:
         skill.release('right')
     assert not allowed
+
+
+def test_minor_shift_is_recorded_and_retry_keeps_original_baseline(cabinet):
+    ctx, joints, pose, gaps, notes = cabinet
+    original = pose.copy()
+    with stability(ctx, 'cab', joints['top'], original) as monitor:
+        pose[0, 3] = .015
+        pose[:3, :3] = Rotation.from_euler('z', 4., degrees=True).as_matrix()
+        gaps['middle'] = .015
+        monitor.sample(ctx)
+    assert notes[-1][1]['translation_m'] == pytest.approx(.015)
+    # A retry at the moved pose must not silently adopt it as its new origin.
+    with pytest.raises(ExpertFailed, match='stability exceeded'):
+        with stability(ctx, 'cab', joints['top'], original) as monitor:
+            pose[0, 3] = .025
+            monitor.sample(ctx)
+    np.testing.assert_array_equal(original, np.eye(4))
+
+
+@pytest.mark.parametrize('gap,closed', [(.0051, True), (.0199, True), (.0201, False)])
+def test_closed_drawer_uses_two_centimetre_visible_gap(monkeypatch, gap, closed):
+    monkeypatch.setattr(drawer_joints, 'opening', lambda *args: gap)
+    assert drawer_joints.is_closed(None, 'cab', 'top') is closed

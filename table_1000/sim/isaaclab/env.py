@@ -357,6 +357,11 @@ class RobotEnv:
         self.contacts.clear()
         return self.observe()
 
+    def audit_state(self):
+        """Numeric physical state for audit records; no scene collision geometry."""
+        from table_1000.sim.isaaclab.replay import numpy_state
+        return {**numpy_state(self), 'targets': self.targets()}
+
     def capture_retry(self):
         """Physical state, held commands and the continuous recorded prefix before a retry."""
         from copy import deepcopy

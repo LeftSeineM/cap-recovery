@@ -12,6 +12,8 @@ import csv
 import json
 from pathlib import Path
 
+from table_1000.common.serialization import dumps
+
 import numpy as np
 
 from table_1000.common.batch import load_record
@@ -190,7 +192,7 @@ def main(argv=None):
     if args.expert_before:
         result['expert'] = expert_comparison(args.expert_before, args.expert_after)
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / 'comparison.json').write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
+    (args.output / 'comparison.json').write_text(dumps(result, indent=2, ensure_ascii=False) + '\n')
     with (args.output / 'preferences.csv').open('w') as file:
         writer = csv.DictWriter(file, fieldnames=['asset', 'family', 'trials', 'success', 'rate'])
         writer.writeheader()
@@ -215,7 +217,7 @@ def main(argv=None):
         if row['closure_check']:
             for disagreement in row['closure_check']['disagreements']:
                 signals.append({'asset': row['asset'], **disagreement})
-    (args.output / 'closure-disagreements.json').write_text(json.dumps(signals, indent=2, ensure_ascii=False) + '\n')
+    (args.output / 'closure-disagreements.json').write_text(dumps(signals, indent=2, ensure_ascii=False) + '\n')
     lines = ['# 首次闭合信号与实际结果', '',
              '实际结果只用首次抬升/运输；未完成实际测量单列，不当作不稳。夹实信号不是对运输稳固性的保证。', '',
              '| 资产 | 判夹实且稳 | 判未夹实但稳（误判） | 判夹实但失败（漏判） | 判未夹实且失败 | 未测量 | 未检查 |',
@@ -245,7 +247,7 @@ def main(argv=None):
             lines.append(f'| {row["seed"]} | {row["old_status"]} | {row["new_status"]} | '
                          f'{row["old_wall_s"]:.2f} | {row["new_wall_s"]:.2f} | {row["wall_ratio"]:.2f} |')
     (args.output / 'timing.md').write_text('\n'.join(lines) + '\n')
-    print(json.dumps(result['totals'], ensure_ascii=False))
+    print(dumps(result['totals'], ensure_ascii=False))
 
 
 if __name__ == '__main__':

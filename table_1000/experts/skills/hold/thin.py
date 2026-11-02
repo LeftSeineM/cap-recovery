@@ -12,7 +12,7 @@ from table_1000.experts.context import DT, ExpertFailed, Unreachable, remaining_
 from table_1000.experts.skills.hold.checks import CollisionSurface
 from table_1000.experts.skills.hold.frames import BACKOFF_STEP, CONTACT_TOLERANCE, HOLD_AREA, _grasp_area, _vertices, build_grasp_pose, grasp_candidates, translated
 from table_1000.experts.skills.common import APPROACH, IK_ATTEMPTS
-from table_1000.experts.skills.hold.pick import MAX_IK, MAX_REGRASPS
+from table_1000.experts.skills.hold.pick import MAX_IK, MAX_REGRASPS, PROBE_LIFT
 from table_1000.scenes.geometry import transform_points
 from table_1000.experts.solver import ARRIVAL_TOLERANCE, GRIPPER_TIME, PlanningFailed
 from table_1000.experts.skills.push.pressure import PressureLoad, correction_path, material_motion, same_pressure_contact
@@ -42,7 +42,7 @@ class PreparationSearch:
         if self.checked >= self.limit:
             # Exhausting a resource allowance does not prove geometric
             # unreachability; do not restart the same search via a fallback.
-            self.ctx.fail('thin preparation search exhausted', candidates=self.checked,
+            self.ctx.fail('thin preparation search exhausted', kind='planning', candidates=self.checked,
                           limit=self.limit, by_arm=self.counts, by_mode=self.by_mode)
         self.checked += 1
         self.by_mode[self.mode] = self.by_mode.get(self.mode, 0) + 1
@@ -74,7 +74,9 @@ class ThinPicking:
         try:
             result = self.grasp(target, arm=arm, approach=(0., 0., -1.), then=(0., 0., height),
                                 need=need, base=base, close=self.close_thin,
-                                closure_only_record=closure_only_record)
+                                closure_only_record=True)
+            if not closure_only_record:
+                self.lift_grasp(target, result, PROBE_LIFT)
             return target, result
         finally:
             self._fingertip_candidates = False
@@ -169,7 +171,7 @@ class ThinPicking:
         checked = None
         for step in range(steps(deadline)):
             self.ctx.step({f'{arm}_gripper': [[0.]]})
-            checked = self.check_closure(target, arm, grasp)
+            checked = self.check_closure(target, arm, grasp, kind='record')
             # PhysX reports speculative contacts before the surfaces touch.
             # Those contacts suffice for the ordinary diagnostic, but must not
             # end a thin pinch while the jaws are still travelling freely.
@@ -212,7 +214,7 @@ class ThinPicking:
                           overhang_m=result['overhang_m'], required_m=result['planned_overhang_m'])
             if len(segments) >= budget:
                 if retries >= MAX_REGRASPS:
-                    self.ctx.fail('insufficient thin object overhang', required_m=result['planned_overhang_m'],
+                    self.ctx.fail('insufficient thin object overhang', kind='check', required_m=result['planned_overhang_m'],
                                   measured_m=result['overhang_m'], segments=segments)
                 retries += 1
                 # Slip accumulates over a long stroke. A retry budgets the
@@ -411,7 +413,7 @@ class ThinPicking:
                                 prepared['fingertip'], prepared['landing_rule'], rejected, height=height)
                             if result is not None:
                                 return result
-        ctx.fail('no reachable pressure drag', Unreachable, rejected=rejected)
+        ctx.fail('no reachable pressure drag', Unreachable, kind='planning', rejected=rejected)
 
     def _drag_landing(self, target, candidate, edge, hand, shift, depth, planned_depth,
                       best_area, grasp_hint, prepared, search, patches, convex, surface,
@@ -531,7 +533,7 @@ class ThinPicking:
                 final = ctx.poses()[target.body]
                 points = transform_points(final, target.points)
                 if points[:, 2].max() < ctx.scene.TABLE['height'] - CONTACT_TOLERANCE:
-                    ctx.fail('thin object lost support', object_before=pose.tolist(),
+                    ctx.fail('thin object lost support', kind='check', object_before=pose.tolist(),
                              object_after=final.tolist(), highest_point_m=float(points[:, 2].max()),
                              table_height_m=ctx.scene.TABLE['height'], command_m=command.tolist())
                 progress = float((ctx.env.center_of_mass(target.body)[0] - before_com) @ direction)
@@ -549,7 +551,7 @@ class ThinPicking:
                         search.pressure_retries += 1
                         search.failed_pressures.append(contact)
                         if search.pressure_retries >= MAX_REGRASPS:
-                            ctx.fail('thin pressure repeated empty contact',
+                            ctx.fail('thin pressure repeated empty contact', kind='check',
                                      attempts=search.pressure_retries, feedback=feedback)
                         continue
                 else:
@@ -600,7 +602,7 @@ class ThinPicking:
         world = transform_points(pose, target.points)
         polygon = support_polygon([piece + shift for piece in convex], ctx.scene.TABLE, CONTACT_TOLERANCE)
         if not supported_point(center + shift, polygon):
-            ctx.fail('thin pressure landing lost support')
+            ctx.fail('thin pressure landing lost support', kind='planning')
         section, frame = exposed_section(world + shift, edge, [piece + shift for piece in convex])
         virtual = replace(target, shape=section, offset=np.linalg.inv(pose) @ frame)
         transform = pose @ virtual.offset
@@ -624,13 +626,13 @@ class ThinPicking:
                 then=(0., 0., height), mass_center=center + shift, candidate_budget=search,
                 ik_seed=np.asarray(hint[1]), geometric={arm: (supports, stream)}), None)
         if option is None:
-            ctx.fail('thin pressure landing no longer reachable')
+            ctx.fail('thin pressure landing no longer reachable', kind='planning')
         hint = option[1].pose[:3, 0].tolist(), option[3].tolist()
         result = self._drag_landing(target, arm, edge, hand, shift, depth, planned_depth,
             option[1].info['held_mm2'] * 1e-6, hint, prepared, search, patches, convex,
             surface, pose, center, polygon, fingertip, rule, rejected, height=height)
         if result is None:
-            ctx.fail('thin pressure has no new contact')
+            ctx.fail('thin pressure has no new contact', kind='planning')
         return result
 
     def _plate_pressure_drag(self, target, arm, press, end, direction, distance):
@@ -654,7 +656,7 @@ class ThinPicking:
                 return not sample['bearing']
             completed = solver.follow(path, monitor=bearing)
             if completed:
-                ctx.fail('plate pressure has no bearing', feedback=feedback)
+                ctx.fail('plate pressure has no bearing', kind='check', feedback=feedback)
             before = ctx.env.center_of_mass(target.body)[0].copy()
             # Contact may start above the intended loaded reference. Complete
             # the checked press drive without waiting for free-space joint
@@ -950,7 +952,7 @@ class ThinPicking:
                         if obj not in row['clear_objects']:
                             row['clear_objects'].append(obj)
                     self.ctx.fail('plate edge route blocked; clear the obstacles for one listed edge and retry pick',
-                                  Unreachable, edges=edges, rejected=blocked)
+                                  Unreachable, kind='planning', edges=edges, rejected=blocked)
             if thin.kind in ('filament', 'plate'):
                 raise
         except ExpertFailed as error:
@@ -978,11 +980,14 @@ class ThinPicking:
         try:
             result = self.grasp(exposed, arm=arm, approach=-edge.outward, then=(0., 0., height),
                                 need=need, base=base, close=self.close_thin,
-                                closure_only_record=closure_only_record)
+                                closure_only_record=True)
         finally:
             self._fingertip_candidates = previous
         result['preparation'] = {**{key: value for key, value in prepared.items() if key != 'edge'},
                                  'edge_point': edge.point.tolist(), 'edge_outward': edge.outward.tolist()}
+        if not closure_only_record:
+            self.prepare_thin_lift(exposed, result)
+            self.lift_grasp(exposed, result, PROBE_LIFT)
         return exposed, result
 
     def prepare_thin_lift(self, target, result):

@@ -69,6 +69,34 @@ class PhysicsBatchTest(unittest.TestCase):
 
 
 class RigidIterationsTest(unittest.TestCase):
+    def test_explicit_mass_properties_survive_rigid_body_merge(self):
+        try:
+            from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+        except ImportError:
+            self.skipTest('requires the Isaac/OpenUSD Python environment')
+        import numpy as np
+        from table_1000.physics.rigid import author
+        with tempfile.TemporaryDirectory() as directory:
+            geometry, output = Path(directory) / 'geometry.usda', Path(directory) / 'physics.usda'
+            stage = Usd.Stage.CreateNew(str(geometry))
+            UsdGeom.Xform.Define(stage, '/Asset')
+            for name in ('shell', 'refill'):
+                body = UsdGeom.Xform.Define(stage, '/Asset/' + name).GetPrim()
+                UsdPhysics.RigidBodyAPI.Apply(body)
+            stage.GetRootLayer().Save()
+            center, diagonal, axes = [.001, -.002, .003], [1.e-8, 2.e-6, 3.e-6], [1., 0., 0., 0.]
+            author(geometry, output, .012, [.4, .3], center_of_mass=center,
+                   diagonal_inertia=diagonal, principal_axes=axes)
+            composed = Usd.Stage.CreateInMemory()
+            composed.GetRootLayer().subLayerPaths = [str(output), str(geometry)]
+            prim = composed.GetPrimAtPath('/Asset')
+            self.assertTrue(prim.HasAPI(UsdPhysics.RigidBodyAPI))
+            props = UsdPhysics.MassAPI(prim)
+            self.assertAlmostEqual(props.GetMassAttr().Get(), .012)
+            np.testing.assert_allclose(props.GetCenterOfMassAttr().Get(), center, rtol=1.e-6)
+            np.testing.assert_allclose(props.GetDiagonalInertiaAttr().Get(), diagonal, rtol=1.e-6)
+            self.assertEqual(props.GetPrincipalAxesAttr().Get(), Gf.Quatf(1.))
+
     def test_mapping_reads_composed_body_frames(self):
         try:
             from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics

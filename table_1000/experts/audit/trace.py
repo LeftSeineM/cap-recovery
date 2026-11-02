@@ -1,13 +1,14 @@
 """Serializable expert call frames and replay of an evaluated atomic skill."""
 
 from contextlib import contextmanager, nullcontext
-from copy import deepcopy
 from dataclasses import fields, is_dataclass
 from functools import wraps
-import gzip
 import inspect
 import json
+import time
 from pathlib import Path
+
+from table_1000.common.serialization import dumps
 
 import numpy as np
 
@@ -19,6 +20,8 @@ def encode(value):
         return value.item()
     if isinstance(value, bytes):
         return {'$': 'bytes', 'value': value.hex()}
+    if isinstance(value, set):
+        return {'$': 'set', 'value': [encode(item) for item in sorted(value, key=repr)]}
     if isinstance(value, tuple):
         return {'$': 'tuple', 'value': [encode(item) for item in value]}
     if isinstance(value, list):
@@ -71,6 +74,8 @@ def decode(value, ctx=None):
         return np.asarray(value['value'], dtype=value['dtype'])
     if kind == 'bytes':
         return bytes.fromhex(value['value'])
+    if kind == 'set':
+        return set(decode(item, ctx) for item in value['value'])
     if kind == 'tuple':
         return tuple(decode(item, ctx) for item in value['value'])
     if kind == 'InHand':
@@ -115,16 +120,25 @@ class CallTrace:
         self.replay_entry = None
         self.problems = None
         self.retry_path = []
+        from .search import SearchRecord
+        self.search = SearchRecord(self)
 
     @contextmanager
     def frame(self, kind, name, arguments=None, concrete=False):
         ctx = self.ctx
         number = len(self.frames)
+        started = (time.process_time(), time.perf_counter())
         entry = {'id': number, 'parent': self.stack[-1] if self.stack else None, 'kind': kind, 'name': name,
                  'arguments': encode(arguments or {}), 'enter': ctx.steps, 'exit': None, 'current': ctx.current, 'result': None,
                  'held': encode(ctx._skills.held if ctx._skills else {}),
                  'reaches': encode(ctx._skills.reaches if ctx._skills else {}), 'planners': planner_state(ctx),
-                 'rng': encode(ctx.rng.bit_generator.state), 'targets': encode(ctx.env.targets()), 'concrete': concrete}
+                 'rng': encode(ctx.rng.bit_generator.state), 'targets': encode(ctx.env.targets()), 'concrete': concrete, 'control': False}
+        entry.update(cost_start=list(started), _clock=started, branch=self.search.branch, child_cpu_s=0., child_wall_s=0.)
+        entry['_snapshot'] = self.search.snapshot()
+        if kind == 'step' or concrete:
+            # A successful release may be selected after Step.check fails.
+            # Every explicitly selectable concrete call needs its entry state.
+            entry['state'] = entry['_snapshot']
         if kind == 'skill':
             import mplib.pymp
             entry['mplib_seed'] = int(np.random.SeedSequence([self.seed, self.attempt, number, self.repeat, *self.retry_path]).generate_state(1)[0]) | 1
@@ -145,43 +159,66 @@ class CallTrace:
         self.stack.append(number)
         try:
             yield entry
+            if kind == 'step':
+                self.search.outcome('step_passed', frame=number)
         except BaseException as error:
             from table_1000.experts.context import Unreachable
             entry['exception'] = {'type': type(error).__name__, 'reason': getattr(error, 'reason', str(error)),
+                                  'kind': getattr(error, 'kind', None), 'branch': self.search.branch,
                                   'details': encode(getattr(error, 'details', {})), 'unreachable': isinstance(error, Unreachable)}
             if not hasattr(error, 'skill_frame_id'):
                 error.skill_frame_id = number
             self.failure_frame = error.skill_frame_id
+            self.search.exception(entry, error)
+            entry['failure_id'] = getattr(error, 'search_failure_id', None)
+            entry['state'] = entry['_snapshot']
             raise
         finally:
             entry['exit'] = ctx.steps
+            entry['cpu_s'], entry['wall_s'] = time.process_time() - started[0], time.perf_counter() - started[1]
+            entry['exclusive_cpu_s'] = max(0., entry['cpu_s'] - entry.pop('child_cpu_s'))
+            entry['exclusive_wall_s'] = max(0., entry['wall_s'] - entry.pop('child_wall_s'))
+            entry.pop('_snapshot')
+            entry.pop('_clock')
+            entry['failure_ids'] = [f['id'] for f in self.search.failures if f['frame'] == number and f['branch'] == entry['branch']]
             self.stack.pop()
+            if self.stack:
+                parent = self.frames[self.stack[-1]]
+                parent['child_cpu_s'] += entry['cpu_s']
+                parent['child_wall_s'] += entry['wall_s']
 
     def save(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(path, 'wt') as file:
-            json.dump({'version': 1, 'failure_frame': self.failure_frame, 'frames': self.frames}, file, separators=(',', ':'))
+        from .codec import save_document
+        save_document(path, self.document())
+
+    def document(self):
+        return dict(version=2, seed=self.seed, attempt=self.attempt, repeat=self.repeat,
+                    failure_frame=self.failure_frame, frames=self.frames, **self.search.document())
 
     def failed_branch(self, error, control):
-        """Freeze a caught failure before retry unwinds its still-active control frame.
+        """Build a synchronous archive view before retry unwinds its control frame.
 
         Successful cleanup may have cleared ``failure_frame``. The exception retains
         its originating frame; a failure in the callback itself belongs to the control
         frame, whose concrete children remain available for skill-only replay.
+
+        Copy only frame metadata that this view edits, excluding transient entry
+        snapshots before copying. Encoded payloads and search records are borrowed:
+        the caller must serialize this view before recording or rollback resumes.
         """
         from table_1000.experts.context import Unreachable
-        frames = deepcopy(self.frames)
+        frames = [{key: value for key, value in entry.items() if key not in ('_snapshot', '_clock')}
+                  for entry in self.frames]
         failed = getattr(error, 'skill_frame_id', None)
         if failed is None or not 0 <= failed < len(frames):
             failed = control
         frames[failed]['exception'] = dict(type=type(error).__name__, reason=getattr(error, 'reason', str(error)),
-                                            details=encode(getattr(error, 'details', {})),
-                                            unreachable=isinstance(error, Unreachable))
+                                            details=encode(getattr(error, 'details', {})), kind=getattr(error, 'kind', None),
+                                            branch=self.search.branch, unreachable=isinstance(error, Unreachable))
         for entry in frames:
             if entry['exit'] is None:
                 entry['exit'] = self.ctx.steps
-        return dict(version=1, failure_frame=failed, frames=frames)
+        return dict(version=2, failure_frame=failed, frames=frames, **self.search.document())
 
 
 def frame(ctx, kind, name, arguments=None, concrete=False):
@@ -189,7 +226,8 @@ def frame(ctx, kind, name, arguments=None, concrete=False):
     return trace.frame(kind, name, arguments, concrete) if trace else nullcontext({})
 
 
-def traced(concrete=True, action=False):
+def traced(concrete=True, action=False, control=False):
+    """Record a skill; callback-only controls preserve their caller's skill boundary."""
     def decorate(function):
         signature = inspect.signature(function)
         @wraps(function)
@@ -204,6 +242,7 @@ def traced(concrete=True, action=False):
             if not getattr(ctx, 'trace', None):
                 return function(*args, **kwargs)
             with frame(ctx, 'skill', type(instance).__name__ if action else function.__name__, arguments, concrete) as entry:
+                entry['control'] = control
                 result = function(*args, **kwargs)
                 entry['result'] = encode(result)
                 # A caught failed attempt is not the failure path of a successful parent.
@@ -214,8 +253,8 @@ def traced(concrete=True, action=False):
 
 
 def read_trace(batch, report):
-    with gzip.open(Path(batch) / report['call_trace'], 'rt') as file:
-        trace = json.load(file)
+    from .codec import load_document
+    trace = load_document(Path(batch) / report['call_trace'])
     offset = report.get('call_trace_offset', 0)
     for entry in trace['frames']:
         entry['enter'] += offset
@@ -291,6 +330,36 @@ def replay(ctx, snapshot, expert):
     from table_1000.experts import skills
     entry = snapshot['frame']
     restore(ctx, entry, restore_rng=not ctx.trace.repeat)
+    if 'operation' in snapshot:
+        operation = snapshot['operation']
+        ctx.model.q, ctx.model.base = decode(operation['q']), decode(operation['base'])
+        arguments = decode(operation['arguments'], ctx)
+        if operation['name'] == 'plan_rrt':
+            arguments['check'] = ctx.solver(arguments['arm']).check_geometry
+        with frame(ctx, 'skill', 'replay_' + operation['name'], arguments, concrete=False) as replayed:
+            if operation['name'] == 'motion':
+                solver = ctx.solver(arguments['arm'])
+                problem = dict(arguments['problem'])
+                numerical = {k: v for k, v in problem.items() if k not in ('attempt', 'attempts', 'validation_step')}
+                if operation['kind'] == 'rrt':
+                    numerical['check'] = solver.check_geometry
+                    solve = lambda: solver._validated(ctx.model.plan_rrt(arguments['arm'], **numerical),
+                                                       problem['validation_step'])
+                else:
+                    solve = lambda: ctx.model.plan_screw(arguments['arm'], **numerical)
+                try:
+                    value = solver._plan(operation['kind'], solve, arguments['goals'], problem)
+                except Exception as error:
+                    from table_1000.experts.solver import PlanningFailed
+                    if not isinstance(error, PlanningFailed):
+                        raise
+                    value = {'status': error.reason}
+            else:
+                value = getattr(ctx.model, operation['name'])(**arguments)
+            status = value[0] if isinstance(value, tuple) else value['status']
+            replayed['result'] = {'status': status}
+            return {'status': status, 'original_status': snapshot['failure']['reason'],
+                    'same_status': status == snapshot['failure']['reason']}
     ctx.trace.replay_entry = entry
     step = expert.STEPS[snapshot['step'] - 1]
     with frame(ctx, 'step', step.name, {'index': snapshot['step']}) as step_frame:
@@ -304,26 +373,55 @@ def replay(ctx, snapshot, expert):
 
 def snapshot_state(batch, report, selected=None):
     """Scene and evaluated skill at entry, including commands and the optional step check."""
-    import h5py
-    from table_1000.experts.teleop import trajectory_state
-    from table_1000.scenes.initial import read_tree
     batch = Path(batch)
     trace = read_trace(batch, report)
     entry, check = select_frame(trace, selected)
-    path = batch / 'trajectories_failed.hdf5'
-    if report.get('call_trace_initial_state') and entry['enter'] == report['call_trace_offset']:
-        with h5py.File(batch / report['call_trace_initial_state'], 'r') as file:
-            state = read_tree(file['initial_state'])
-    elif entry['enter']:
-        state = trajectory_state(path, report['seed'], entry['enter'] - 1)
-    else:
-        with h5py.File(path, 'r') as file:
-            state = read_tree(file[f"data/demo_{report['seed']}/initial_state"])
+    state = decode(entry['state']['physical'])
     state['targets'] = decode(entry['targets'])
     owner = entry
     while owner['kind'] != 'step':
         owner = trace['frames'][owner['parent']]
     snapshot = {'batch': str(batch), 'frame': entry, 'check': check, 'step': owner['arguments']['index'],
                 'failed_frame_id': trace['failure_frame'], 'failure': report['failure']}
-    state['_expert_frame'] = np.bytes_(json.dumps(snapshot))
+    state['_expert_frame'] = np.bytes_(dumps(snapshot))
+    return state, snapshot
+
+
+def failure_state(batch, report, number):
+    """Replay a raw planning observation, independently of its statistical category."""
+    trace = read_trace(batch, report)
+    failure = next((f for f in trace['failures'] if f['id'] == number), None)
+    if failure is None:
+        raise ValueError(f'planning event {number} not found')
+    if failure['kind'] != 'planning':
+        raise ValueError(f"event {number} is {failure['kind']}, not planning")
+    if not failure.get('state', {}).get('physical'):
+        raise ValueError(f'planning event {number} has no replayable state')
+    original = next(f for f in trace['frames'] if f['id'] == failure['frame'] and f['branch'] == failure['branch'])
+    entry = {**original, **failure['state']}
+    owner = original
+    seed = None
+    while owner is not None:
+        if seed is None:
+            seed = owner.get('mplib_seed')
+        if owner['kind'] == 'step':
+            break
+        owner = trace['frames'][owner['parent']] if owner['parent'] is not None else None
+    entry['mplib_seed'] = seed
+    state = decode(failure['state']['physical'])
+    snapshot = dict(batch=str(batch), frame=entry, check=False,
+                    step=owner['arguments']['index'] if owner else 1,
+                    failed_frame_id=original['id'], failure=dict(reason=failure['reason']))
+    if 'operation' in failure:
+        snapshot['operation'] = failure['operation']
+    else:
+        # Re-evaluate the concrete skill with its entry state. Internal decisions
+        # retain the actual candidates/reasons, but are not public skill methods.
+        while not original['concrete']:
+            if original['parent'] is None:
+                raise ValueError(f'planning event {number} has no replayable operation or callable skill')
+            original = trace['frames'][original['parent']]
+        snapshot['frame'] = original
+        state = decode(original['state']['physical'])
+    state['_expert_frame'] = np.bytes_(dumps(snapshot))
     return state, snapshot

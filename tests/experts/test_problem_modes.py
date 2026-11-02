@@ -20,7 +20,7 @@ def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeyp
     model = RobotModel(load_spec('x1pro_rm001'), tmp_path / 'planning')
     model.set_state(model.spec.keyframe('ready'))
     ready = model.q.copy()
-    env = SimpleNamespace(spec=model.spec, joints=model.joints, steps=0, timings={'step_s': 0.},
+    env = SimpleNamespace(audit_state=lambda: {}, spec=model.spec, joints=model.joints, steps=0, timings={'step_s': 0.},
                           contacts=SimpleNamespace(phase=None, intervals=lambda: []), targets=lambda: {},
                           privileged=lambda: {'joints': {}, 'poses': {}})
     def reset(state):
@@ -92,8 +92,8 @@ def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeyp
             name = f'4-{repeat}' if repeat else '4'
             assert report['solve_trace'] == (f'problems/{name}.json.gz' if saved else None)
             assert (generator.output / 'problems' / f'{name}.json.gz').exists() == saved
-            with gzip.open(generator.output / report['call_trace'], 'rt') as file:
-                calls[mode].append(json.load(file))
+            from table_1000.experts.audit.codec import load_document
+            calls[mode].append(load_document(generator.output / report['call_trace']))
             decisions[mode].append(samples[-1])
             following[mode].append(model.ik('left', model.tcp('left', world=True), world=True))
         if mode == 'none':
@@ -101,7 +101,11 @@ def test_episode_modes_keep_calls_decisions_and_random_streams(tmp_path, monkeyp
         else:
             assert len(installs) == before[0] + 2 and len(diagnostics) > before[1]
     for mode in ('failed', 'all'):
-        assert calls[mode] == calls['none']
+        def untimed(value):
+            if isinstance(value, dict):
+                return {k: untimed(v) for k, v in value.items() if not k.endswith(('_s', '_wall_s', '_cpu_s', '_clock')) and k != 'cost_start'}
+            return [untimed(v) for v in value] if isinstance(value, list) else value
+        assert untimed(calls[mode]) == untimed(calls['none'])
         for actual, expected in zip(decisions[mode], decisions['none']):
             assert actual[:2] == expected[:2]
             np.testing.assert_array_equal(actual[2], expected[2])

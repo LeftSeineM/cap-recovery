@@ -1,7 +1,9 @@
 """Scene sources, robot placements and numbered experts. Simulator-independent helpers."""
 
 import importlib.util
+import os
 from pathlib import Path
+import re
 import sys
 import types
 
@@ -49,6 +51,65 @@ def data_dir(base, scene, robot, expert, backend, layout=0):
 
 def case_dir(base, scene, robot, expert, name):
     return Path(base) / scene / robot / expert / name
+
+
+def dev_dir(base, scene, robot, expert, run):
+    """A development batch below its scene, robot and numbered expert."""
+    return Path(base) / scene / robot / expert / run
+
+
+def dev_batches(base, scene=None):
+    """List only development batches in the scene/robot/NNNN/run layout."""
+    return sorted(path.parent for path in Path(base).glob(
+        f'{scene or "*"}/*/[0-9][0-9][0-9][0-9]*/*/summary.json')
+        if re.fullmatch(r'\d{4}(?:-legacy-\d{4})?', path.parent.parent.name))
+
+
+def batch_ref(target, owner, root=ROOT):
+    """Store sibling batches as ../name; other repository paths as root-relative paths.
+
+    References outside the repository (custom --output roots) are owner-relative.
+    Resolving runs/data/outputs separately also handles shared-directory symlinks.
+    """
+    target, owner, root = Path(target).resolve(), Path(owner).resolve(), Path(root)
+    runs = (root / 'runs' / 'expert').resolve()
+    if owner.is_relative_to(runs) and target.is_relative_to(runs):
+        source_parts, owner_parts = target.relative_to(runs).parts, owner.relative_to(runs).parts
+        if len(source_parts) >= 4 and len(owner_parts) >= 4 and source_parts[:3] == owner_parts[:3]:
+            return os.path.relpath(target, owner)
+    if target.is_relative_to(owner.parent):
+        return os.path.relpath(target, owner)
+    for name in ('runs', 'data', 'outputs', 'assets'):
+        base = (root / name).resolve()
+        if target.is_relative_to(base):
+            return str(Path(name) / target.relative_to(base))
+    return os.path.relpath(target, owner)
+
+
+def resolve_batch_ref(value, owner, root=ROOT):
+    """Resolve a stored batch reference; absolute stored paths are invalid."""
+    path = Path(value)
+    if path.is_absolute():
+        raise ValueError(f'absolute batch reference {value!r}; migrate the batch metadata')
+    base = root if path.parts and path.parts[0] in ('runs', 'data', 'outputs', 'assets') else owner
+    return (Path(base) / path).resolve()
+
+
+def rebase_batch_refs(value, source, destination, root=ROOT):
+    """Rebase cross-batch provenance when copying metadata into another batch.
+
+    Batch-local calls, retry archives and trace-parts keep their local paths.
+    """
+    def convert(item, key=None):
+        if isinstance(item, dict):
+            return {k: convert(v, k) for k, v in item.items()}
+        if isinstance(item, list):
+            return [convert(v, key) for v in item]
+        if isinstance(item, str) and key in ('from', 'batch', 'source', 'source_batch', 'snapshots_of', 'joined'):
+            if item.startswith(('../', './', 'runs/', 'data/', 'outputs/', 'assets/')):
+                return batch_ref(resolve_batch_ref(item, source, root), destination, root)
+        return item
+    return convert(value)
 
 
 def parse_scope(scope):

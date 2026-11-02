@@ -246,8 +246,8 @@ def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
         run_expert.main([*common, '--output', str(tmp_path / 'data'), '--seeds', '1'])
     assert not (tmp_path / 'data').exists()
     run_expert.main([*common, '--dev', '--name', 'try', '--seeds', '1', '3', '--output', str(tmp_path / 'runs'),
-                     *(['--problems', problems] if problems != 'failed' else [])])
-    [directory] = (tmp_path / 'runs' / '000000').iterdir()
+                     *(['--problems', problems] if problems != 'none' else [])])
+    [directory] = (tmp_path / 'runs' / '000000' / 'x1pro' / '0000').iterdir()
     assert directory.name.endswith('-nocommit-x1pro-0000-layout0-try')
     summary = json.loads((directory / 'summary.json').read_text())
     assert summary['run'] == directory.name and '--dev' in summary['command'] and summary['succeeded'] == 2

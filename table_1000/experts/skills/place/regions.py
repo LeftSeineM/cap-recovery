@@ -49,7 +49,7 @@ def on_region(obj, surface, part=None, near=None, keep_out=()):
     See :func:`support_region`."""
     def where(ctx):
         region, blocked = world_geometry.support_region(world_geometry.scene_shapes(ctx, exclude=(obj,)), surface, part, headroom=headroom(ctx, obj))
-        semantic.require(ctx, region is not None, 'no support', surface=surface, part=part)
+        semantic.require(ctx, region is not None, 'no support', kind='planning', surface=surface, part=part)
         return around(inset(region, EDGE), near), [*blocked, *keep_out]
     return where
 
@@ -82,25 +82,25 @@ def inside_region(obj, container, part=None, near=None, *, support=None, orienta
             raise ValueError('support must name another object already inside the container; '
                              'omit support to place on its floor')
         if support is not None:
-            semantic.require(ctx, semantic.inside(ctx, support, container, part), 'stack support not inside container',
+            semantic.require(ctx, semantic.inside(ctx, support, container, part), 'stack support not inside container', kind='planning',
                     support=support, container=container)
         shapes = world_geometry.scene_shapes(ctx, exclude=(obj,))
         owner, piece = support or container, None if support else part
         region, blocked = world_geometry.support_region([s for s in shapes if world_geometry.selects(s, owner, piece)]
                                          if orientation else shapes, owner, piece, floor=support is None,
                                          headroom=headroom(ctx, obj))
-        semantic.require(ctx, region is not None, 'no support', container=container, part=part)
+        semantic.require(ctx, region is not None, 'no support', kind='planning', container=container, part=part)
         stack = None
         if support is not None and orientation == 'flat':
             container_shapes = [s for s in shapes if world_geometry.selects(s, container, part)]
             floor, _ = world_geometry.support_region(container_shapes, container, part, floor=True)
-            semantic.require(ctx, floor is not None, 'no container floor', container=container)
+            semantic.require(ctx, floor is not None, 'no container floor', kind='planning', container=container)
             # Cast the live support top along the container's up, even if a
             # notebook was placed with its authored body Z pointing down.
             aligned = [world_geometry.Shape(s.obj, s.body, s.part, floor[0], s.points)
                        for s in shapes if s.obj == support]
             top, _ = world_geometry.support_region(aligned, support, top_envelope=True)
-            semantic.require(ctx, top is not None, 'no support', support=support)
+            semantic.require(ctx, top is not None, 'no support', kind='planning', support=support)
             # The lower book can settle slightly tilted. Put the next layer
             # above its highest collision point rather than through the median
             # sampled face; it then settles onto the real top without overlap.

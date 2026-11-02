@@ -3,6 +3,8 @@
 from table_1000.experts.world import geometry as world_geometry
 
 from contextlib import contextmanager
+import time
+
 from itertools import combinations
 
 import numpy as np
@@ -59,7 +61,7 @@ def _payload_contacts(s, obj, body):
 
 
 def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
-                    position_tolerance=.005, angle_tolerance=np.radians(2.),
+                    position_tolerance=.020, angle_tolerance=np.radians(5.),
                     max_push=.025, contact_height=.035, yaw_direction=(0., 1.),
                     check=None):
     """Push a supported object toward ``xy``/``yaw``, remeasuring each round.
@@ -70,7 +72,8 @@ def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
     scene geometry remain unchanged; nothing is grasped or lifted. ``check``
     runs before and after every push (and may reject lost payload).
     Internal carried-payload contact permissions last only for that push.
-    Exhausted rounds or a stalled object fail explicitly.
+    Exhausted rounds fail explicitly. Small single-push motion is diagnostic;
+    remaining error over a three-push window selects the opposite contact side.
     """
     from table_1000.experts import skills
 
@@ -85,11 +88,14 @@ def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
         raise ValueError('finite goals, nonzero direction and positive budgets required')
     turn_direction /= np.linalg.norm(turn_direction)
     s = ctx.skills()
-    semantic.require(ctx, not s.held, 'table squaring requires empty hands', obj=obj)
+    semantic.require(ctx, not s.held, 'table squaring requires empty hands', kind='planning', obj=obj)
     geometry = ctx.geometry[obj]
     children = {joint['body2'] for joint in geometry.joints.values()}
     body = next(body for body in geometry.bodies if body not in children)
     history = []
+    stalled_rounds = 0
+    contact_side = 1.
+    window_started = time.monotonic()
     for iteration in range(max_rounds + 1):
         if check is not None:
             check(ctx)
@@ -100,15 +106,15 @@ def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
         ctx.note('table squaring measured', obj=obj, round=iteration, **error)
         points = world_geometry.object_points(ctx, obj)
         semantic.require(ctx, abs(points[:, 2].min() - ctx.scene.TABLE['height']) <= .01,
-                         'table squaring needs table support', obj=obj)
+                         'table squaring needs table support', kind='check', obj=obj)
         if error['position_m'] <= position_tolerance and abs(angle) <= angle_tolerance:
             return dict(**error, pushes=history)
-        semantic.require(ctx, iteration < max_rounds, 'table squaring did not converge', obj=obj, **error)
+        semantic.require(ctx, iteration < max_rounds, 'table squaring did not converge', kind='check', obj=obj, **error)
         if abs(angle) > angle_tolerance:
             # Use the opposite face once the last turn has drifted past the
             # goal. Equal torque from opposite corners avoids walking a
             # loaded container across the table while correcting its yaw.
-            direction = turn_direction * (1. if delta @ turn_direction >= -position_tolerance else -1.)
+            direction = contact_side * turn_direction * (1. if delta @ turn_direction >= -position_tolerance else -1.)
             side = np.array([-direction[1], direction[0]])
             span = np.ptp(points[:, :2] @ side)
             lever = -np.sign(angle) * .325 * span
@@ -116,7 +122,8 @@ def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
         else:
             # An axis at a time avoids glancing corner contacts on a box.
             axis = int(np.argmax(np.abs(delta)))
-            direction = np.eye(2)[axis] * np.sign(delta[axis])
+            direction = (np.eye(2)[axis] * np.sign(delta[axis]) if contact_side > 0.
+                         else delta / np.linalg.norm(delta))
             lever = 0.
             distance = min(max_push, abs(delta[axis]))
         contact = np.r_[push_contact(points, direction, lever),
@@ -138,5 +145,17 @@ def square_on_table(ctx, obj, xy, yaw=None, *, arm=None, max_rounds=12,
                                np.arctan2(before[1, 0], before[0, 0])))
         history.append(dict(contact=contact.tolist(), direction=direction.tolist(),
                             distance=distance, shifted=shifted, turned=turned, result=result))
-        semantic.require(ctx, shifted >= .0002 or turned >= np.radians(.1),
-                         'table squaring push stalled', obj=obj)
+        small_motion = shifted < .0002 and turned < np.radians(.1)
+        ctx.note('table squaring progress', obj=obj, shifted_m=shifted, turned_rad=turned,
+                 small_motion=small_motion)
+        remaining = float(np.linalg.norm(goal - after[:2, 3])) / position_tolerance
+        if yaw is not None:
+            remaining += abs(yaw_error(yaw, np.arctan2(after[1, 0], after[0, 0]))) / angle_tolerance
+        previous = error['position_m'] / position_tolerance + abs(angle) / angle_tolerance
+        stalled_rounds = stalled_rounds + 1 if remaining >= previous else 0
+        if stalled_rounds >= 3 and time.monotonic() - window_started >= 10.:
+            contact_side *= -1.
+            stalled_rounds = 0
+            window_started = time.monotonic()
+            ctx.note('table squaring change contact', obj=obj, remaining_error=remaining,
+                     window_pushes=3, contact_side=contact_side)

@@ -58,22 +58,22 @@ def move_mouse(ctx):
 
 
 def stored(ctx):
-    semantic.require(ctx, drawer_joints.is_closed(ctx, 'chest', DRAWER), 'drawer not closed')
-    semantic.require(ctx, semantic.inside(ctx, 'wick', 'chest', BODY), 'wick not in the drawer')
+    semantic.require(ctx, drawer_joints.is_closed(ctx, 'chest', DRAWER), 'drawer not closed', kind='check')
+    semantic.require(ctx, semantic.inside(ctx, 'wick', 'chest', BODY), 'wick not in the drawer', kind='check')
 
 
 def finished(ctx):
     stored(ctx)
     semantic.require(ctx, semantic.on(ctx, 'wireless_mouse', 'table', keep_out=clear(ctx)),
-                     'wireless mouse not on the table')
+                     'wireless mouse not on the table', kind='check')
 
 
 STEPS = [
     Step('open the middle drawer', subtask('open the middle drawer of the tool chest',
          lambda ctx: semantic.open(ctx, 'chest', DRAWER, OPENING)),
-         lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'chest', DRAWER, OPENING), 'drawer not opened')),
+         lambda ctx: semantic.require(ctx, drawer_joints.is_open(ctx, 'chest', DRAWER, OPENING), 'drawer not opened', kind='check')),
     Step('store the desoldering wick in the middle drawer', store_wick,
-         lambda ctx: semantic.require(ctx, semantic.inside(ctx, 'wick', 'chest', BODY), 'wick not in the drawer')),
+         lambda ctx: semantic.require(ctx, semantic.inside(ctx, 'wick', 'chest', BODY), 'wick not in the drawer', kind='check')),
     Step('close the middle drawer', subtask('close the middle drawer of the tool chest',
          lambda ctx: semantic.close(ctx, 'chest', DRAWER)), stored),
     Step('move the wireless mouse to a clear part of the table', move_mouse, finished),

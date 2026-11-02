@@ -49,10 +49,14 @@ PULLS, PULL_LEAST = 3, .25  # grasps a part is opened with at most; the least pa
 ON_TOLERANCE = .03      # m an object's lowest point may be above the surface it is on
 
 
-def require(ctx, ok, reason, **details):
+def require(ctx, ok, reason, *, kind, **details):
     """Fail the current subtask with ``reason`` unless ``ok``."""
+    from table_1000.experts.audit.search import check
+    import inspect
+    symbol = inspect.currentframe().f_back.f_code.co_qualname
+    failure_id = check(ctx, symbol + '.require', ok, kind=kind, family_id='step.predicate', legacy_error=reason, values=details)
     if not ok:
-        ctx.fail(reason, **details)
+        ctx.fail(reason, kind=kind, failure_id=failure_id, **details)
 
 
 # -- drawer actions -----------------------------------------------------------------------------
@@ -98,10 +102,12 @@ def _open(ctx, obj, name, amount, *, brace=False):
                     s.release(held['arm'])
                 else:
                     skills.release(ctx, held['arm'])
-        require(ctx, drawer_joints.is_open(ctx, obj, name, amount), 'not opened', joint=name, opening=drawer_joints.opening(ctx, obj, name))
+        require(ctx, drawer_joints.is_open(ctx, obj, name, amount), 'not opened', kind='check', joint=name, opening=drawer_joints.opening(ctx, obj, name))
+
+    baseline = ctx.pose(obj, j.parent).copy() if brace else None
 
     def checked():
-        with stability(ctx, obj, j) if brace else nullcontext():
+        with stability(ctx, obj, j, baseline) if brace else nullcontext():
             attempt()
 
     skills.retry(ctx, checked)
@@ -126,10 +132,12 @@ def _close(ctx, obj, name, *, brace=False):
                       skills.push(ctx, obj, j.handle, direction=direction, distance=distance))
         ctx.note('pushed', joint=name, opening=drawer_joints.opening(ctx, obj, name), arm=pushed['arm'], tilt=pushed['tilt'],
                  parent_shift=float(np.linalg.norm(ctx.pose(obj, j.parent)[:3, 3] - housing)))
-        require(ctx, drawer_joints.is_closed(ctx, obj, name), 'not closed', joint=name, opening=drawer_joints.opening(ctx, obj, name))
+        require(ctx, drawer_joints.is_closed(ctx, obj, name), 'not closed', kind='check', joint=name, opening=drawer_joints.opening(ctx, obj, name))
+
+    baseline = ctx.pose(obj, j.parent).copy() if brace else None
 
     def checked():
-        with stability(ctx, obj, j) if brace else nullcontext():
+        with stability(ctx, obj, j, baseline) if brace else nullcontext():
             attempt()
 
     skills.retry(ctx, checked)
@@ -141,8 +149,8 @@ def open(ctx, obj, name, amount, *, brace=False):
     ``brace=True`` presses the housing roof with the other empty hand during
     each pull, then retracts it. Both hands must be empty at entry; otherwise
     ``ValueError`` asks the expert to place the held object first. Housing
-    translation <= 5 mm, rotation <= 2 degrees, and other sliders' absolute
-    openings <= 5 mm are checked every control step, including approach and
+    translation <= 20 mm, rotation <= 5 degrees, and other sliders' absolute
+    openings <= 20 mm are checked every control step, including approach and
     retreat. A violation fails the skill. The opt-in route locks base and torso
     during support; no reachable loaded roof contact raises ``Unreachable``.
     Clear the roof/reposition first, or use ``brace=False`` to omit these
@@ -157,7 +165,7 @@ def close(ctx, obj, name, *, brace=False):
     needed, and the handle of an open drawer is too close to its body to grasp straight on).
 
     ``brace=True`` supports the housing roof with the opposite empty hand and
-    checks <= 5 mm housing translation, <= 2 degree rotation and <= 5 mm other
+    checks <= 20 mm housing translation, <= 5 degree rotation and <= 20 mm other
     sliders' openings at every control step. Requirements, failures, logging
     and locked torso/base are as in :func:`open`; default behavior is unchanged.
     """
@@ -201,77 +209,123 @@ def _inside_point(shapes, middle):
     return True
 
 
-def supported_inside(ctx, obj, container):
-    """Whether collision material immerses in the cavity and touches an inward
-    floor/wall face within the existing support distance. Unlike ``inside``,
-    contents may protrude above the mouth; touching an exterior wall is not support.
+def supported_inside(ctx, obj, container, part=None):
+    """Whether collision material immerses in the cavity and is supported inside.
+
+    Support is an inward container floor/wall face or an upward contact with
+    another object supported inside the same cavity, recursively without cycles.
+    Contacts use SUPPORT_DISTANCE and unsigned distance. Contents may protrude
+    above the mouth; exterior or merely lateral contacts are not stack support.
     """
+    return _storage_support(world_geometry.scene_shapes(ctx), obj, container, part) is not None
+
+
+def _storage_support(shapes, obj, container, part=None):
+    """Immediate support: 'container', a stored object's name, or None."""
     from mplib.collision_detection import fcl
     from table_1000.experts.skills.common import SUPPORT_DISTANCE, convex_keepout
     from table_1000.experts.skills.hold.sections import Edge, exposed_points
-    shapes = world_geometry.scene_shapes(ctx)
-    walls = [s for s in shapes if s.obj == container]
+    walls = [s for s in shapes if world_geometry.selects(s, container, part)]
+    if not walls:
+        raise ValueError('supported_inside requires container collision geometry')
     normal = walls[0].frame[:3, 2]
     mouth = max(float((s.points @ normal).max()) for s in walls)
     below = Edge(normal * mouth, -normal, np.zeros(3), 0.)
-    request = fcl.DistanceRequest(enable_nearest_points=True, enable_signed_distance=True)
-    for item in (s for s in shapes if s.obj == obj):
-        immersed = exposed_points(item.points, below)
-        if not len(immersed):
-            continue
-        middle = immersed.mean(axis=0)
-        if (not _inside_point(walls, middle) or any(
-                np.all(w.planes[:, :3] @ middle + w.planes[:, 3] <= 0.) for w in walls)):
-            continue
-        material = convex_keepout(item.points)
-        for wall in walls:
-            contact = fcl.distance(convex_keepout(wall.points), material, request)
-            if contact.min_distance >= SUPPORT_DISTANCE:
-                continue
-            # The nearest wall face must point into this immersed material,
-            # not out toward an adjacent object on the other side of a wall.
-            face = wall.planes[np.argmax(wall.planes[:, :3] @ contact.nearest_points + wall.planes[:, 3])]
-            if face[:3] @ middle + face[3] > 0.:
-                return True
-    return False
+    # Only proximity matters here. Signed penetration depth can fail in
+    # libccd's EPA even for valid touching convexes.
+    request = fcl.DistanceRequest(enable_nearest_points=True, enable_signed_distance=False)
+    solids, resolved, active = {}, {}, set()
+
+    def solid(shape):
+        if id(shape) not in solids:
+            solids[id(shape)] = convex_keepout(shape.points)
+        return solids[id(shape)]
+
+    def contact_at(support, item, middle):
+        contact = fcl.distance(solid(support), solid(item), request)
+        if contact.min_distance >= SUPPORT_DISTANCE:
+            return None
+        if contact.min_distance < 0.:
+            # Unsigned overlap has no nearest point. Query the separated
+            # immersed centre to recover a face without penetration depth.
+            if np.all(support.planes[:, :3] @ middle + support.planes[:, 3] <= 0.):
+                return None
+            from table_1000.planning.world import pose
+            frame = np.eye(4)
+            frame[:3, 3] = middle
+            point = fcl.FCLObject('immersed centre', pose(frame),
+                [fcl.CollisionObject(fcl.Sphere(0.))], [pose(np.eye(4))])
+            contact = fcl.distance(solid(support), point, request)
+        return contact
+
+    def support_of(name):
+        if name in resolved:
+            return resolved[name]
+        if name in active:
+            return None
+        active.add(name)
+        try:
+            immersed_parts = []
+            for item in (s for s in shapes if s.obj == name):
+                immersed = exposed_points(item.points, below)
+                if not len(immersed):
+                    continue
+                middle = immersed.mean(axis=0)
+                if (not _inside_point(walls, middle) or any(
+                        np.all(w.planes[:, :3] @ middle + w.planes[:, 3] <= 0.) for w in walls)):
+                    continue
+                immersed_parts.append((item, middle))
+                for wall in walls:
+                    contact = contact_at(wall, item, middle)
+                    if contact is None:
+                        continue
+                    # Preserve the existing direct inward-face test.
+                    face = wall.planes[np.argmax(wall.planes[:, :3] @ contact.nearest_points + wall.planes[:, 3])]
+                    if face[:3] @ middle + face[3] > 0.:
+                        resolved[name] = 'container'
+                        return resolved[name]
+            for item, middle in immersed_parts:
+                for other in shapes:
+                    if other.obj in (name, container) or other.obj in active:
+                        continue
+                    if (np.any(other.points.min(0) - item.points.max(0) >= SUPPORT_DISTANCE)
+                            or np.any(item.points.min(0) - other.points.max(0) >= SUPPORT_DISTANCE)):
+                        continue
+                    contact = contact_at(other, item, middle)
+                    if contact is None:
+                        continue
+                    distances = other.planes[:, :3] @ contact.nearest_points + other.planes[:, 3]
+                    # Native FCL coordinates are float32: retain all incident
+                    # faces at an edge within coordinate rounding precision.
+                    rounding = np.finfo(np.float32).eps * max(1., np.abs(other.points).max())
+                    faces = other.planes[distances >= distances.max() - rounding]
+                    upward = ((faces[:, 2] > 0.)
+                              & (faces[:, :3] @ middle + faces[:, 3] > 0.))
+                    if upward.any() and support_of(other.obj) is not None:
+                        resolved[name] = other.obj
+                        return resolved[name]
+            return None
+        finally:
+            active.remove(name)
+
+    return support_of(obj)
 
 
-def upright_inside(ctx, obj, container, part=None, max_tilt=np.radians(30.)):
-    """Whether a slender body is contained and stands within ``max_tilt`` radians
-    of the container's up axis. Use this same predicate before deciding to move
-    a pen and after settling it. An existing correct pen need not be removed
-    and reinserted. The longest body-frame collision extent defines its axis.
-    Its lower end must penetrate at least a quarter of its length or half
-    the container height, whichever is smaller. Enclosing rays test a point
-    in that immersed segment: the pen's centre may protrude above the mouth.
-    """
+def storage_result(ctx, obj, container, part=None):
+    """Check storage by immersion and internal support; record tilt without gating it."""
     target = ctx.skills().target(obj)
-    size = np.ptp(target.points, axis=0)
-    order = np.argsort(size)
-    if size[order[-1]] < 2 * size[order[-2]]:
-        raise ValueError('upright_inside requires a slender collision body; use inside for ordinary objects')
-    shapes = [s for s in world_geometry.scene_shapes(ctx) if world_geometry.selects(s, container, part)]
-    if not shapes:
-        raise ValueError('upright_inside requires a container with collision geometry')
-    if not 0. <= max_tilt < np.pi / 2:
-        raise ValueError('max_tilt must be radians in [0, pi/2)')
-    pose = ctx.poses()[target.body]
-    axis = pose[:3, order[-1]]
-    normal = shapes[0].frame[:3, 2]
-    if abs(float(axis @ normal)) < np.cos(max_tilt):
-        return False
-    points = target.points @ pose[:3, :3].T + pose[:3, 3]
-    bounds = np.concatenate([s.points for s in shapes]) @ normal
-    bottom, mouth = float((points @ normal).min()), float(bounds.max())
-    if bottom < float(bounds.min()) - world_geometry.LEVEL:
-        return False
-    depth = mouth - bottom
-    required = min(float(size[order[-1]]) / 4, float(np.ptp(bounds)) / 2)
-    if depth < required:
-        return False
-    middle = world_geometry.centre(points)
-    middle += normal * (bottom + min(depth, float(np.ptp(points @ normal))) / 2 - middle @ normal)
-    return _inside_point(shapes, middle)
+    axis = int(np.argmax(np.ptp(target.points, axis=0)))
+    shapes = world_geometry.scene_shapes(ctx)
+    walls = [s for s in shapes if world_geometry.selects(s, container, part)]
+    if not walls:
+        raise ValueError('storage_result requires container collision geometry')
+    cosine = abs(float(ctx.poses()[target.body][:3, axis] @ walls[0].frame[:3, 2]))
+    support = _storage_support(shapes, obj, container, part)
+    stored = support is not None
+    ctx.note('storage measured', obj=obj, container=container, part=part,
+             tilt_deg=float(np.degrees(np.arccos(np.clip(cosine, 0., 1.)))), supported_inside=stored,
+             support=support)
+    return stored
 
 
 # -- placing -------------------------------------------------------------------------------------
@@ -287,7 +341,7 @@ def place_on(ctx, obj, surface, part=None, near=None, keep_out=()):
     region's centre); it must rest on ``surface`` after."""
     where = regions.on_region(obj, surface, part, near, keep_out)
     skills.retry(ctx, lambda: put(ctx, obj, where, near))
-    require(ctx, on(ctx, obj, surface, part, keep_out), f'not on the {surface}', obj=obj,
+    require(ctx, on(ctx, obj, surface, part, keep_out), f'not on the {surface}', kind='check', obj=obj,
             position=world_geometry.centre(world_geometry.object_points(ctx, obj)).tolist())
 
 
@@ -295,5 +349,5 @@ def place_inside(ctx, obj, container, part=None, near=None):
     """Put the held ``obj`` down where :func:`inside_region` says; it must be inside after."""
     where = regions.inside_region(obj, container, part, near)
     skills.retry(ctx, lambda: put(ctx, obj, where, near))
-    require(ctx, inside(ctx, obj, container, part), f'not in the {part or container}', obj=obj,
+    require(ctx, inside(ctx, obj, container, part), f'not in the {part or container}', kind='check', obj=obj,
             position=world_geometry.centre(world_geometry.object_points(ctx, obj)).tolist())

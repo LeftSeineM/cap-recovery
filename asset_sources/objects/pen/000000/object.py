@@ -16,9 +16,10 @@ def build():
     root = asset("pen", "below barrel midpoint; barrel Z=0.006 m",
                  "+X length toward button; +Y width; +Z up", "ballpoint tip at -X")
     shell = body("Black pen shell", root)
-    tube("Black lacquer barrel", 0.0056, 0.0034, 0.113, (0, 0, 0.006), black, shell)
+    tube("Black lacquer barrel", 0.0056, 0.0034, 0.113, (0, 0, 0.006), black, shell,
+         solid_collision=True)
     tube("Hollow metal nose", 0.0011, 0.0008, 0.024, (-0.0685, 0, 0.006), metal, shell,
-         outer_end=0.0056, inner_end=0.0034)
+         outer_end=0.0056, inner_end=0.0034, solid_collision=True)
     for x in (-0.010, -0.005, 0, 0.005):
         tube("Silver grip band", 0.0058, 0.00555, 0.0017, (x, 0, 0.006), metal, shell,
              collision=False)
@@ -28,9 +29,12 @@ def build():
         bevel=0.0008)
     moving = body("Black pen button and refill", root)
     cylinder("Silver push button", 0.003, 0.012, (0.062, 0, 0.006), metal, moving)
-    cylinder("Refill shaft", 0.0009, 0.127, (-0.0075, 0, 0.006), ink, moving)
-    cylinder("Fine ballpoint", 0.00045, 0.010, (-0.0753, 0, 0.006), metal, moving)
-    joint("button_press", "SLIDER", shell, moving, (0.056, 0, 0.006), (-0.003, 0))
+    # Both are fully inside the shell's outer envelope; physics merges these bodies.
+    cylinder("Refill shaft", 0.0009, 0.127, (-0.0075, 0, 0.006), ink, moving, collision=False)
+    cylinder("Fine ballpoint", 0.00045, 0.010, (-0.0753, 0, 0.006), metal, moving, collision=False)
+    # Physics merges these bodies; the visual slider must not test their filled interiors.
+    slider = joint("button_press", "SLIDER", shell, moving, (0.056, 0, 0.006), (-0.003, 0))
+    slider.rigid_body_constraint.disable_collisions = True
 
     organize_parts()
 

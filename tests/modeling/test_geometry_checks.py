@@ -216,7 +216,7 @@ class AcceptanceTests(unittest.TestCase):
                 checks=GeometryChecks()
                 self.assertEqual(len(checks.bodies),2)
                 self.assertEqual(len(checks.report['joints']),1)
-                self.assertFalse(checks.ignored)
+                self.assertEqual(checks.ignored, {('pen.refill', 'pen.shell')})
                 c=bpy.data.objects['button_press'].rigid_body_constraint
                 self.assertEqual(c.type,'SLIDER')
                 self.assertAlmostEqual(c.object2.matrix_world.translation.x,values['button_press'],places=6)

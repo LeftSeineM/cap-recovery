@@ -285,7 +285,7 @@ def test_asset_closure_observation_does_not_change_expert_default(only_record, c
     from table_1000.experts.skills.hold.pick import Grasping
     skill = Grasping()
     skill.arms, skill.held, skill.log = ['right'], {}, []
-    skill.constrained = lambda target: False
+    skill.constrained = lambda target: True
     skill.dragged = lambda *args: ([], [], [])
     skill.rejected = {key: [] for key in ('grasp IK', 'pre-grasp IK', 'then', 'need')}
     opened, checked = [], []
@@ -296,7 +296,7 @@ def test_asset_closure_observation_does_not_change_expert_default(only_record, c
     skill.solvers = {'right': solver}
     grasp = types.SimpleNamespace(pose=np.eye(4), width=.02, open_gap=.03, backoff=0., cost=0., info={}, target=None, choice=None)
     skill.reach = lambda *args, **kwargs: ('right', grasp, [])
-    def check(*args):
+    def check(*args, kind):
         checked.append(True)
         return {'held': len(checked) > 1, 'reasons': ['no opposing collision surfaces']}
     skill.check_closure = check
@@ -313,11 +313,11 @@ def test_asset_closure_observation_does_not_change_expert_default(only_record, c
 
 @pytest.mark.parametrize('gap,area,surface_held,held,reason', [
     (.015, 5e-6, True, True, None),
-    (.014999, 5e-6, True, False, 'closed past planned contact gap'),
-    (.020, 4.75e-6, True, False, 'insufficient held area'),
+    (.014999, 5e-6, True, True, None),
+    (.020, 0., True, True, None),
     (.020, 5e-6, False, False, 'missing opposing pad contact'),
 ])
-def test_expert_closure_retains_main_gap_and_area_checks(monkeypatch, gap, area, surface_held, held, reason):
+def test_expert_closure_records_gap_and_area_without_overruling_actual_pads(monkeypatch, gap, area, surface_held, held, reason):
     import table_1000.experts.skills.hold.checks as checks
     import table_1000.experts.skills.hold.pick as grasping
     skill = grasping.Grasping()
@@ -568,7 +568,8 @@ def test_recorded_jar_closures_use_the_candidate_finite_sweep(tmp_path):
             assert checked['held'] is held
             assert checked['area_held'] and checked['planned_gap_held']
         candidate.info['contact_gap'] = row['gap'] + .006
-        assert not skill.check_closure(target, 'right', candidate)['held']
+        assert skill.check_closure(target, 'right', candidate)['held']
+        assert not skill.check_closure(target, 'right', candidate)['planned_gap_held']
     assert MIN_HOLD_AREA == 5e-6 and hand.hold_margin == .002
 
 

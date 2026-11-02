@@ -18,6 +18,8 @@ touched, the objects' final positions and joints, and timings.
 
 import json
 from pathlib import Path
+
+from table_1000.common.serialization import dumps
 import time
 import traceback
 
@@ -112,8 +114,8 @@ class Generator:
     DEVICES = {'isaac-cpu': 'cpu'}
 
     def __init__(self, scene_name, output, assets, root, physics='isaac-cpu', steps=None, source=None,
-                 problems='failed', skill_attempts=3, profile=False, robot=None, expert=None, layout=0,
-                 outside_scope=False, **env_kwargs):
+                 problems='none', skill_attempts=3, profile=False, robot=None, expert=None, layout=0,
+                 outside_scope=False, record_root=None, **env_kwargs):
         """``steps``: ``(first, last)`` of the expert's steps to run (all when None); ``source``: where
         the states come from (a checkpoint file), for the reports; ``problems`` saves numerical
         problems of failed/error runs, all runs, or none; ``env_kwargs`` (cameras, views) go to
@@ -125,7 +127,11 @@ class Generator:
         self.recording = recording
         started = time.perf_counter()
         self.name, self.output, self.assets = scene_name, Path(output), Path(assets)
-        self.steps, self.source, self.problems = steps, source, problems
+        from table_1000.scenes import batch_ref
+        self.steps, self.problems = steps, problems
+        self.source = batch_ref(source, record_root or output, root) if source else None
+        self.source_owner = Path(source).parent.parent if source else None
+        self.record_root, self.source_root = Path(record_root or output), root
         self.skill_attempts = skill_attempts
         self.profile_enabled = profile
         self.scene = load(scene_name, 'scene', root)
@@ -148,9 +154,6 @@ class Generator:
 
     def archive_retry(self, ctx, control, retry, failure, repeat):
         """Retain one failed branch as a complete batch before rolling back its state."""
-        from copy import deepcopy
-        import gzip
-        from table_1000.experts.retrying import copy_recorded
         trace = ctx.trace
         name = f'{trace.seed}-{repeat}' if repeat else str(trace.seed)
         branch = Path('attempts') / name / f'{len(ctx.retry_archives):04d}-{control}-{retry}'
@@ -159,32 +162,22 @@ class Generator:
         branch_trace = trace.failed_branch(failure, control)
         calls = f'calls/{trace.seed}.json.gz'
         (directory / 'calls').mkdir()
-        with gzip.open(directory / calls, 'wt') as file:
-            json.dump(branch_trace, file, separators=(',', ':'))
+        from table_1000.experts.audit.codec import save_document
+        save_document(directory / calls, branch_trace)
         report = dict(scene=self.name, **self.identity, seed=trace.seed, attempt=trace.attempt, repeat=repeat, status='failed',
                       steps_run=self.steps, from_retry=dict(control=control, retry=retry), step_names=ctx.step_names,
                       failure=dict(subtask=failure.subtask, reason=failure.reason,
                                    unreachable=isinstance(failure, Unreachable), details=failure.details),
                       steps=[{key: e[key] for key in ('step','name','at','wall_s','cpu_s')} for e in ctx.checkpoints],
                       call_trace=calls, failure_frame=branch_trace['failure_frame'], solve_trace=None,
-                      control_steps=ctx.steps, events=deepcopy(ctx.events))
+                      control_steps=ctx.steps, events=ctx.events, start={key: value.tolist() for key, value in ctx.start.items()})
         from threadpoolctl import threadpool_info
         report['native_math_threadpools'] = threadpool_info()
         if trace.problems:
             report['solve_trace'] = f'problems/{trace.seed}.json.gz'
             trace.problems.save(directory / report['solve_trace'])
-        episode = type(self.env.env.recorder_manager.get_episode(0))()
-        episode.data = copy_recorded(self.env.env.recorder_manager.get_episode(0).data)
-        episode.pre_export()
-        episode.success = False
-        episode.attrs = dict(scene=self.name, seed=trace.seed, status='failed', failure=report['failure'])
-        handler = self.recording.TrajectoryFile()
-        handler.create(str(directory / 'trajectories_failed'))
-        try:
-            handler.add_env_args(self.env_args)
-            handler.write_episode(episode, trace.seed)
-        finally:
-            handler.close()
+        self.export_recording(ctx, directory / 'trajectories_failed', trace.seed,
+                              dict(scene=self.name, seed=trace.seed, status='failed', failure=report['failure']))
         first = (self.steps or (1,))[0]
         checkpoints = [dict(step=first-1, name=INITIAL_STATE if first == 1 else self.expert.STEPS[first - 2].name, at=0, state=ctx.initial_state), *ctx.checkpoints]
         checkpoint = directory / 'checkpoints' / f'{trace.seed}.hdf5'
@@ -194,13 +187,31 @@ class Generator:
                                                        physics=self.env_args['physics']))
         checkpoint.unlink()
         (directory / 'episodes').mkdir()
-        (directory / 'episodes' / f'{trace.seed}.json').write_text(json.dumps(report, indent=1, default=float)+'\n')
+        (directory / 'episodes' / f'{trace.seed}.json').write_text(dumps(report, indent=1)+'\n')
         summary = dict(scene=self.name, **self.identity, physics=self.env_args['physics'],
                        steps_run=self.steps, retry_parent='../../..', **{'from':None}, seeds=[trace.seed], succeeded=0, success_rate=0.)
-        (directory / 'summary.json').write_text(json.dumps(summary, indent=1)+'\n')
+        (directory / 'summary.json').write_text(dumps(summary, indent=1)+'\n')
         archived = dict(batch=str(branch), control=control, retry=retry, frame=branch_trace['failure_frame'], reason=failure.reason)
         ctx.retry_archives.append(archived)
         return archived
+
+    def export_recording(self, ctx, path, seed, attrs):
+        """Copy a discarded/repeated trajectory without redirecting the main recorder's files."""
+        from table_1000.experts.retrying import copy_recorded
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        episode = type(self.env.env.recorder_manager.get_episode(0))()
+        episode.data = copy_recorded(self.env.env.recorder_manager.get_episode(0).data)
+        episode.pre_export()
+        episode.success = attrs['status'] == 'success'
+        episode.attrs = attrs
+        handler = self.recording.TrajectoryFile()
+        handler.create(str(path))
+        try:
+            handler.add_env_args(self.env_args)
+            handler.write_episode(episode, seed)
+        finally:
+            handler.close()
 
     @single_threaded_blas()
     def run(self, seed, attempt, state, start=None, repeat=0):
@@ -209,7 +220,7 @@ class Generator:
         machine's load meanwhile (``load``, see :class:`~table_1000.common.batch.Load`) and the CPU
         seconds the process used (``cpu_s``). ``repeat`` r > 0 runs it again from the same state
         with other random streams, for how its outcome varies: report ``episodes/<seed>-<r>.json``,
-        no trajectory and no checkpoints."""
+        no checkpoints; recovery trajectories are retained for a2/a3 clips."""
         from table_1000.common.batch import Load
         from threadpoolctl import threadpool_info
         with Load() as load:
@@ -238,6 +249,7 @@ class Generator:
                       only=self.steps)
         from table_1000.experts.audit.trace import CallTrace, replay, restore, encode
         ctx.trace = CallTrace(ctx, seed, attempt, repeat)
+        ctx.trace.search.install()
         ctx.initial_state = state
         ctx.skill_attempts = self.skill_attempts
         ctx.archive_retry = lambda control, retry, failure: self.archive_retry(ctx, control, retry, failure, repeat)
@@ -261,7 +273,7 @@ class Generator:
                     self.expert.solve(ctx)
             report['status'] = 'success'
         except ExpertFailed as error:
-            report.update(status='failed', failure={'subtask': error.subtask, 'reason': error.reason,
+            report.update(status='failed', failure_id=getattr(error, 'search_failure_id', None), failure={'subtask': error.subtask, 'reason': error.reason,
                                                     'unreachable': isinstance(error, Unreachable),
                                                     'details': error.details})
         except Exception:   # an error in the expert's code is reported with the episode
@@ -270,6 +282,8 @@ class Generator:
         finally:
             if ctx.trace.problems:
                 ctx.trace.problems.close()
+            ctx.trace.search.close()
+            ctx.trace.search.terminal(report)
             for solver in ctx.solvers.values():
                 solver.world.clear()
         name = f'{seed}-{repeat}' if repeat else str(seed)
@@ -282,16 +296,26 @@ class Generator:
             report['solve_trace'] = f'problems/{name}.json.gz'
             ctx.trace.problems.save(self.output / report['solve_trace'])
         if snapshot:
+            from table_1000.scenes import rebase_batch_refs
             failed = ctx.trace.frames[ctx.trace.failure_frame] if ctx.trace.failure_frame is not None else None
             original = snapshot['failure']
-            report['replay'] = {'source_batch': snapshot.get('batch'), 'source_frame': snapshot['frame']['id'],
+            source_batch = rebase_batch_refs({'batch': snapshot.get('batch')}, self.source_owner,
+                                             self.record_root, self.source_root)['batch']
+            report['replay'] = {'source_batch': source_batch, 'source_frame': snapshot['frame']['id'],
                                 'source_enter': snapshot['frame']['enter'], 'name': snapshot['frame']['name'],
                                 'check': snapshot['check'], 'original_failure': original,
                                 'same_frame': bool(failed and (failed.get('source_id') == snapshot['failed_frame_id'])),
                                 'same_reason': report.get('failure', {}).get('reason') == original.get('reason')}
             if snapshot['check'] and failed and failed.get('phase') == 'check':
                 report['replay']['same_frame'] = True
+            if 'operation' in snapshot:
+                report['replay'].pop('same_frame')
+                report['replay'].pop('same_reason')
+                report['replay'].update(kind='solve', same_status=report.get('result', {}).get('same_status', False))
+            else:
+                report['replay']['kind'] = 'skill'
         report.update(
+            start={key: value.tolist() for key, value in ctx.start.items()},
             step_names=ctx.step_names, steps=[{key: entry[key] for key in ('step', 'name', 'at', 'wall_s', 'cpu_s')}
                                               for entry in ctx.checkpoints],
             control_steps=ctx.steps, duration_s=ctx.steps / CONTROL_HZ, subtasks=ctx.subtasks, events=ctx.events,
@@ -312,6 +336,13 @@ class Generator:
             for entry, checkpoint in zip(report['steps'], ctx.checkpoints):
                 entry['wall_profile'] = checkpoint['wall_profile']
         if repeat:
+            from table_1000.experts.audit.records import classify
+            if ctx.steps and any(f['category'] in ('a2', 'a3', 'pending') or f['components']
+                                 for f in classify(ctx.trace.document())):
+                report['trajectory'] = f'repeat-trajectories/{name}.hdf5'
+                self.export_recording(ctx, self.output / report['trajectory'].removesuffix('.hdf5'), seed,
+                                      dict(scene=self.name, seed=seed, status=report['status'],
+                                           failure=report.get('failure'), repeat=repeat))
             return report, started
         checkpoints = ctx.checkpoints
         if first == 1 and start is None and hasattr(self.expert, 'STEPS'):
@@ -331,7 +362,7 @@ class Generator:
     def save(self, report, started):
         report['wall_s'] = time.perf_counter() - started
         name = f'{report["seed"]}-{report["repeat"]}' if report['repeat'] else str(report['seed'])
-        (self.output / 'episodes' / f'{name}.json').write_text(json.dumps(report, indent=1, default=float))
+        (self.output / 'episodes' / f'{name}.json').write_text(dumps(report, indent=1))
         return report
 
     def close(self):

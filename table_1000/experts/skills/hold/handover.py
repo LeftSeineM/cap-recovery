@@ -202,13 +202,13 @@ class Handing:
                 if planned >= MAX_HANDOVER_PLANS:
                     break
         if not done:
-            ctx.fail('no handover', Unmet, giver=giver, arm=to, planned=planned, rejected=self.rejected)
+            ctx.fail('no handover', Unmet, kind='planning', giver=giver, arm=to, planned=planned, rejected=self.rejected)
         receiving.close_gripper()
         gap = receiving.finger_gap()
         checked = self.check_closure(target, to, grasp)
         ctx.note('closure checked', arm=to, **checked)
         if not checked['held']:
-            ctx.fail('object not handed over', finger_gap=gap, width=grasp.width)
+            ctx.fail('object not handed over', kind='check', finger_gap=gap, width=grasp.width)
         poses = ctx.poses()
         previous_permissions = set(receiving.world.permissions)
         for name in target.names:

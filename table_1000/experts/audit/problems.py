@@ -17,13 +17,15 @@ executed motion also its tracking error. IK failures are counted per decision an
 first five also get a collision-free CLIK check and a colliding-pair probe, for diagnosis only.
 """
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, ExitStack
 from functools import wraps
 import gzip
 import hashlib
 import inspect
 import json
 from pathlib import Path
+
+from table_1000.common.serialization import dump, dumps
 import time
 from types import SimpleNamespace
 
@@ -75,7 +77,7 @@ class Problems:
             setattr(self.ctx.model, name, function)
 
     def intern(self, table, value):
-        key = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:20]
+        key = hashlib.sha256(dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:20]
         table.setdefault(key, value)
         return key
 
@@ -130,7 +132,14 @@ class Problems:
                 result = function(*args, **kwargs)
                 entry['result'] = summary(result)
                 if name == 'ik' and result[0] != 'Success' and arguments['check_collision']:
-                    self.diagnose(entry, function, arguments)
+                    search = getattr(self.ctx.trace, 'search', None)
+                    if search:
+                        search.suspended = True
+                    try:
+                        self.diagnose(entry, function, arguments)
+                    finally:
+                        if search:
+                            search.suspended = False
                 return result
         return call
 
@@ -205,21 +214,25 @@ class Problems:
         self.document['ik_diagnostics'] = [dict(decision=owner, stage=stage, failed=count, examples=min(5, count))
                                             for (owner, stage), count in self._diagnostics.items()]
         with gzip.open(path, 'wt', compresslevel=6) as file:
-            json.dump(self.document, file, separators=(',', ':'))
+            dump(self.document, file, separators=(',', ':'))
 
 
 def recorder(skill):
     return getattr(getattr(skill.ctx, 'trace', None), 'problems', None)
 
 
+def observers(skill):
+    trace = getattr(skill.ctx, 'trace', None)
+    return [record for record in (getattr(trace, 'search', None), getattr(trace, 'problems', None)) if record]
+
+
 def mark(skill, stage, candidate=None, outcome=None, **values):
-    record = recorder(skill)
-    if record:
+    for record in observers(skill):
         record.mark(stage, candidate, outcome, **values)
 
 
 def decision(function):
-    """Observe a decision and check an optional wall deadline between candidates."""
+    """Observe existing decisions; lazy candidates keep their original evaluation order."""
     signature = inspect.signature(function)
     def arguments(args, kwargs):
         bound = signature.bind(*args, **kwargs)
@@ -230,36 +243,45 @@ def decision(function):
     if inspect.isgeneratorfunction(function):
         @wraps(function)
         def iterate(self, *args, **kwargs):
-            record = recorder(self)
-            scope = (record.decision(function.__qualname__, arguments((self, *args), kwargs))
-                     if record else nullcontext(None))
-            with scope as entry:
+            records = observers(self)
+            with ExitStack() as scopes:
+                entries = [scopes.enter_context(record.decision(function.__qualname__, arguments((self, *args), kwargs)))
+                           for record in records]
                 generator = function(self, *args, **kwargs)
+            yielded, exhausted = 0, False
             try:
                 while True:
                     remaining_wall(self.ctx)
-                    with record.active(entry) if record else nullcontext():
+                    with ExitStack() as active:
+                        for record, entry in zip(records, entries):
+                            active.enter_context(record.active(entry))
                         try:
                             value = next(generator)
                         except StopIteration:
+                            exhausted = True
                             return
                     remaining_wall(self.ctx)
+                    yielded += 1
                     yield value
             finally:
                 generator.close()
+                for record, entry in zip(records, entries):
+                    if record is getattr(getattr(self.ctx, 'trace', None), 'search', None):
+                        record.finish_generator(entry, yielded, exhausted, self)
         return iterate
     @wraps(function)
     def call(self, *args, **kwargs):
         remaining_wall(self.ctx)
-        record = recorder(self)
-        if not record:
+        with ExitStack() as scopes:
+            entries = [scopes.enter_context(record.decision(function.__qualname__, arguments((self, *args), kwargs)))
+                       for record in observers(self)]
             result = function(self, *args, **kwargs)
             remaining_wall(self.ctx)
-            return result
-        with record.decision(function.__qualname__, arguments((self, *args), kwargs)) as entry:
-            result = function(self, *args, **kwargs)
-            remaining_wall(self.ctx)
-            entry['result'] = packed(result)
+            for record, entry in zip(observers(self), entries):
+                if record is getattr(getattr(self.ctx, 'trace', None), 'search', None):
+                    record.finish(entry, result, self)
+                else:
+                    entry['result'] = packed(result)
             return result
     return call
 

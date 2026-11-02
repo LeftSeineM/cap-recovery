@@ -333,7 +333,7 @@ class Base:
         free arms in where they would sweep something on the way, turned in place, straight on,
         turned in place."""
         if self.braced:
-            self.ctx.fail('cannot move the base while bracing; release the brace and reposition first')
+            self.ctx.fail('cannot move the base while bracing; release the brace and reposition first', kind='planning')
         if not self.ctx.spec.base:
             return
         chosen = self.base_for(poses, arms, need, path, touch, relocate=relocate,
@@ -350,7 +350,7 @@ class Base:
             self.ready()    # the free arms in, so that they sweep nothing as the base turns
             route = self.base_route(before, chosen)
         if route is None:
-            self.ctx.fail('no clear base route', start=before.tolist(), goal=np.asarray(chosen).tolist())
+            self.ctx.fail('no clear base route', kind='planning', start=before.tolist(), goal=np.asarray(chosen).tolist())
         self.ctx.note('base route', waypoints=[pose.tolist() for pose in route])
         for goal in route:
             first, distance, last = drive(self.base_pose(), goal)

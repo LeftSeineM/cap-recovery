@@ -10,7 +10,7 @@ from table_1000.experts.skills.hold.pick import Grasping, MAX_REGRASPS
 
 def grasping():
     skill = Grasping()
-    skill.constrained = lambda target: False
+    skill.constrained = lambda target: True
     skill.dragged = lambda *args: ([], [], [])
     events, closed, attached, retracted = [], [], [], []
     poses = {'obj:body': np.eye(4)}
@@ -42,7 +42,7 @@ def grasping():
 def test_closed_object_displacement_rejects_an_otherwise_accepted_gap():
     skill, target, events, closed, attached, retracted, calls = grasping()
     measured = []
-    def check(*args):
+    def check(*args, kind):
         measured.append(skill.ctx.poses()['obj:body'][0, 3])
         return {'held': len(measured) == 2}
     with patch.object(skill, 'check_closure', side_effect=check):
@@ -73,7 +73,9 @@ def test_pick_plans_with_the_measured_post_lift_hold_and_payload():
     solver.attach = lambda name, pose: solver.attachments.__setitem__(name, pose.copy())
     skill.thin_geometry = lambda target: None
     skill.grasp = lambda *args, **kwargs: {'arm': 'left'}
-    skill.held['left'] = {'target': target}
+    skill.held['left'] = {'target': target, 'grasp': {}, 'supports': [], 'carried': []}
+    skill.check_hold = lambda *a: {'held': True}
+    solver.allow = lambda *a: None
     skill.ctx.hold = lambda seconds: None
     def lift(arm, displacement):
         measured = np.eye(4)
@@ -92,6 +94,7 @@ def test_pick_plans_with_the_measured_post_lift_hold_and_payload():
 @pytest.mark.parametrize('selection', ['rim', 'container part'])
 def test_free_body_carries_adjacent_parts_without_revoking_their_finger_contact(selection):
     skill, target, events, closed, attached, retracted, calls = grasping()
+    skill.constrained = lambda target: False
     target.rim = selection == 'rim'
     target.container = selection == 'container part'
     skill.ctx.geometry = {'obj': object()}
@@ -108,7 +111,7 @@ def test_free_body_carries_adjacent_parts_without_revoking_their_finger_contact(
     solver.world.allow = lambda names, contacts: permissions.append((names, contacts))
     with patch.object(skill, 'check_closure', return_value={'held': True}), \
             patch('table_1000.experts.skills.semantic.supported_inside', return_value=True):
-        result = skill.grasp(target)
+        result = skill.grasp(target, closure_only_record=True)
     assert result['supports'] == ['table']
     assert skill.held['left']['supports'] == ['table']
     assert [names for names, _ in carried] == [['obj:cap'], ['rider:body']]

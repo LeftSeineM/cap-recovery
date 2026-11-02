@@ -55,11 +55,12 @@ follows, if given), straight all along; a ``then`` other than a lift up also nee
 leave straight back ``APPROACH`` from its end, where it lets go (a drawer pulled up to the body
 leaves the arm no room to). The hand plans (RRTConnect) to the
 pre-grasp with the fingers open to the object's width plus a margin, moves straight
-in (the only move in which the fingers may touch the object), and closes; the finger
-opposing pads must contact the held body and the gap must agree with its actual
-contact surfaces within the geometry error budget, else it backs out, re-observes the
-object and chooses again (at most ``MAX_REGRASPS`` times). The grasped part then
-moves with the hand in the planning world until :func:`release`.
+in (the only move in which the fingers may touch the object), and closes. For a free
+body, a controlled lift proves actual opposing pad contact, departure from support
+and following at the grip; projected held area and the planned gap are diagnostic.
+Joint-constrained handles retain their actual-contact closure check, backing out
+and choosing again at most ``MAX_REGRASPS`` times. The grasped part moves with the
+hand in the planning world until :func:`release`.
 
 **pick** -- grasp and lift, checking the body's actual rise. Thin free rigid
 bodies are recognized from collision geometry and the hand's contact patch:
@@ -428,5 +429,5 @@ from table_1000.experts.audit.trace import traced
 for _name in ('grasp', 'pick', 'place', 'push', 'move_by_displacement', 'release', 'handover',
               'braced_drawer', 'make_room', 'ready', 'open_gripper', 'close_gripper'):
     globals()[_name] = traced()(globals()[_name])
-retry = traced(concrete=False)(retry)
+retry = traced(concrete=False, control=True)(retry)
 chain = traced(concrete=False)(chain)

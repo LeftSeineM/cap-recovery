@@ -1,6 +1,6 @@
 """Teleoperating one step of an expert from a case: a seed's state before a step its expert failed.
 
-A **case** is ``(batch, step, seed)`` of a development batch (``runs/expert/<scene>/<run>/``):
+A **case** is ``(batch, step, seed)`` of a development batch (``runs/expert/<scene>/<robot>/<expert>/<run>/``):
 the step the seed's episode failed in (:func:`cases`). It starts from the checkpoint of the step
 before, or, where the failed run was recorded, from the state at the moment it failed (the last of
 its trajectory's states) or any moment of the failed step before that (:func:`trajectory_state`). Batches run with ``--repeats K`` give each seed's success rate over its K
@@ -71,7 +71,8 @@ def start_checkpoint(batch, summary, step):
     own = Path(batch) / 'checkpoints' / f'step{step - 1}.hdf5'
     first = (summary.get('steps_run') or [1])[0]
     if step == first and summary.get('from'):
-        return Path(summary['from']) / 'checkpoints' / f'step{step - 1}.hdf5'
+        from table_1000.scenes import resolve_batch_ref
+        return resolve_batch_ref(summary['from'], batch) / 'checkpoints' / f'step{step - 1}.hdf5'
     return own
 
 
@@ -150,8 +151,9 @@ def cases(runs, scene=None, batches=()):
     """The cases of every batch under ``runs`` (``runs/expert``), of ``scene`` only when given, and of
     ``batches``: lowest success rate first, cases without a rate last."""
     found = []
-    for summary in sorted(Path(runs).glob(f'{scene or "*"}/*/summary.json')):
-        found += batch_cases(summary.parent)
+    from table_1000.scenes import dev_batches
+    for batch in dev_batches(runs, scene):
+        found += batch_cases(batch)
     for batch in batches:
         found += batch_cases(batch)
     return sorted(found, key=lambda case: (case['rate'] is None, case['rate'] or 0., case['run'], case['seed']))
@@ -292,11 +294,11 @@ def operate(ctx, step, operator, show, cameras, log):
                     log['verdict'] = command['command']
                     log['final_check'] = {**check(ctx, step), 'at': ctx.steps}
                     if command['command'] == 'not done':
-                        ctx.fail('the operator ended the step as not done')
+                        ctx.fail('the operator ended the step as not done', kind='check')
                     return
                 else:       # another case: this one ends as not done, the command waits in the log
                     log.update(verdict='left', final_check={**check(ctx, step), 'at': ctx.steps}, next=command)
-                    ctx.fail('the operator left the step')
+                    ctx.fail('the operator left the step', kind='check')
             for key in keys.presses():
                 if key == 'Tab':
                     arm = arms[(arms.index(arm) + 1) % len(arms)]

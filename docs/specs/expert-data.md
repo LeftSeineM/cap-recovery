@@ -7,10 +7,12 @@
 一次 `run_expert.py` 运行产生一个批次，目录格式相同：
 
 - **场景的数据** `data/scenes/<场景>/<机器人>/<专家编号>/<后端>/`：专家范围内所有 seed 从初态跑完所有步骤（或由各步拼接而成），每次生成整体替换。layout 0 在该目录下，其他 layout n 在其 `layouts/<n>/`。
-- **开发运行** `runs/expert/<场景>/<运行>/`（`--dev`）：`<运行>` 为 `<日期>-<时间>-<提交>-<机器人>-<专家编号>[-<标签>]`，多个 layout 各一个运行；以后的运行不会替换它。只跑部分步骤或 seed 的运行都是开发运行。
-- **长期用例** `data/cases/<场景>/<机器人>/<专家编号>/<用例名>/`：人工挑选、需要长期留存的卡点，格式是只含一个检查点的最小批次，可直接作为 `--from`；`failure_snapshots.py --case <用例名>` 写到这里，不加 `--case` 时快照仍写开发运行目录。
+- **开发运行** `runs/expert/<场景>/<机器人>/<专家编号>/<运行>/`（`--dev`）：`<运行>` 为 `<日期>-<时间>-<提交>-<机器人>-<专家编号>-layout<n>[-<标签>]`，多个 layout 各一个运行；以后的运行不会替换它。只跑部分步骤或 seed 的运行都是开发运行。同一机器人、同一专家编号下的开发运行是一条**开发线**，与专家脚本的位置同构；重写专家开始新一轮之前，把上一轮的目录改名为 `<专家编号>-legacy-<MMDD>/`（MMDD 为改名的日期），其中的批次照常可读、可作来源。
+- **长期用例** `data/cases/<场景>/<机器人>/<专家编号>/<用例名>/`：人工挑选、需要长期留存的卡点，格式是只含一个检查点的最小批次，可直接作为 `--from`。`summary.json` 的 `case` 是唯一权威描述：根检查点（失败 step 的入口）、根调用树与帧、来源批次与提交，以及该 step 的全部尝试；以规划失败为根的用例（`case.kind` 为 `planning`，否则为 `step`）另带内联求解状态，`case.category` 是它实际的统计类别，技能内部消化或随 step 放弃的规划失败为 null。由 `search_records.py case` 或 `failure_snapshots.py --case <用例名>` 写入，不加 `--case` 时快照仍写开发运行目录。
 
 `summary.json` 与每个 episode 报告记录 `robot`、`expert`，summary 另记 `scope`、`layout`、`outside_scope`。
+
+批次之间的引用（`from`、拼接与快照的来源等）只存相对路径：同一开发线内为 `../<运行>`，其他仓库内的批次为相对仓库根的路径（`runs/…`、`data/…`），读取时遇到绝对路径报错（[`scenes/__init__.py`](../../table_1000/scenes/__init__.py) 的 `batch_ref`、`resolve_batch_ref`）。所以整条开发线可以改名或移动；元数据复制到另一个批次时按新位置改写（`rebase_batch_refs`）。
 
 后端命名与物理测试一致（`isaac-cpu`；场景生成尚未在 GPU 上验证）。`summary.json` 的 `commit` 是工作进程实际运行的提交，有未提交的改动时带 `+dirty`，这时 `dirty_patch` 为批次目录中保存这些改动的文件名，在该提交上应用即可还原代码；源码根目录不是一个检出时 `commit` 为 `null`（见[批量运行](../tutorials/README.md#批量运行的通用参数)）。
 
@@ -32,7 +34,7 @@
 
 ## 报告
 
-每次运行一份 `episodes/<seed>.json`；同一起点的第 r 次重复（r = 1 … K − 1）为 `episodes/<seed>-<r>.json`，不录轨迹、不写检查点。报告包括：
+每次运行一份 `episodes/<seed>.json`；同一起点的第 r 次重复（r = 1 … K − 1）为 `episodes/<seed>-<r>.json`，不写检查点；只有出现 a2、a3 等失败的重复另存自己的轨迹（报告的 `trajectory`，在 `repeat-trajectories/` 下）。报告包括：
 
 - 子任务起止、每次规划、手指碰过的部件、换用的候选（`ctx.note`）、失败原因（附调用栈）、物体终态；
 - 放置放宽事件：`placement relaxation attempted`（`strict_failure` 严格放置失败原因、`candidates` 候选数、`max_drop_m`）与 `placement relaxation used`（`drop_m` 松手时物体最低点到实测底面的法向距离、`max_drop_m`、`release_pose`），`level` 为放宽级别；
@@ -101,25 +103,61 @@ T 步的轨迹录像为 T 帧（25 fps，1 倍速），第 t 帧是第 t 步动�
 - 每段在下一批开始用的检查点处截断，接上下一批同一 seed 的轨迹；`subtasks` 和 `steps` 平移到接好后的位置，`parts` 记录每段的批次、提交、步骤、起点和长度。
 - 每个 seed 的报告取最后一段的报告并平移；`summary.json` 按同样的方式统计。
 - 只有所有 seed 跑完所有步骤的拼接才默认写成场景的数据。
-- 报告保留最后一段的 `call_trace`、`solve_trace`，对应文件复制到新批次；帧号和数值记录不改写，`call_trace_offset` 是原记录控制步到拼接轨迹的偏移。原帧 `enter = 0` 的入口状态另存为 `calls/<seed>-initial.hdf5`（`call_trace_initial_state`），恢复时取该段自己的初态。再次拼接会累加偏移并携带入口状态。
-- 拼接不合并更早各段的调用帧、求解记录或 repeats；需要时读来源批次。
+- 各段的 events 都合并并平移到拼接轨迹。每段完整的调用帧、求解记录、`attempts/` 与 repeat 轨迹按段命名空间保留在新批次（`trace-parts`），包括被截掉的失败后缀；帧号和数值记录不改写，索引给出每段的控制步偏移和长度，移走来源批次后仍可统计和导出片段。
 
 ## 调用帧
 
-每次运行（包括 repeats）保存 `calls/<seed>[-<r>].json.gz`，解压后是 JSON：`version`、`frames`、`failure_frame`（失败路径最内层帧）。帧有步骤、子任务、技能三种，帧序号在每次运行内从 0 开始，`id`、`parent` 表示层次。每帧记录：
+每次运行（包括 repeats）保存 `calls/<seed>[-<r>].json.gz`，解压后是 JSON（`version` 2）：`frames`、`decisions`、`failures`、`checks`、`failure_frame`（失败路径最内层帧）；重复的数值放在文件内共享值表 `values`，以 `$ref` 引用。帧有步骤、子任务、技能三种，帧序号在每次运行内从 0 开始，`id`、`parent` 表示层次。每帧记录：
 
 - 名字、已求值的实际参数、进入和退出的控制步（`enter`、`exit`）；
 - 入口子任务、`ctx.rng.bit_generator.state` 与派生的 MPlib 种子；
 - 完整持物（手臂、Target 的构造数据、supports、grasp）、规划器挂载物体的相对位姿及允许接触，以及入口时规划世界的障碍物位姿和机器人配置；
-- 结果或异常（原因、details、是否 `Unreachable`）。
+- 结果或异常（原因、details、是否 `Unreachable`），以及 `outcome`、所在分支、含与不含子帧的 CPU 和原始 wall。
+
+`decisions` 记录技能实际求值的候选与逐级拒绝计数（几何、接触、角度、碰撞/通道、IK、预抓 IK、需求、路径、物理后验），候选为 0 与拒绝为 0 分开。`checks` 记录已有判据算出的结果与测量值，不为记录额外求值。
 
 retry、chain 和 Pick / Place / Handover action 也记录为控制帧；动作链传下的需求（`InHand`）以可重建的形式保存。场景状态共用录制的轨迹：入口 `enter = n` 的状态，n 为 0 时取 `initial_state`，否则取 `states[n-1]`，控制指令取帧的 `targets`。
 
 `failure_snapshots.py` 从帧生成快照批次，快照写为新批次的 `checkpoints/step<k-1>.hdf5`，从它运行时直接调用该技能（恢复语义见[失败恢复](experts.md#失败恢复)）。报告的 `replay` 给出来源帧、原失败原因，以及失败帧和原因是否相同（`same_frame`、`same_reason`）。
 
+## step 内失败
+
+完成一个 step 是一次搜索：换候选、执行、原地恢复、回滚重来。记录只存事实：`failures`（规划失败与检查失败的事件）、`checks`（判据的结果与测量值）、`outcomes`（回滚、step 通过、step 放弃）以及求解与决策的汇总。类别在读记录时由 [`audit/records.py`](../../table_1000/experts/audit/records.py) 的 `classify` 推出，它是纯函数，不读仿真状态、不改记录，所以改定义不用重跑；`failures` 汇总一组批次的分类结果，成功的 step 里的失败也算：
+
+| 类别 | 含义 |
+|---|---|
+| a1 | 一个技能整体报告规划失败（无可行解、无法执行），被专家代码捕获并改用别的方案 |
+| a2 | 执行后检查失败，之后原地恢复，该 step 最终通过 |
+| a3 | 执行后检查失败，失败分支被 `RetryState` 回滚；一次回滚算一条，以触发回滚的检查为准，同时丢弃的其他检查作为它的组成部分 |
+| b | step 放弃 |
+| pending | 只出现在中途中断的运行：检查失败后还没有恢复、回滚或结束 |
+
+没有专家介入的规划失败不算 a1：技能内部消化的规划失败（候选被淘汰、选项耗尽、换站位或换手）是搜索成本，由 `search_costs` 按物理状态节点统计；规划失败触发的回滚也不算 a3。
+
+每条失败有唯一 id、所属帧与分支、判据标识、原因、CPU 与原始 wall、恢复方式和片段范围；规划失败事件内联完整求解状态（刚体与关节位姿速度、机器人配置、允许接触、附着、padding、NumPy 随机状态与 MPlib 种子），可脱离轨迹单独重解。统计按实际时间区间取并集，各类耗时互不重复。MPlib 不提供内部随机流状态，重解恢复原种子与输入，不保证逐比特复现已推进的随机流。
+
+`scripts/experts/search_records.py` 读取这些记录：`stats` 统计一组批次的次数与耗时占比，`segments` 导出 a2/a3 片段（`render.py` 可渲染），`view` 生成单个批次的离线搜索树页面，`case` 打包用例，`replay` 单独重解一个规划失败。`--failure` 是原始规划事件的 ID：能否重解只看事件本身是否带可重放的状态与输入，与它是否计为 a1 无关。
+
+## 开发线浏览
+
+```bash
+python -m table_1000.experts.audit.site --runs runs/expert --port <端口>
+```
+
+站点按开发线浏览专家的迭代过程（[`audit/site.py`](../../table_1000/experts/audit/site.py)、[`audit/iteration.py`](../../table_1000/experts/audit/iteration.py)）：
+
+- 开发线从下拉框选，默认最新批次所在的一条；最新批次的调用帧不是当前格式的开发线置灰不可选。
+- step 按名字识别，跨专家版本对齐；最终脚本里已没有的 step 在原位置灰显为“已废弃”。
+- 每个 step 一片森林，每个批次的每次运行（含 repeat）一棵树，按时间排列、默认收起。节点是物理状态，边是执行的技能；回滚在祖先节点分叉，没有回指的边；只有同一帧的重试合并成一个节点。选中的树和最终链高亮。没有自己轨迹的重复照常显示树和数值，媒体标为“未录制轨迹”，不借用第一次运行的轨迹。
+- 失败按 `records.failures` 逐条计数，与统计脚本一致。
+- 树头列出这次运行的调用记录：step 调用了哪些技能、带什么参数（回调参数显示回调名和它求出的值），以及运行命令和提交。
+- 录像只在点击时按记录的状态渲染（经 gq），默认不自动渲染。
+
+分类、统计和搜索成本都来自 `records`，站点自己不分类、不运行仿真。派生文件（索引、按批次的缓存、录像）在开发线的 `.iteration/` 下，批次变化时重建，删掉也会重建。
+
 ## 求解记录
 
-`run_expert.py --problems {failed,all,none}` 控制保存范围，默认 `failed`：运行中照常记录，结束为失败或程序错误时保存 `problems/<seed>[-<r>].json.gz`，报告的 `solve_trace` 指向它；成功时不写文件，`solve_trace` 为 null。`all` 保存所有运行；`none` 关闭记录及额外 IK 诊断。repeats 和帧重跑按每次运行自己的结果判断；`calls/` 在三种模式下都保存。人工遥操不记录求解问题，`solve_trace` 始终为 null。
+`run_expert.py --problems {failed,all,none}` 控制完整求解问题的保存，默认 `none`：不记录求解问题，也不做额外 IK 诊断，step 内失败仍由 `calls/` 记录。`failed` 在运行结束为失败或程序错误时保存 `problems/<seed>[-<r>].json.gz`，报告的 `solve_trace` 指向它，成功时不写文件、`solve_trace` 为 null；`all` 保存所有运行。完整求解问题含规划世界，体积大，留给成功率已高、剩余失败难复现时显式开启。repeats 和帧重跑按每次运行自己的结果判断；`calls/` 在三种模式下都保存。人工遥操不记录求解问题，`solve_trace` 始终为 null。
 
 记录包含技能帧内的决策树、候选和它们被淘汰的关卡（`stage`），以及每次 IK、直线规划、RRTConnect 的完整输入（机器人配置、目标、预算、当时的规划世界）与结果。以 `frame` 关联调用帧；结构见 [`audit/problems.py`](../../table_1000/experts/audit/problems.py) 的说明。
 

@@ -16,6 +16,8 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from table_1000.common.serialization import dump, dumps
+
 
 def selection(document, frame=None, plan=None, decision=None):
     operations = [op for op in document['operations'] if op['parent'] is None]
@@ -153,7 +155,7 @@ def main(argv=None):
                     detail = outcome.pop('problems')
                     outcome['candidates'] = compare_decisions(document, number, detail)
                     with gzip.open(args.output / f'{name}-decision-{number}-{index}.json.gz', 'wt') as file:
-                        json.dump(detail, file, separators=(',', ':'))
+                        dump(detail, file, separators=(',', ':'))
                     decisions.append(outcome)
                     print(f'{name}: decision {number} {index + 1}/{args.runs}', flush=True)
                 report['redecide'] = dict(decision=number, successes=sum(item['success'] for item in decisions),
@@ -162,13 +164,13 @@ def main(argv=None):
                                           original_exception=document['decisions'][number].get('exception'))
         report.update(load=load_record.record(), wall_s=time.perf_counter() - started)
         with gzip.open(args.output / f'{name}.json.gz', 'wt') as file:
-            json.dump(report, file, ensure_ascii=False, separators=(',', ':'))
+            dump(report, file, ensure_ascii=False, separators=(',', ':'))
         brief = {key: report[key] for key in ('seed', 'source', 'selected', 'operations', 'load', 'wall_s')}
         if 'redecide' in report:
             brief['redecide'] = {key: value for key, value in report['redecide'].items() if key != 'runs'}
         reports.append(brief)
         print(f'{name}: {len(selected)} problems, {args.runs} runs', flush=True)
-    (args.output / 'summary.json').write_text(json.dumps(reports, ensure_ascii=False, indent=2) + '\n')
+    (args.output / 'summary.json').write_text(dumps(reports, ensure_ascii=False, indent=2) + '\n')
 
 
 if __name__ == '__main__':
