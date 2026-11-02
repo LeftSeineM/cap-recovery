@@ -30,8 +30,8 @@ def expert_calls(tree):
             yield call, owner
 
 
-def caught_planning(tree):
-    """Planning exceptions escaping a whole skill and caught by its expert caller."""
+def expert_rejections(tree):
+    """Whole-skill planning rejections caught by the expert, counted as search work."""
     events = {event['id']: event for event in tree['failures']}
     calls = list(expert_calls(tree))
     for call, step in calls:
@@ -48,7 +48,7 @@ def caught_planning(tree):
                              if owner['id'] == step['id'] and other['id'] > call['id']), None)
         if step['exit'] is None and continuation is None:
             continue
-        yield call, cause, continuation
+        yield call, cause, step
 
 
 def search_costs(tree):
@@ -82,34 +82,36 @@ def search_costs(tree):
         if decision.get('empty', False):
             add(decision['branch'], decision['exit'], decision['frame'], 'decision_exhaustions',
                 decision['name'], decision, decision['step'])
+    for call, cause, step in expert_rejections(tree):
+        add(call['branch'], call['exit'], call['id'], 'expert_rejections',
+            call['exception']['reason'], call, step['id'])
     return list(nodes.values())
 
 
 def planning_rollbacks(tree):
-    """Rollbacks triggered by planning with no failed physical check to own them."""
+    """Every planning-triggered rollback, with whether it discarded control steps."""
     events = {event['id']: event for event in tree['failures']}
-    claimed, result = set(), []
-    for outcome in tree['outcomes']:
-        if outcome['kind'] != 'rollback':
-            continue
-        checks = {i for i in outcome['discarded'] if i in events and events[i]['kind'] == 'check'} - claimed
-        if not checks and events.get(outcome['failure_id'], {}).get('kind') == 'planning':
-            result.append(dict(outcome, failure=events[outcome['failure_id']]))
-        claimed.update(checks)
-    return result
+    return [dict(outcome, failure=events[outcome['failure_id']],
+                 moved=outcome['restore']['at'] < outcome['at'])
+            for outcome in tree['outcomes']
+            if outcome['kind'] == 'rollback'
+            and events.get(outcome['failure_id'], {}).get('kind') == 'planning']
 
 
 def classify(tree):
     """Derive failure categories from immutable observations and search outcomes.
 
-    Only whole skill planning failures caught by expert code are a1. A rollback
-    counts its triggering check once, with other discarded checks as components;
-    abandonment similarly owns its checks. Only interrupted checks have no enclosing outcome. This function
-    neither edits the tree nor reads simulator state or files.
+    A moved planning rollback is a1; a check-triggered rollback is a3. Each
+    rollback owns its other discarded checks as components. An exception reaching
+    expert code is b, including when the expert catches it and continues. A
+    step abandonment adds b only if that exception was not counted already.
+    Checks recovered inside a skill are a2; interrupted checks stay pending.
+    This function neither edits the tree nor reads simulator state or files.
     """
     observations = {(entry['id'], entry['branch']): entry for entry in tree.get('checks', [])}
     events = [dict(observations.get((event.get('check'), event['branch']), {}), **event)
               for event in tree['failures']]
+    by_id = {event['id']: event for event in events}
     checks = {event['id']: event for event in events if event['kind'] == 'check'}
     claimed, result = set(), []
 
@@ -124,41 +126,85 @@ def classify(tree):
             value['outcome_id'] = outcome['id']
         return value
 
-    for call, cause, continuation in caught_planning(tree):
-        value = close(cause, 'a1')
-        value.update(frame=call['id'], call_branch=call['branch'], origin_frame=cause['frame'], origin_reason=cause['reason'],
-                     reason=call['exception']['reason'], legacy_error=call['exception']['reason'],
-                     at=call['exit'], action_start=call['enter'], skill=call['name'],
-                     continuation=continuation['id'] if continuation else None,
-                     cpu_s=call.get('cpu_s', 0.), wall_s=call.get('wall_s', 0.))
-        # The call's entry clock is factual, so the whole failed invocation can
-        # be timed even if its final candidate solve consumed almost no time.
-        if 'cost_start' in call:
-            value['cost_start'] = call['cost_start']
-        result.append(value)
-    order = {'rollback': 0, 'step_abandoned': 1, 'step_passed': 2}
-    for outcome in sorted(tree['outcomes'], key=lambda item: order[item['kind']]):
-        if outcome['kind'] == 'rollback':
-            discarded = [checks[i] for i in outcome['discarded'] if i in checks and i not in claimed]
-            if not discarded:
+    rollbacks = [o for o in tree['outcomes'] if o['kind'] == 'rollback']
+    for outcome in rollbacks:
+        discarded = [checks[i] for i in outcome['discarded'] if i in checks and i not in claimed]
+        trigger = by_id.get(outcome['failure_id'])
+        if trigger is None or trigger['kind'] not in ('planning', 'check'):
+            continue
+        if trigger['kind'] == 'planning':
+            if outcome['restore']['at'] >= outcome['at']:
+                claimed.update(f['id'] for f in discarded)
                 continue
-            trigger = next((f for f in discarded if f['id'] == outcome['failure_id']), discarded[-1])
-            value = close(trigger, 'a3', outcome, [f for f in discarded if f is not trigger])
-            value['cost_start'] = outcome['cost_start']
-            if outcome.get('observed_clock') is not None:
-                value.update(zip(('cpu_s', 'wall_s'),
-                    (max(0., end - start) for start, end in zip(value['cost_start'], outcome['observed_clock']))))
-            value['recovery'] = dict(kind='rollback', **outcome['restore'], control=outcome['control'])
-            value['trigger_failure_id'] = outcome['failure_id']
-            result.append(value)
-            claimed.update(f['id'] for f in discarded)
-        elif outcome['kind'] == 'step_abandoned':
+            category = 'a1'
+        else:
+            if trigger['id'] in claimed:
+                continue
+            category = 'a3'
+        value = close(trigger, category, outcome, [f for f in discarded if f['id'] != trigger['id']])
+        value['cost_start'] = outcome['cost_start']
+        if outcome.get('observed_clock') is not None:
+            value.update(zip(('cpu_s', 'wall_s'),
+                (max(0., end - start) for start, end in zip(value['cost_start'], outcome['observed_clock']))))
+        value['recovery'] = dict(kind='rollback', **outcome['restore'], control=outcome['control'])
+        value['trigger_failure_id'] = outcome['failure_id']
+        result.append(value)
+        claimed.update(f['id'] for f in discarded)
+    # A rollback handles every failure in its discarded suffix, including
+    # zero-motion planning retries. None of those exceptions also crosses the
+    # expert boundary as b. Callback-only controls are transparent here.
+    discarded_ids = {i for o in rollbacks for i in (*o['discarded'], o['failure_id'])}
+    discarded_ids.discard(None)
+    frames = {f['id']: f for f in tree['frames']}
+    calls = list(expert_calls(tree))
+    expert_ids = {call['id'] for call, _ in calls}
+    counted = {}
+    for call, step in calls:
+        error = call.get('exception')
+        if error is None or call.get('failure_id') in discarded_ids:
+            continue
+        cause = by_id.get(call.get('failure_id'))
+        identity = (call.get('failure_id'), error.get('branch', call['branch'])) if cause else (None, call['id'])
+        if identity in counted:
+            continue
+        def within(event):
+            owner = frames.get(event['frame'])
+            while owner is not None and owner['id'] != call['id']:
+                owner = frames.get(owner['parent'])
+            return owner is not None
+        components = [f for f in checks.values() if f['id'] not in claimed and within(f)
+                      and (cause is None or f['id'] != cause['id'])]
+        value = close(cause, 'b') if cause else dict(id=f"b-call-{call['id']}", category='b',
+            criterion_id='skill.exception', family_id='expert.boundary', components=[], recovery=None)
+        value.update(frame=call['id'], call_branch=call['branch'], step=step['id'],
+            branch=error.get('branch', call['branch']), at=call['exit'], end=call['exit'],
+            action_start=call['enter'], skill=call['name'], reason=error['reason'], legacy_error=error['reason'],
+            trigger_failure_id=call.get('failure_id'), task_outcome='expert_exception',
+            cpu_s=0., wall_s=0., components=components)
+        if cause is not None:
+            value['origin_frame'], value['origin_reason'] = cause['frame'], cause['reason']
+            claimed.add(cause['id'])
+        claimed.update(f['id'] for f in components)
+        result.append(value)
+        counted[identity] = value
+
+    for outcome in sorted((o for o in tree['outcomes'] if o['kind'] != 'rollback'),
+                          key=lambda item: item['kind'] == 'step_passed'):
+        if outcome['kind'] == 'step_abandoned':
             components = [f for f in checks.values() if f['step'] == outcome['step'] and f['id'] not in claimed]
-            value = dict(outcome, id=f"b{outcome['id']}", frame=outcome['frame'], category='b',
-                         criterion_id='run_steps.terminal', family_id='step.outcome',
-                         legacy_error=outcome['reason'], end=outcome['at'], recovery=None,
-                         cpu_s=0., wall_s=0., components=components)
-            result.append(value)
+            trigger_id = outcome['failure_id'] if outcome.get('failure_id') is not None else frames.get(outcome['step'], {}).get('failure_id')
+            terminal_reason = frames.get(outcome['step'], {}).get('exception', {}).get('reason', outcome['reason'])
+            existing = next((f for f in result if f['category'] == 'b' and f['step'] == outcome['step']
+                             and f.get('trigger_failure_id') == trigger_id and f['reason'] == terminal_reason), None)
+            if existing is not None:
+                existing.update(task_outcome='step_abandoned', outcome_id=outcome['id'])
+                existing['components'].extend(components)
+            else:
+                value = dict(outcome, id=f"b{outcome['id']}", frame=outcome['frame'], category='b',
+                             criterion_id='run_steps.terminal', family_id='step.outcome',
+                             legacy_error=outcome['reason'], end=outcome['at'], recovery=None,
+                             cpu_s=0., wall_s=0., components=components)
+                result.append(value)
             claimed.update(f['id'] for f in components)
         elif outcome['kind'] == 'step_passed':
             for event in checks.values():
@@ -168,8 +214,18 @@ def classify(tree):
                 # descendant retry resumes it; discarded suffixes were claimed.
                 if outcome['branch'] != event['branch'] and not outcome['branch'].startswith(event['branch'] + '/'):
                     continue
-                value = close(event, 'a2', outcome)
-                value['recovery'] = dict(kind='step_passed', at=outcome['at'], branch=outcome['branch'])
+                owner = frames.get(event['frame'])
+                while owner is not None and owner['id'] not in expert_ids:
+                    owner = frames.get(owner['parent'])
+                if owner is not None and owner['exit'] is not None and 'exception' not in owner:
+                    value = close(event, 'a2', outcome)
+                    value['recovery'] = dict(kind='step_passed', at=outcome['at'], branch=outcome['branch'])
+                else:
+                    # A predicate evaluated by expert code itself has no skill
+                    # frame to unwind. It cannot be a skill's internal recovery.
+                    value = close(event, 'b')
+                    value.update(end=event['at'], task_outcome='expert_check',
+                                 trigger_failure_id=event['id'], cpu_s=0., wall_s=0.)
                 result.append(value)
                 claimed.add(event['id'])
     result.extend(close(event, 'pending') for event in checks.values() if event['id'] not in claimed)
@@ -225,7 +281,7 @@ def failures(batches, seed=None):
                 matches = (archive is not None and archive['failure_id'] == failure.get('trigger_failure_id', failure['id'])
                            and archive['branch'] == failure['branch'])
                 rank = 3 if matches else 2 if frame is not None else 0 if archive else 1
-                # An a3 belongs to exactly one discarded branch, not to another
+                # A rollback belongs to exactly one discarded branch, not to another
                 # archive that happens to retain the same prefix.
                 entry['_rank'] = rank
                 if key not in found or rank > found[key]['_rank']:
@@ -280,12 +336,13 @@ def statistics(batches):
     for entry in entries:
         row = rows[entry['category']]
         row['count'] += 1
-        # b is an outcome, not another disjoint timed solve/recovery interval.
+        # b counts expert-boundary failures, without adding another timed interval.
         if entry['category'] == 'a1':
             rejections[f"{entry.get('stage') or entry.get('criterion_id', 'candidate')}: {entry['reason']}"] += 1
-        if entry['category'] in ('a2', 'a3', 'pending'):
+        if entry['category'] in ('a1', 'a2', 'a3', 'pending'):
             source = Path(entry['batch'])
-            trajectory_path = str(trajectory(source, entry['report']).relative_to(source))
+            own_trajectory = trajectory(source, entry['report'])
+            trajectory_path = str(own_trajectory.relative_to(source)) if own_trajectory is not None else None
             clips.append(dict(batch=str(source), seed=entry['seed'], repeat=entry['report'].get('repeat', 0),
                               failure_id=entry['id'], category=entry['category'], report=entry['report'],
                               trajectory=trajectory_path, branch=entry['branch'],
@@ -312,7 +369,7 @@ def statistics(batches):
             row[cost + '_fraction'] = row[cost] / denominator[cost] if denominator[cost] else 0.
     return dict(categories=rows, total_execution=denominator, rejection_counts=dict(rejections), clips=clips,
                 search_costs=search_layers, solver_coverage=dict(coverage), planning_rollbacks=planning_retries,
-                cost_note='b is terminal outcome; pending is separate; caught whole-skill planning calls and physical recovery intervals are timed; search layer costs are inclusive')
+                cost_note='b counts expert-boundary exceptions or step abandonment, without adding a duplicate timed interval; pending is separate; discarded planning/physical branches and in-place recovery are timed; search layer costs (including expert rejections) are inclusive')
 
 
 def trajectory(batch, report):

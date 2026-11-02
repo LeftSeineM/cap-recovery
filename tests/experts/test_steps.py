@@ -417,4 +417,6 @@ def test_join_preserves_both_search_trees_and_events_after_sources_are_removed(t
     assert len(trees) == 2 and [tree['frames'][0]['arguments']['index'] for _, _, tree in trees] == [1, 2]
     report = json.loads((joined / 'episodes/4.json').read_text())
     assert [event['step'] for event in report['events']] == [1, 3]
-    assert statistics([joined])['categories']['a1']['count'] == 2
+    stats = statistics([joined])
+    assert stats['categories']['a1']['count'] == 0
+    assert stats['search_costs']['expert_rejections']['count'] == 2

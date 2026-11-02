@@ -26,12 +26,12 @@ button.primary{background:#1f6f9c;border-color:#1f6f9c;color:#fff}button.primary
 .tag{font-size:11px;border-radius:9px;padding:1px 8px;background:#e8eff4;color:#35566e}
 .tag.ok{background:#e1f3eb;color:#1f7a55}.tag.b{background:#fbe6e4;color:#a33a32}.tag.pending{background:#efe9f8;color:#6a4fa0}
 .tag.chain{background:#fff1d6;color:#8a5a00}
-.tag.error{background:#f6e3d3;color:#9a4a12}.tag.fail{background:#fdf0ef;color:#a33a32}.tag.idle{background:#eef1f4;color:#5b6f80}
+.tag.error{background:#f6e3d3;color:#9a4a12}.tag.recover{background:#fff1d6;color:#8a5a00}.tag.idle{background:#eef1f4;color:#5b6f80}
 .tree .body{overflow:auto;border-top:1px solid #edf1f4;padding:6px}.tree:not(.open) .body{display:none}
 svg{display:block}svg text{font:11px system-ui;fill:#587083}
 .node,.edge{cursor:pointer;outline:none}.node:hover circle,.node:hover rect,.node.chosen circle,.node.chosen rect{stroke:#0f739e;stroke-width:4}
 .edge:hover path.line,.edge.chosen path.line{stroke-width:7}
-.badge{fill:#a25900;font-weight:700}.search{fill:#5b6f8a}.retry{fill:#3d6e8f}.term{font-weight:700}
+.search{fill:#5b6f8a}.retry{fill:#3d6e8f}.term{font-size:10px;fill:#667e90}
 video,img{width:100%;background:#edf1f4;object-fit:contain;border-radius:6px}[hidden]{display:none!important}
 .missing{background:#f2f6f9;border-radius:6px;padding:18px;text-align:center;color:#667e90;font-size:13px}
 .missing button{margin-top:10px}

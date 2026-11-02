@@ -44,7 +44,7 @@ def planning_error(ctx, reason='IK Failed'):
     raise error
 
 
-def test_a1_is_self_contained_and_replays_recorded_native_arguments_without_trajectory(tmp_path):
+def test_planning_event_replays_recorded_native_arguments_without_trajectory(tmp_path):
     ctx = context()
     calls = []
     def ik(arm, goal, attempts=7):
@@ -69,7 +69,7 @@ def test_a1_is_self_contained_and_replays_recorded_native_arguments_without_traj
     np.testing.assert_array_equal(calls[0][1], calls[1][1])
     export_case([tmp_path], 3, tmp_path / 'case', 1)
     canonical = json.loads((tmp_path / 'case/summary.json').read_text())['case']
-    assert canonical['version'] == 1 and canonical['category'] == 'a1'
+    assert canonical['version'] == 1 and canonical['category'] == 'b'
     assert (tmp_path / 'case' / canonical['root']['checkpoint']).is_file()
 
 
@@ -185,7 +185,7 @@ def test_discarded_recording_is_copied_without_redirecting_main_recorder(tmp_pat
     assert (tmp_path / 'repeat-trajectories/3-1.hdf5').is_file()
 
 
-def test_a1_case_selects_owning_retry_archive_when_frame_number_is_reused(tmp_path):
+def test_planning_case_selects_owning_retry_archive_when_frame_number_is_reused(tmp_path):
     from copy import deepcopy
     from table_1000.experts.audit.codec import save_document
     ctx = context()
@@ -216,7 +216,7 @@ def test_a1_case_selects_owning_retry_archive_when_frame_number_is_reused(tmp_pa
     assert resolve_batch_ref(source, tmp_path / 'case') == archived
 
 
-def test_view_namespaces_repeat_trees_and_preserves_each_a1(tmp_path):
+def test_view_namespaces_repeat_trees_and_preserves_expert_search_costs(tmp_path):
     from table_1000.experts.audit.view import graph
     ctx = context()
     with frame(ctx, 'step', 'move', {'index': 1}):
@@ -229,7 +229,8 @@ def test_view_namespaces_repeat_trees_and_preserves_each_a1(tmp_path):
     ctx.trace.save(tmp_path / report['call_trace'])
     result = graph(tmp_path, 3)
     assert len(result['nodes']) == 2
-    assert sum(len(node['a1']) for node in result['nodes']) == 2
+    assert sum(node['search_costs']['expert_rejections']['count'] for node in result['nodes']) == 2
+    assert all([f['category'] for f in node['failures']] == ['b'] for node in result['nodes'])
     assert len({node['branch'] for node in result['nodes']}) == 2
 
 
@@ -305,7 +306,10 @@ def test_classify_covers_facts_outcomes_and_never_mutates_the_tree():
         return dict(id=number, kind=kind, step=step, frame=step, branch='main', at=3,
                     action_start=1, reason=f'criterion {number}', cpu_s=1., wall_s=2.,
                     cost_start=[0., 0.], **values)
-    tree = dict(frames=[], failures=[event(1, 'planning'), event(2, 'check'),
+    tree = dict(frames=[dict(id=i, parent=None, kind='step', control=False) for i in range(3)] +
+                [dict(id=8, parent=0, kind='skill', control=False, exit=8),
+                 dict(id=9, parent=2, kind='skill', control=False, exit=None)],
+                failures=[event(1, 'planning'), event(2, 'check'),
                 event(3, 'check'), event(4, 'check'), event(5, 'record'),
                 event(6, 'check', step=1), event(7, 'check', step=2)], outcomes=[
         dict(id=0, kind='rollback', step=0, branch='main', at=4,
@@ -314,6 +318,8 @@ def test_classify_covers_facts_outcomes_and_never_mutates_the_tree():
         dict(id=1, kind='step_passed', step=0, frame=0, branch='main/1-1', at=8, observed_clock=[5., 10.]),
         dict(id=2, kind='step_abandoned', step=1, frame=1, branch='main', at=6,
              reason='give up', failure_id=6)])
+    tree['failures'][3]['frame'] = 8
+    tree['failures'][6]['frame'] = 9
     original = deepcopy(tree)
     classified = classify(tree)
     assert tree == original
@@ -328,12 +334,13 @@ def test_classify_covers_facts_outcomes_and_never_mutates_the_tree():
     # A later outcome is a new fact, not a mutation or a promotion of the event.
     tree['outcomes'].append(dict(id=3, kind='step_passed', step=2, frame=2,
                                  branch='main', at=9, observed_clock=[7., 14.]))
+    tree['frames'][-1]['exit'] = 9
     assert next(f for f in classify(tree) if f['id'] == 7)['category'] == 'a2'
     assert tree['failures'] == original['failures']
 
 
-@pytest.mark.parametrize('ending,category', [('passed', 'a2'), ('abandoned', 'b'), ('interrupted', 'pending')])
-def test_expert_catches_check_and_repairs_without_recovery_notifications(tmp_path, ending, category):
+@pytest.mark.parametrize('ending', ['passed', 'abandoned', 'interrupted'])
+def test_expert_check_exception_is_b_even_when_caught_and_repaired(tmp_path, ending):
     from table_1000.experts.context import Context
     ctx = context()
     ctx.only = None
@@ -358,15 +365,13 @@ def test_expert_catches_check_and_repairs_without_recovery_notifications(tmp_pat
     if ending == 'abandoned':
         ctx.trace.search.terminal(dict(status='failed', failure=dict(reason='abandoned')))
     values = classify(ctx.trace.document())
-    assert len(values) == 1 and values[0]['category'] == category
+    count = 2 if ending == 'abandoned' else 1
+    assert [f['category'] for f in values] == ['b'] * count
     assert not any('outcome' in f for f in ctx.trace.frames)
     assert not any('category' in f for f in ctx.trace.search.failures)
-    if category == 'b':
-        assert values[0]['components'][0]['details']['measured'] == .021
-    else:
-        assert values[0]['details']['measured'] == .021
+    assert values[0]['details']['measured'] == .021
     write_batch(tmp_path, ctx, 'success' if ending == 'passed' else 'error')
-    assert statistics([tmp_path])['categories'][category]['count'] == 1
+    assert statistics([tmp_path])['categories']['b']['count'] == count
 
 
 def test_internal_planning_rejection_after_motion_is_search_cost_and_record_is_not_a_failure():
@@ -389,6 +394,7 @@ def test_rollback_counts_trigger_once_and_links_exception_wrappers():
     ctx = context()
     with frame(ctx, 'step', 'move', {'index': 1}):
         with frame(ctx, 'skill', 'retry') as control:
+            control['control'] = True
             with pytest.raises(ExpertFailed) as caught:
                 with frame(ctx, 'skill', 'pick', concrete=True):
                     ctx.steps = 2
@@ -422,6 +428,69 @@ def test_planning_rollback_keeps_both_physical_nodes_without_counting_an_a3(tmp_
     restore = next(e for e in value['edges'] if e['category'] == 'rollback')
     assert restore['source'] == 'main@0' and restore['target'] == 'main/1-1@0'
     assert {restore['source'], restore['target']} <= {n['id'] for n in value['nodes']}
+
+
+@pytest.mark.parametrize('moved', [False, True])
+def test_planning_rollback_counts_only_discarded_motion_and_exports_its_segment(tmp_path, monkeypatch, moved):
+    from scripts.experts.search_records import main
+    from table_1000.experts.audit import records
+    ctx = context()
+    ctx.model.ik = ctx.trace.search.observe('ik', lambda arm: ('IK Failed', None))
+    with frame(ctx, 'step', 'move', {'index': 1}):
+        with frame(ctx, 'skill', 'retry') as control:
+            control['control'] = True
+            with pytest.raises(ExpertFailed) as caught:
+                with frame(ctx, 'skill', 'pick', concrete=True):
+                    ctx.steps = 3 if moved else 0
+                    ctx.model.ik('left')
+                    planning_error(ctx, 'no route')
+            outcome = ctx.trace.search.rollback(control['id'], 1, caught.value, 0)
+            ctx.trace.search.next_branch(control['id'], 1)
+            ctx.steps = 0
+            ctx.steps = 4
+    tree = ctx.trace.document()
+    values = classify(tree)
+    assert [f['category'] for f in values] == (['a1'] if moved else [])
+    assert planning_rollbacks(tree)[0]['moved'] is moved
+    write_batch(tmp_path, ctx)
+    archived = tmp_path / 'discarded'
+    own = write_batch(archived, ctx, 'failed')
+    report = json.loads((tmp_path / 'episodes/3.json').read_text())
+    report['retry_archives'] = [dict(batch='discarded', failure_id=outcome['failure_id'], branch='main')]
+    (tmp_path / 'episodes/3.json').write_text(json.dumps(report))
+    stats = statistics([tmp_path])
+    assert stats['categories']['a1']['count'] == int(moved)
+    assert len(stats['clips']) == int(moved)
+    selected = []
+    monkeypatch.setattr(records, 'media_batch', lambda batch, report, spans, output: selected.append((batch, report, spans)))
+    main(['segments', str(tmp_path), '--output', str(tmp_path / 'segments')])
+    if moved:
+        assert len(selected) == 1 and selected[0][0] == archived
+        assert selected[0][2] == [dict(start=0, end=3)]
+        assert selected[0][1]['archive']['failure_id'] == outcome['failure_id']
+        assert values[0]['kind'] == 'planning' and values[0]['reason'] == 'IK Failed'
+        result = export_case([tmp_path], 3, tmp_path / 'case', outcome['failure_id'])
+        assert result['case']['category'] == 'a1'
+    else:
+        assert selected == []
+
+
+def test_planning_trigger_owns_discarded_checks_as_a1_components():
+    ctx = context()
+    with frame(ctx, 'step', 'move', {'index': 1}):
+        with frame(ctx, 'skill', 'retry') as control:
+            ctx.steps = 2
+            check(ctx, 'earlier check', False, kind='check')
+            number = check(ctx, 'no route', False, kind='planning')
+            error = ExpertFailed('move', 'no route', kind='planning')
+            error.search_failure_id = number
+            ctx.trace.search.rollback(control['id'], 1, error, 0)
+            ctx.trace.search.next_branch(control['id'], 1)
+            ctx.steps = 4
+    [failure] = classify(ctx.trace.document())
+    assert failure['category'] == 'a1' and failure['id'] == number
+    assert failure['criterion_id'] == 'no route' and failure['kind'] == 'planning'
+    assert [part['criterion_id'] for part in failure['components']] == ['earlier check']
 
 
 def test_outer_rollback_owns_the_surviving_prefix_before_an_inner_retry():
@@ -501,7 +570,7 @@ def test_a3_archive_uses_trigger_id_and_branch_instead_of_a_retained_prefix(tmp_
 
 
 @pytest.mark.parametrize('handled', [True, False])
-def test_whole_skill_planning_exception_only_counts_when_expert_catches_it(handled):
+def test_expert_caught_planning_exception_is_search_cost_and_propagation_is_b(handled):
     ctx = context()
     def attempt():
         with frame(ctx, 'skill', 'pick', concrete=True):
@@ -519,9 +588,14 @@ def test_whole_skill_planning_exception_only_counts_when_expert_catches_it(handl
                 attempt()
         ctx.trace.search.terminal(dict(status='failed', failure=dict(reason='no reachable grasp')))
     failures = classify(ctx.trace.document())
-    assert [f['category'] for f in failures] == (['a1'] if handled else ['b'])
+    assert [f['category'] for f in failures] == ['b']
+    assert failures[0]['skill'] == 'pick'
+    costs = search_costs(ctx.trace.document())
     if handled:
-        assert failures[0]['skill'] == 'pick' and failures[0]['continuation'] == 2
+        assert costs[0]['layers']['expert_rejections']['count'] == 1
+        assert costs[0]['layers']['expert_rejections']['reasons'] == {'no reachable grasp': 1}
+    else:
+        assert costs == []
 
 
 def test_internal_solver_candidates_and_decisions_are_node_costs_even_under_subtask(tmp_path):
@@ -549,7 +623,7 @@ def test_internal_solver_candidates_and_decisions_are_node_costs_even_under_subt
     write_batch(tmp_path, ctx)
     assert statistics([tmp_path])['search_costs']['solver_calls']['count'] == 3
     nodes = graph(tmp_path, 3)['nodes']
-    assert sum(len(n['a1']) for n in nodes) == 0
+    assert sum(len(n['failures']) for n in nodes) == 0
     assert nodes[0]['search_costs']['solver_calls']['count'] == 3
 
 
@@ -560,7 +634,9 @@ def test_distinct_expert_failures_at_same_control_have_independent_ids():
             with pytest.raises(ExpertFailed):
                 with frame(ctx, 'skill', 'pick', concrete=True):
                     raise ExpertFailed('move', 'zero candidates', kind='planning')
-    assert [(f['id'],f['category']) for f in classify(ctx.trace.document())] == [(1,'a1'),(2,'a1')]
+    assert [(f['id'], f['category']) for f in classify(ctx.trace.document())] == [(1, 'b'), (2, 'b')]
+    assert [f['id'] for f in ctx.trace.search.failures] == [1, 2]
+    assert search_costs(ctx.trace.document())[0]['layers']['expert_rejections']['count'] == 2
 
 
 
@@ -625,9 +701,39 @@ def test_expert_callback_control_is_transparent_but_skill_adaptation_is_not():
     with frame(ctx, 'step', 'move', {'index': 1}):
         retry(ctx, expert, attempts=1)
     values = classify(ctx.trace.document())
-    assert [(f['category'],f['skill']) for f in values] == [('a1','chain')]
+    assert [(f['category'], f['skill']) for f in values] == [('b', 'chain')]
     assert ctx.trace.frames[1]['control']
-    assert values[0]['frame'] == 2 and values[0]['continuation'] == 5
+    costs = search_costs(ctx.trace.document())[0]['layers']['expert_rejections']
+    assert costs['count'] == 1 and costs['frames'] == [2]
+
+
+def test_check_recovered_inside_the_expert_called_skill_remains_a2():
+    from table_1000.experts.context import Context
+    ctx = context()
+    with frame(ctx, 'step', 'move', {'index': 1}):
+        with frame(ctx, 'skill', 'chain', concrete=False):
+            with pytest.raises(ExpertFailed):
+                with frame(ctx, 'skill', 'pick', concrete=True):
+                    ctx.steps = 2
+                    Context.fail(ctx, 'not lifted', kind='check', rise_m=.001)
+            ctx.steps = 5
+    [failure] = classify(ctx.trace.document())
+    assert failure['category'] == 'a2' and failure['reason'] == 'not lifted'
+    assert failure['end'] == 5 and failure['details']['rise_m'] == .001
+
+
+def test_expert_predicate_caught_without_a_skill_frame_is_b():
+    from table_1000.experts.skills.semantic import require
+    from table_1000.experts.context import Context
+    ctx = context()
+    ctx.fail = lambda *args, **kwargs: Context.fail(ctx, *args, **kwargs)
+    with frame(ctx, 'step', 'store', {'index': 1}):
+        with pytest.raises(ExpertFailed):
+            require(ctx, False, 'not stored', kind='check')
+        ctx.steps = 3
+    [failure] = classify(ctx.trace.document())
+    assert failure['category'] == 'b' and failure['task_outcome'] == 'expert_check'
+    assert failure['reason'] == 'not stored'
 
 
 @pytest.mark.parametrize('physical', [False, True])
@@ -662,12 +768,15 @@ def test_place_propagates_the_last_solve_or_physical_failure_without_relabeling_
         with frame(ctx,'skill','release',concrete=True):
             ctx.steps += 1
     values = classify(ctx.trace.document())
-    assert [f['category'] for f in values] == (['a2'] if physical else ['a1'])
+    assert [f['category'] for f in values] == ['b']
     if physical:
         # The aggregate 'no placement' links to the existing physical failure.
         assert sum(f['kind']=='check' for f in ctx.trace.search.failures) == 1
-        assert values[0]['reason'] == 'tracking'
+        assert values[0]['origin_reason'] == 'tracking'
+        assert values[0]['reason'] == 'no placement'
         assert values[0]['details']['position_error_m'] == .02
+    else:
+        assert search_costs(ctx.trace.document())[0]['layers']['expert_rejections']['count'] == 1
 
 
 @pytest.mark.parametrize('abandoned', [False, True])
@@ -702,7 +811,7 @@ def test_raw_planning_event_replays_when_it_is_search_cost_or_step_abandonment(t
     main(['replay', str(tmp_path), '--seed', '3', '--failure', '1', '--output', str(tmp_path/'replay')])
     assert '--from' in capsys.readouterr().out
     case = json.loads((tmp_path/'replay/case/summary.json').read_text())['case']
-    assert case['kind'] == 'planning' and case['category'] is None
+    assert case['kind'] == 'planning' and case['category'] == ('b' if abandoned else None)
     assert case['failure_id'] == 1
 
 

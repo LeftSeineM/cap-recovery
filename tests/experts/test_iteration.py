@@ -13,8 +13,8 @@ from table_1000.experts.audit.codec import save_document
 from table_1000.experts.audit.codec import load_document
 
 
-def batch(path, *, outcome='success', category=None, source_step=1, names=None, repeat=0, parent=None, a1=True):
-    """A batch with facts: a caught planning failure (a1) unless ``a1`` is False, and for
+def batch(path, *, outcome='success', category=None, source_step=1, names=None, repeat=0, parent=None, expert_rejection=True):
+    """A batch with facts: a caught planning rejection unless disabled, and for
     ``category`` a check whose outcome makes it a2 (step passed), a3 (rolled back to 0 on
     main/0-1) or pending (no outcome)."""
     names = names or ['store pen']
@@ -32,10 +32,10 @@ def batch(path, *, outcome='success', category=None, source_step=1, names=None, 
                    enter=0, exit=4, branch='main', concrete=False, control=False, cpu_s=3., wall_s=4.),
               dict(id=1, parent=0, kind='skill', name='pick pen', arguments={'obj':'pen'}, enter=0, exit=0,
                    branch='main', concrete=True, control=False, cpu_s=.5, wall_s=.6,
-                   **(dict(exception=dict(kind='planning', reason='no IK'), failure_id=1) if a1 else {})),
+                   **(dict(exception=dict(kind='planning', reason='no IK'), failure_id=1) if expert_rejection else {})),
               dict(id=2, parent=0, kind='skill', name='pick pen', arguments={'obj':'pen'}, enter=0, exit=4,
                    branch='main', concrete=True, control=False, cpu_s=2., wall_s=3.)]
-    failures = [dict(id=1, kind='planning', frame=1, branch='main', at=0, step=0, reason='no IK', stage='release IK')] if a1 else []
+    failures = [dict(id=1, kind='planning', frame=1, branch='main', at=0, step=0, reason='no IK', stage='release IK')] if expert_rejection else []
     outcomes = []
     if category:
         failures.append(dict(id=4, kind='check', frame=2, branch='main', at=2, start=0, step=0, reason='missed pen',
@@ -74,14 +74,15 @@ def joined(line, parts, name='20260102-000000-joined', steps=1):
     return path
 
 
-def test_index_merges_outer_attempts_and_counts_a1_without_promoting_pending(line):
+def test_index_merges_attempts_and_keeps_search_costs_separate_from_failures(line):
     first=batch(line/'20260101-120000-a',category='pending')
     last=batch(line/'20260101-121000-b',category='a2')
     joined(line,[last])
     step=iteration.line_index(line)['steps'][0]
     assert len(step['attempts'])==2 and len(step['nodes'])==6
-    assert sum(n['a1_count'] for n in step['nodes'])==2  # one caught planning failure per batch
-    assert all(b['count']==1 and b['reason']=='no IK' for n in step['nodes'] for b in n['a1'])
+    assert sum(n.get('search', {}).get('expert_rejections', {}).get('count', 0) for n in step['nodes'])==2
+    assert all(n['search']['expert_rejections']['reasons']=={'no IK':1}
+               for n in step['nodes'] if 'expert_rejections' in n.get('search', {}))
     assert {'pending','a2'} <= {e['category'] for e in step['edges']}
     assert [a['cpu_s'] for a in step['attempts']]==[3.,3.]
     assert [a['selected'] for a in step['attempts']]==[False,True]
@@ -130,7 +131,7 @@ def test_repeat_identities_are_retained(line):
     path=batch(line/'20260101-120000-a')
     batch(path,repeat=1)
     step=iteration.line_index(line)['steps'][0]
-    assert sum(n['a1_count'] for n in step['nodes'])==2
+    assert sum(n.get('search', {}).get('expert_rejections', {}).get('count', 0) for n in step['nodes'])==2
     assert len({n['id'] for n in step['nodes']})==len(step['nodes'])
     assert [a['repeat'] for a in step['attempts']]==[0,1]
 
@@ -195,20 +196,25 @@ def test_physical_rollback_ends_the_discarded_branch_and_forks_at_the_restored_s
     assert next(n for n in tree['nodes'] if n['id'].endswith('/main@2'))['terminal']=='a3'
     assert all(not n['id'].endswith('main/2-1@0') for n in tree['nodes'])  # merged into the restored state
     # Counted per failure, not per colored edge.
-    assert tree['failure_counts']=={'a1':1,'a3':1} and sorted(f['category'] for f in step['failures'])==['a1','a3']
+    assert tree['failure_counts']=={'a3':1,'b':1} and sorted(f['category'] for f in step['failures'])==['a3','b']
 
 
 def test_planning_rollback_is_marked_as_such(line):
     source,_=archived(line)
     tree=load_document(source/'calls/0.json.gz')
-    tree['failures']=[dict(f,kind='planning') if f['id']==4 else f for f in tree['failures']]
+    tree['failures']=[dict(f,kind='planning',at=1) if f['id']==4 else f for f in tree['failures']]
     save_document(source/'calls/0.json.gz',tree)
     step=iteration.line_index(line)['steps'][0]
-    assert next(e for e in step['edges'] if e['category']=='rollback')['trigger']=='planning'
+    assert next(e for e in step['edges'] if e['category']=='rollback')['trigger']=='a1'
+    [tree]=iteration.forest(step)
+    assert tree['failure_counts']=={'a1':1,'b':1}
+    end=next(n for n in tree['nodes'] if n['id'].endswith('/main@2'))
+    assert end['terminal']=='a1' and end['checks'][0]['reason']=='missed pen'
+    assert end['checks'][0]['kind']=='planning'
 
 
 def test_discarded_branch_uses_archive_even_when_control_numbers_fit_final_trajectory(line):
-    source,archive=archived(line,a1=False)
+    source,archive=archived(line,expert_rejection=False)
     with h5py.File(archive/'trajectories.hdf5','r+') as f:
         f['data/demo_0/initial_state/x'][...]=[[100]]
         f['data/demo_0/states/x'][...]=[[101],[102],[103],[104]]
@@ -222,7 +228,7 @@ def test_discarded_branch_uses_archive_even_when_control_numbers_fit_final_traje
 
 
 def test_enclosing_step_exit_after_restore_belongs_to_resumed_branch(line):
-    source,_=archived(line,a1=False)
+    source,_=archived(line,expert_rejection=False)
     step=iteration.line_index(line)['steps'][0]
     assert not any(n['id'].endswith('/main@4') for n in step['nodes'])
     assert any(n['id'].endswith('/main/2-1@4') and n['batch']==source.name for n in step['nodes'])
@@ -230,7 +236,7 @@ def test_enclosing_step_exit_after_restore_belongs_to_resumed_branch(line):
 
 
 def test_resumed_branch_can_exist_only_in_outcomes_without_new_concrete_frames(line):
-    source,_=archived(line,a1=False)
+    source,_=archived(line,expert_rejection=False)
     tree=load_document(source/'calls/0.json.gz')
     tree['frames']=[f for f in tree['frames'] if f['branch']!='main/2-1']
     save_document(source/'calls/0.json.gz',tree)
@@ -292,7 +298,7 @@ def test_site_lists_lines_indexes_on_demand_and_serves_steps(line,monkeypatch):
     summary=web.summary('000100/x1pro/0000')
     assert summary['build'] is None and summary['steps'][0]['key']=='s01'
     assert summary['steps'][0]['media']==0 and summary['steps'][0]['media_total']==3
-    assert summary['steps'][0]['failures']==summary['failures']=={'a1':1}
+    assert summary['steps'][0]['failures']==summary['failures']=={'b':1}
     step=web.step('000100/x1pro/0000','s01')
     assert len(step['trees'])==1 and step['trees'][0]['nodes'][0]['media_ready'] is False
     started=[]
@@ -325,12 +331,13 @@ def test_site_http_routes(line):
 
 
 def forest_step(attempts, nodes, edges):
-    """A step's raw graph: ``nodes`` are (branch, at, a1) and ``edges`` (branch, start, end, category)."""
+    """A step's raw graph: ``nodes`` are (branch, at, search_count) and ``edges`` (branch, start, end, category)."""
     prefix='b/r0/'
     return dict(attempts=[dict(dict(batch='b',repeat=0,source_step=1,result='success',start=0,end=4,
         entry=prefix+'main@0',selected=True,commit='c'),**a) for a in attempts],
-        nodes=[dict(id=f'{prefix}{b}@{at}',branch=prefix+b,at=at,batch='b',a1=[],a1_count=a1,checks=[])
-               for b,at,a1 in nodes],
+        nodes=[dict(id=f'{prefix}{b}@{at}',branch=prefix+b,at=at,batch='b',checks=[],
+                    search={'expert_rejections':dict(count=count,cpu_s=0.,wall_s=0.,reasons={},frames=[],steps=[],timed_count=0)})
+               for b,at,count in nodes],
         edges=[dict(id=f'{prefix}{b}:{s}-{e}',source=f'{prefix}{b}@{s}',target=f'{prefix}{b}@{e}',name='move',
                     category=c,start=s,end=e) for b,s,e,c in edges],
         failures=[])
@@ -348,7 +355,7 @@ def test_forest_merges_a_retry_without_motion_into_one_node():
     [tree]=iteration.forest(step)
     assert len(tree['nodes'])==2 and len(tree['edges'])==1
     node=next(n for n in tree['nodes'] if n['at']==2)
-    assert node['a1_count']==9 and [r['moved'] for r in node['retries']]==[False,False]
+    assert node['search']['expert_rejections']['count']==9 and [r['moved'] for r in node['retries']]==[False,False]
     assert not any(n.get('terminal') for n in tree['nodes'])
     assert tree['chain']==[tree['edges'][0]['id']] and tree['exit']==node['id']
 

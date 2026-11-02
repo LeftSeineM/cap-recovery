@@ -1,4 +1,5 @@
 """Offline physical-state search graph; media is generated only on request."""
+from collections import Counter
 from pathlib import Path
 
 from table_1000.common.serialization import dumps
@@ -28,7 +29,7 @@ def graph(batch, seed, repeat=None):
         for frame in concrete:
             for at in (frame['enter'], frame['exit']):
                 key = f"{frame['branch']}@{at}"
-                nodes.setdefault(key, dict(id=key, branch=frame['branch'], at=at, batch=str(source), report=report, a1=[]))
+                nodes.setdefault(key, dict(id=key, branch=frame['branch'], at=at, batch=str(source), report=report, failures=[]))
     for source, report, tree in records:
         if 'archive' in report:
             continue
@@ -37,7 +38,7 @@ def graph(batch, seed, repeat=None):
         for cost in search_costs(tree):
             branch = prefix + cost['branch']
             key = f"{branch}@{cost['at']}"
-            node = nodes.setdefault(key, dict(id=key, branch=branch, at=cost['at'], batch=str(source), report=report, a1=[]))
+            node = nodes.setdefault(key, dict(id=key, branch=branch, at=cost['at'], batch=str(source), report=report, failures=[]))
             node['search_costs'] = cost['layers']
             node['solver_coverage'] = cost['solver_coverage']
     for failure in classified_failures([batch], seed):
@@ -54,13 +55,16 @@ def graph(batch, seed, repeat=None):
     for failure in failures.values():
         key = f"{failure['branch']}@{failure['at']}"
         node = nodes.setdefault(key, dict(id=key, branch=failure['branch'], at=failure['at'],
-                                         batch=failure['batch'], report=failure['report'], a1=[]))
-        if failure['category'] == 'a1':
-            node['a1'].append({k: v for k, v in failure.items() if k not in ('state', 'batch', 'report', 'tree', '_rank')})
-        elif failure['end'] is not None:
+                                         batch=failure['batch'], report=failure['report'], failures=[]))
+        node['failures'].append({k: v for k, v in failure.items() if k not in ('state', 'batch', 'report', 'tree', '_rank')})
+        if failure['end'] is not None:
             end_key = f"{failure['branch']}@{failure['end']}"
-            nodes.setdefault(end_key, dict(id=end_key, branch=failure['branch'], at=failure['end'],
-                                           batch=failure['batch'], report=failure['report'], a1=[]))
+            end_node = nodes.setdefault(end_key, dict(id=end_key, branch=failure['branch'], at=failure['end'],
+                                           batch=failure['batch'], report=failure['report'], failures=[]))
+            if failure['category'] in ('a1', 'a3'):
+                end_node['terminal'] = '规划' if failure['category'] == 'a1' else '物理'
+                if end_node is not node:
+                    end_node['failures'].append(node['failures'][-1])
     for source, report, tree in scoped:
         concrete = [f for f in tree['frames'] if (f['concrete'] or f['kind'] == 'step')
                     and f['exit'] is not None]
@@ -73,10 +77,10 @@ def graph(batch, seed, repeat=None):
                 frame = min(covering, key=lambda f: f['exit'] - f['enter'])
                 key = (branch, start, end)
                 relevant = [failure['category'] for failure in failures.values()
-                    if (failure['branch'] == branch and failure['category'] in ('a2', 'a3', 'pending')
+                    if (failure['branch'] == branch and failure['category'] in ('a1', 'a2', 'a3', 'pending')
                             and physical_start(failure) < end
                             and (failure['end'] if failure['end'] is not None else report['control_steps']) > start)]
-                category = max(relevant, key=lambda item: ('pending', 'a2', 'a3').index(item), default='success')
+                category = max(relevant, key=lambda item: ('pending', 'a1', 'a2', 'a3').index(item), default='success')
                 edges[key] = dict(id=f'{branch}:{start}-{end}', source=f'{branch}@{start}', target=f'{branch}@{end}',
                                   name=frame['name'], category=category, start=start, end=end,
                                   batch=str(source), report=report, arguments=frame['arguments'])
@@ -95,11 +99,12 @@ def graph(batch, seed, repeat=None):
             # A control-only rollback may have no failure marker or subsequent
             # action. Its two physical endpoints are still facts in the tree.
             for key, whose, at in ((source_key, branch, outcome['at']), (target_key, target_branch, start)):
-                nodes.setdefault(key, dict(id=key, branch=whose, at=at, batch=str(owner), report=own_report, a1=[]))
+                nodes.setdefault(key, dict(id=key, branch=whose, at=at, batch=str(owner), report=own_report, failures=[]))
             edges[(branch, outcome['id'], 'rollback')] = dict(id=f"{prefix}rollback-{outcome['id']}",
                 source=source_key, target=target_key, name='RetryState.restore', category='rollback',
                 start=start, end=start, batch=str(owner), report=own_report)
-    return dict(nodes=list(nodes.values()), edges=list(edges.values()), seed=seed, repeat=repeat)
+    return dict(nodes=list(nodes.values()), edges=list(edges.values()), seed=seed, repeat=repeat,
+                failure_counts=dict(Counter(f['category'] for f in failures.values())))
 
 
 def export_view(batch, seed, output, *, media=False, repeat=None):

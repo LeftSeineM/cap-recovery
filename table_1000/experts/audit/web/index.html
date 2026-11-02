@@ -15,17 +15,15 @@
   <label for="step">step <span class="hint">（选中树节点数 / 全部树节点数，✓ 媒体齐全）</span></label><select id="step"></select>
   <div id="step-info"></div>
   <div class="legend">
-    <span><i style="color:#329b78"></i>正常动作</span>
-    <span><i style="color:#cf941f"></i>a2 · 判据失败后同分支通过</span>
-    <span><i style="color:#d36962"></i>a3 · 物理失败，分支被回滚</span>
-    <span><i style="color:#9073bd"></i>pending · 中断未判定</span>
+    <span><i style="color:#9baab7"></i>正常动作</span>
+    <span><i style="color:#cf941f"></i>a2 · 技能内恢复后同一步通过</span>
+    <span><i style="color:#9baab7"></i>pending · 中断未判定</span>
     <span><i style="color:var(--chain);border-top-width:5px"></i>进入完整流程的链</span>
-    <span><b style="color:#a25900">a1×n</b>　节点上发生的 a1 次数</span>
     <span><b style="color:#5b6f8a">搜索×n</b>　节点上的搜索（最多的一层次数）</span>
     <span><b style="color:#3d6e8f">重试×n</b>　无运动重试（同一状态，搜索开销）</span>
-    <span>■ 被弃分支末端：a3 或 规划回滚</span>
-    <span class="hint">边按控制区间着色：一个失败跨几段边，这几段同色。失败数（专家线、step、树头）按失败计，与 records.failures 一致。</span>
-    <span><b>树结果</b>　<span class="tag ok">通过</span> <span class="tag b">b</span> 放弃的不可行 step　<span class="tag pending">中断</span> 未判定　<span class="tag error">出错</span> 运行异常退出</span>
+    <span>■ 被弃分支末端：规划 / 物理</span>
+    <span class="hint">仅 a2 的恢复区间突出显示；被弃分支末端注明规划或物理。失败数（专家线、step、树头）按失败计，与 records.failures 一致。</span>
+    <span><b>树结果</b>　<span class="tag ok">通过</span> <span class="tag b">b</span> step 放弃（b 计数也包含专家接住的异常）　<span class="tag pending">中断</span> 未判定　<span class="tag error">出错</span> 运行异常退出</span>
   </div>
   <p class="hint">树按开始时间排列，默认收缩，点击树头展开。点节点看三视角场景图，点边播放该段视频。</p>
   <div id="jobs"></div>
@@ -42,7 +40,6 @@
   <div id="missing" class="missing" hidden><div id="missing-text">媒体尚未生成</div><button id="render-item" class="primary">渲染</button></div>
   <div id="metrics"></div>
   <details id="timing" hidden><summary>所属帧 · CPU / wall</summary><pre id="timing-detail"></pre></details>
-  <details id="rejects" hidden><summary id="reject-title">a1</summary><div id="reasons"></div></details>
   <details id="search" hidden><summary>搜索开销（分层）</summary><div id="search-detail"></div></details>
   <details id="retries" hidden><summary id="retry-title">搜索开销</summary><pre id="retry-detail"></pre></details>
   <details id="checks" hidden><summary>判据与实测值</summary><pre id="measurements"></pre></details>

@@ -220,7 +220,7 @@ class Generator:
         machine's load meanwhile (``load``, see :class:`~table_1000.common.batch.Load`) and the CPU
         seconds the process used (``cpu_s``). ``repeat`` r > 0 runs it again from the same state
         with other random streams, for how its outcome varies: report ``episodes/<seed>-<r>.json``,
-        no checkpoints; recovery trajectories are retained for a2/a3 clips."""
+        no checkpoints; recovery trajectories are retained for a1/a2/a3 clips."""
         from table_1000.common.batch import Load
         from threadpoolctl import threadpool_info
         with Load() as load:
@@ -337,7 +337,7 @@ class Generator:
                 entry['wall_profile'] = checkpoint['wall_profile']
         if repeat:
             from table_1000.experts.audit.records import classify
-            if ctx.steps and any(f['category'] in ('a2', 'a3', 'pending') or f['components']
+            if ctx.steps and any(f['category'] in ('a1', 'a2', 'a3', 'pending') or f['components'] or f.get('kind') == 'check'
                                  for f in classify(ctx.trace.document())):
                 report['trajectory'] = f'repeat-trajectories/{name}.hdf5'
                 self.export_recording(ctx, self.output / report['trajectory'].removesuffix('.hdf5'), seed,

@@ -1,12 +1,12 @@
 // Expert iteration site: lines → steps → per-attempt search trees, from the /api/ routes of site.py.
 // Media is rendered only on an explicit click (or by the server when auto-render is on).
 const $ = id => document.getElementById(id), NS = 'http://www.w3.org/2000/svg';
-const colors = {success: '#329b78', a2: '#cf941f', a3: '#d36962', pending: '#9073bd'};
-const terminals = {a3: 'a3', planning: '规划回滚'};
+const colors = {a2: '#cf941f'};
+const terminals = {a1: '规划', a3: '物理', planning: '规划', rollback: '回滚'};
 const results = {success: 'ok', b: 'b', error: 'error', pending: 'pending'};
 const CATEGORIES = ['a1', 'a2', 'a3', 'b'];
 const failureText = counts => CATEGORIES.map(c => `${c} ${(counts || {})[c] || 0}`).join(' · ');
-const searchNames = {solver_calls: '求解调用', candidate_rejections: '候选淘汰', decision_exhaustions: '决策用尽'};
+const searchNames = {solver_calls: '求解调用', candidate_rejections: '候选淘汰', decision_exhaustions: '决策用尽', expert_rejections: '专家接住的规划拒绝'};
 const DX = 200, DY = 84;
 let line = null, summary = null, step = null, chosen = null, chosenItem = null, poll = null;
 const pad = n => String(n).padStart(2, '0');
@@ -104,7 +104,7 @@ function treeCard(tree, i, open) {
   el('b', {}, head, `树 ${i + 1}`);
   el('span', {class: 'tag ' + (results[tree.result] || '')}, head, tree.result_label);
   if (tree.selected) el('span', {class: 'tag chain'}, head, '进入完整流程');
-  for (const c of CATEGORIES) if (tree.failure_counts[c]) el('span', {class: 'tag fail'}, head, `${c}×${tree.failure_counts[c]}`);
+  for (const c of CATEGORIES) if (tree.failure_counts[c]) el('span', {class: 'tag' + (c === 'a2' ? ' recover' : '')}, head, `${c}×${tree.failure_counts[c]}`);
   if (!tree.edges.length) el('span', {class: 'tag idle', title: '物体已在前面的 step 处理，或判据直接满足'}, head, `本步无动作（${tree.frames} 帧）`);
   el('span', {class: 'meta'}, head, `${short(tree.batch)}${tree.repeat ? ` · repeat ${tree.repeat}` : ''} · 专家 ${tree.commit || '?'} · ${tree.started ? tree.started.replace('T', ' ') : '时间未知'} · ${tree.nodes.length} 节点`);
   if (tree.calls || tree.run_command) {
@@ -191,7 +191,7 @@ function drawTree(tree, body) {
     el('svg:path', {class: 'line', d, fill: 'none', stroke: colors[edge.category] || '#9baab7', 'stroke-width': 3}, g);
     el('svg:path', {class: 'hit', d, fill: 'none', stroke: 'transparent', 'stroke-width': 16}, g);
     const label = edge.name.length > 18 ? edge.name.slice(0, 17) + '…' : edge.name;
-    el('svg:text', {x: x2 + 8, y: y2 - DY / 2 + (x1 === x2 ? 4 : 18)}, g, `${label}${['a2', 'a3'].includes(edge.category) ? ' · ' + edge.category : ''}`);
+    el('svg:text', {x: x2 + 8, y: y2 - DY / 2 + (x1 === x2 ? 4 : 18)}, g, `${label}${edge.category === 'a2' ? ' · ' + edge.category : ''}`);
     el('svg:title', {}, g, `${edge.name} · ${edge.category} · ${edge.start}→${edge.end}`);
     activate(g, () => choose(tree, edge, false, g), `${edge.category}: ${edge.name}`);
   }
@@ -199,16 +199,15 @@ function drawTree(tree, body) {
     const [x, y] = at(node.id), on = tree.selected && chainNodes.has(node.id);
     const g = el('svg:g', {class: 'node', 'data-id': node.id}, svg);
     el('svg:circle', {class: 'hit', cx: x, cy: y, r: 20, fill: 'transparent'}, g);
-    if (node.terminal) el('svg:rect', {x: x - 12, y: y - 12, width: 24, height: 24, fill: '#fbe6e4', stroke: '#c4544b', 'stroke-width': 2}, g);
+    if (node.terminal) el('svg:rect', {x: x - 12, y: y - 12, width: 24, height: 24, fill: '#f1f4f6', stroke: '#7d8b96', 'stroke-width': 2}, g);
     else el('svg:circle', {cx: x, cy: y, r: 12, fill: on ? '#fff1d6' : '#fff', stroke: on ? 'var(--chain)' : '#7d9fb3', 'stroke-width': on ? 3 : 2}, g);
     el('svg:text', {x: x - 18, y: y + 4, 'text-anchor': 'end'}, g, `${node.at}`);
     let row = y + 4;
-    if (node.a1_count) { el('svg:text', {x: x + 17, y: row, class: 'badge'}, g, `a1×${node.a1_count}`); row += 13; }
     const searched = Object.values(node.search || {}).reduce((n, l) => Math.max(n, l.count), 0);
     if (searched) { el('svg:text', {x: x + 17, y: row, class: 'search'}, g, `搜索×${searched}`); row += 13; }
     const still = node.retries.filter(r => !r.moved).length;
     if (still) { el('svg:text', {x: x + 17, y: row, class: 'retry'}, g, `重试×${still}`); row += 13; }
-    if (node.terminal) el('svg:text', {x: x + 17, y: row, class: 'term', fill: '#a33a32'}, g, terminals[node.terminal]);
+    if (node.terminal) el('svg:text', {x: x + 17, y: row, class: 'term'}, g, terminals[node.terminal]);
     activate(g, () => choose(tree, node, true, g), `控制帧 ${node.at}`);
   }
 }
@@ -220,7 +219,7 @@ function clearDetail() {
   $('clip').pause(); $('clip').removeAttribute('src'); $('clip').hidden = true;
   $('still').removeAttribute('src'); $('still-link').hidden = true; $('missing').hidden = true;
   $('kind').textContent = '选择节点或边'; $('title').textContent = ''; $('metrics').replaceChildren();
-  for (const id of ['timing', 'rejects', 'search', 'retries', 'checks']) $(id).hidden = true;
+  for (const id of ['timing', 'search', 'retries', 'checks']) $(id).hidden = true;
   $('detail').textContent = '';
 }
 function table(rows) {
@@ -249,14 +248,9 @@ function choose(tree, item, isNode, element) {
     $('kind').textContent = item.terminal ? `被弃分支末端 · ${terminals[item.terminal]}` : '状态节点';
     $('title').textContent = `控制帧 ${item.at}`;
     const still = item.retries.filter(r => !r.moved), moved = item.retries.filter(r => r.moved);
-    $('metrics').append(table([['a1', `${item.a1_count} 次`],
-      ['搜索开销', Object.keys(item.search || {}).length ? '见下方分层' : '无记录'],
+    $('metrics').append(table([['搜索开销', Object.keys(item.search || {}).length ? '见下方分层' : '无记录'],
       ['无运动重试', `${still.length} 次` + (still.length ? `（${still.map(r => terminals[r.trigger]).join('、')} 触发）` : '')],
       ...(moved.length ? [['回滚到此', `${moved.length} 次（被弃分支见树）`]] : []), ['分支', item.branch, true], where]));
-    if (item.a1.length) {
-      $('rejects').hidden = false; $('reject-title').textContent = `a1 ×${item.a1_count} · 阶段与原因`;
-      $('reasons').replaceChildren(...item.a1.map(b => el('p', {}, undefined, `${b.count} × ${b.stage || b.criterion_id || '候选'}：${b.reason || ''}`)));
-    }
     const layers = Object.entries(item.search || {});
     if (layers.length) {
       $('search').hidden = false; $('search').open = true;

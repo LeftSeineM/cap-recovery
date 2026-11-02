@@ -28,8 +28,8 @@ from table_1000.scenes import resolve_batch_ref
 from . import codec, records
 
 CACHE = '.iteration'
-GRAPH_FORMAT = 5  # bump when _batch_graph's output changes, so cached graphs rebuild
-INDEX_FORMAT = 4  # likewise for line_index's output
+GRAPH_FORMAT = 7  # bump when _batch_graph's output changes, so cached graphs rebuild
+INDEX_FORMAT = 6  # likewise for line_index's output
 
 
 def read(path):
@@ -51,7 +51,7 @@ def write_text(path, value):
 
 def _summary_failure(failure):
     keys = ('id', 'category', 'stage', 'reason', 'criterion_id', 'measurements',
-            'at', 'end', 'start', 'recovery', 'cpu_s', 'wall_s', 'task_outcome', 'components')
+            'at', 'end', 'start', 'recovery', 'cpu_s', 'wall_s', 'task_outcome', 'components', 'kind')
     return {k: _compact(failure[k]) for k in keys if k in failure}
 
 
@@ -168,7 +168,7 @@ def _batch_graph(batch, seed):
     """Physical graph in audit.view's node/edge format, with source-step ownership.
 
     Equal control numbers in separate repeats/rollback branches are different
-    states. a1 stays on the owning step even at a shared step boundary. Edges
+    states. Rollbacks stay on the owning step even at a shared step boundary. Edges
     partition executed control intervals; their cost is the measured enclosing
     call's cost, explicitly labelled rather than invented per-frame timing.
     """
@@ -273,7 +273,7 @@ def _batch_graph(batch, seed):
                 branch = physical_branch(repeat, branch, at)
                 key = f'{prefix}{branch}@{at}'
                 group['nodes'].setdefault(key, dict(id=key, branch=prefix + branch, at=at,
-                    batch=str(source_path), repeat=repeat, a1=[], checks=[],
+                    batch=str(source_path), repeat=repeat, checks=[],
                     report_file=_report_file(source, seed, repeat)))
                 return group['nodes'][key]
             fs = [f for f in tree['frames'] if own.get((source, repeat, f['id'])) == number]
@@ -285,10 +285,7 @@ def _batch_graph(batch, seed):
             for failure in local:
                 point = node(failure['branch'], failure['at'])
                 item = _summary_failure(failure)
-                if failure['category'] == 'a1':
-                    point['a1'].append(item)
-                else:
-                    point['checks'].append(item)
+                point['checks'].append(item)
                 if failure['end'] is not None and (failure.get('recovery') or {}).get('kind') != 'rollback':
                     node(failure['branch'], failure['end'])
             # Archives repeat a prefix of the main record's facts; only the main record is read.
@@ -298,10 +295,10 @@ def _batch_graph(batch, seed):
                     if outcome['kind'] != 'rollback' or own.get((source, repeat, outcome['step'])) != number:
                         continue
                     restore = outcome['restore']
-                    # The a3 is read from whichever record (often the archive) owns its frames.
-                    owned = [f for f in failure_groups[number] if f['category'] == 'a3' and f.get('outcome_id') == outcome['id']
+                    # The rollback is read from the record owning its discarded frames.
+                    owned = [f for f in failure_groups[number] if f['category'] in ('a1', 'a3') and f.get('outcome_id') == outcome['id']
                              and f['report'].get('repeat', 0) == repeat]
-                    trigger = 'a3' if owned else 'planning' if outcome['id'] in planning else 'rollback'
+                    trigger = owned[0]['category'] if owned else 'planning' if outcome['id'] in planning else 'rollback'
                     group['edges'].append(dict(id=f'{prefix}rollback-{outcome["id"]}',
                         source=node(outcome['branch'], outcome['at'])['id'], target=node(restore['branch'], restore['at'])['id'],
                         name='RetryState.restore', category='rollback', trigger=trigger, reason=outcome.get('reason'),
@@ -320,11 +317,11 @@ def _batch_graph(batch, seed):
                         continue
                     frame = min(covering, key=lambda f: f['exit'] - f['enter'])
                     relevant = [f for f in local if f['branch'] == branch
-                        and f['category'] in ('a2', 'a3', 'pending')
+                        and f['category'] in ('a1', 'a2', 'a3', 'pending')
                         and records.physical_start(f) < end
                         and (f['end'] if f['end'] is not None else report['control_steps']) > start]
                     category = max((f['category'] for f in relevant),
-                                   key=lambda c: ('pending', 'a2', 'a3').index(c), default='success')
+                                   key=lambda c: ('pending', 'a1', 'a2', 'a3').index(c), default='success')
                     group['edges'].append(dict(id=f'{prefix}{branch}:{start}-{end}',
                         source=node(branch, start)['id'], target=node(branch, end)['id'],
                         name=frame['name'], category=category, start=start, end=end,
@@ -580,16 +577,6 @@ def line_index(line, seed=0, progress=None):
     for step in steps.values():
         step['attempts'].sort(key=lambda a: (a['batch'], a['repeat']))
         _matching_prefixes(step, seed, base=line)
-        for node in step['nodes']:
-            node['a1_count'] = len(node['a1'])
-            buckets = {}
-            for failure in node['a1']:
-                key = (failure.get('stage'), failure.get('reason'), failure.get('criterion_id'))
-                bucket = buckets.setdefault(key, dict(stage=key[0], reason=key[1], criterion_id=key[2], count=0, example_ids=[]))
-                bucket['count'] += 1
-                if len(bucket['example_ids']) < 5:
-                    bucket['example_ids'].append(failure['id'])
-            node['a1'] = list(buckets.values())
     summary = read((final_source or runs[-1])/'summary.json') if runs else {}
     value = dict(version=INDEX_FORMAT, line=line.name, sources=sources(line), scene=summary.get('scene'), robot=summary.get('robot'),
                  expert=summary.get('expert'), layout=summary.get('layout'), seed=seed,
@@ -651,11 +638,9 @@ def forest(step):
             target = merged.setdefault(canonical[identity], dict(
                 id=canonical[identity], at=node['at'], branch=node['branch'].removeprefix(prefix), batch=node['batch'],
                 media=node.get('media'), media_ready=node.get('media_ready', False),
-                media_unavailable=node.get('media_unavailable'), a1=[], a1_count=0,
+                media_unavailable=node.get('media_unavailable'),
                 checks=[], retries=[], members=[], search={}))
             target['members'].append(identity)
-            target['a1_count'] += node.get('a1_count', 0)
-            target['a1'] += node.get('a1', [])
             target['checks'] += node.get('checks', [])
             # Retried branches searched again from the same state: their layers add up per layer.
             for layer, row in node.get('search', {}).items():
@@ -671,7 +656,7 @@ def forest(step):
             source, target = canonical[edge['source']], canonical[edge['target']]
             if edge['category'] == 'rollback':
                 trigger = edge['trigger']
-                rollbacks[edge['source']] = trigger, target
+                rollbacks[edge['source']] = trigger, target, edge.get('failures', [])
                 merged[target]['retries'].append(dict(trigger=trigger, moved=source != target,
                                                       failures=edge.get('failures', [])))
             elif source != target and not any(edge['start'] < frame < edge['end']
@@ -681,11 +666,14 @@ def forest(step):
                 edges.append(dict(edge, source=source, target=target))
         # The discarded branch ends where its last motion did; a restore from
         # the fork itself (no motion) has no node of its own to mark.
-        for source, (trigger, fork) in rollbacks.items():
+        for source, (trigger, fork, failures) in rollbacks.items():
             branch = nodes[source]['branch']
             last = canonical[at[branch][max(at[branch])]]
             if last != fork:
                 merged[last]['terminal'] = trigger
+                for failure in failures:
+                    if failure not in merged[last]['checks']:
+                        merged[last]['checks'].append(failure)
         children = {}
         for edge in edges:
             children.setdefault(edge['source'], []).append(edge)
