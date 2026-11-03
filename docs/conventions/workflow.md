@@ -17,7 +17,7 @@ issue 是交给 agent 的任务书，用中文写。一个 issue 对应一个 PR
 ## PR
 
 - 从最新 `main` 创建分支。每个 PR 聚焦一个可独立审查的改动，用 `Closes #N` 关联 issue。
-- 跟进 `main` 可以 rebase；分支上有 commit 写进了实验台账时改用 merge（见[复现原则](../experiments/README.md#复现原则)）。
+- 跟进 `main` 用 `git merge main`，不 rebase、不 force push：台账引用的 commit 要能通过 `pull/<N>/head` 取回，而 rebase 后原来的 commit 不再在其中（见[复现原则](../experiments/README.md#复现原则)）；哪些 commit 会写进台账往往事后才知道。PR 用 squash 合并，分支上的 merge commit 不进入 `main`。
 - 改动验证后可以直接提交并推送到 PR 分支；合并到 `main` 需要项目负责人批准。
 - 说明写：要解决的问题、最终行为与用法、验证结果、已知限制，以及取舍：换来了什么、付出了什么（成功率、耗时、用到的特权信息等）、比较过哪些方案、为什么不用。不写开发过程。
 - 涉及成功率、耗时、物理指标或研究结论的 PR，说明中给出前后对比表（两边的 commit、seed 范围、关键指标、负载），有对应的[实验台账](../experiments/README.md)条目时附上链接。
