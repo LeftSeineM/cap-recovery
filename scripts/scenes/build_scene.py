@@ -8,12 +8,11 @@ For each layout and seed, makes the initial state as in ``table_1000/scenes/init
 (the layout's arrangement: ``scene.initialize`` for layout 0, ``scene.LAYOUTS[n]['arrange']``
 for layout n; penetration and settling checks, retried with sub-seeds) on CPU PhysX.
 ``--layouts`` takes numbers like ``--seeds`` (default 0); every layout is built for every seed.
-The seeds of each layout are split into ``--jobs`` contiguous parts, one process each, spread
+Each layout is packed into ``--jobs`` processes, spread
 over ``--gpus`` or submitted through ``--launcher`` (see ``table_1000/common/batch.py``); each
 seed's result is written when it is done, and seeds whose process stopped before theirs run
 again (``--retries``), as do seeds that raised an error (the error may be the process's: GPU memory,
-a lost device) and seeds without a valid state after an error in their process. Logs are in ``outputs/scenes/<scene>/<robot>/build/``; the processes' results go to
-``<output>/<scene>/<robot>/staging/``, removed once merged. Into ``<output>/<scene>/<robot>/``
+a lost device). Logs, manifests and per-seed products are retained in ``<output>/<scene>/<robot>/batch/workers/``. Into ``<output>/<scene>/<robot>/``
 (``<output>`` = ``assets/scenes`` by default), replacing what an earlier run wrote:
 
 - ``initial_states.hdf5``: the settled state of every seed with one, its ``seed`` and ``attempt``;
@@ -34,12 +33,10 @@ smallest valid seed's image also becomes ``asset_sources/scenes/<scene>/thumbnai
 
 import argparse
 import json
-import os
 from pathlib import Path
 import shutil
 import sys
 import time
-import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -58,86 +55,6 @@ def grid_size(text):
 def main_camera(spec):
     """The robot's first RGB camera."""
     return next(name for name, camera in spec.cameras.items() if camera.sensor.kind == 'rgb')
-
-
-def worker(args):
-    """Initial states of ``args.seeds`` in layout ``args.layout`` in this process, into ``args.work``,
-    per seed as it is done: ``states/<seed>.hdf5`` (a valid state), ``images/<seed>.jpg`` (all valid
-    seeds with ``--images``, else the first ``--first`` valid ones), then ``records/<seed>.json``, the
-    seed's result."""
-    work = args.work.resolve()
-    for name in ('states', 'images', 'records'):
-        (work / name).mkdir(parents=True, exist_ok=True)
-    render = args.images or args.first > 0
-    from table_1000.common.batch import worker_gpu
-    from table_1000.sim.isaaclab.app import start_app
-    from table_1000.sim.isaaclab.render import RT2_ARGS
-    app = start_app(gpu=worker_gpu(args.gpu), workers=4, cameras=render, extra_args=RT2_ARGS if render else ())
-    failed = False
-    try:
-        from PIL import Image
-        from table_1000.robots import load_spec
-        from table_1000.scenes import load, robot_config, initial_dir
-        from table_1000.common.batch import parse_seeds
-        from table_1000.scenes.initial import InitializationFailed, initial_state, write_states
-        from table_1000.sim.isaaclab.env import RobotEnv
-        root, assets = args.root.resolve(), args.assets.resolve()
-        scene = load(args.scene, 'scene', root)
-        spec = load_spec(Path(robot_config(scene, args.robot)['asset']).name, root)
-        camera = None
-        kwargs = {}
-        if render:
-            from table_1000.sim.isaaclab import render as rendering
-            rendering.configure()
-            camera = args.camera or getattr(scene, 'IMAGE_VIEW', None) or main_camera(spec)
-            if camera in scene.VIEWS:
-                kwargs['views'] = {camera: scene.VIEWS[camera]}
-            else:
-                kwargs['cameras'] = {camera: spec.cameras[camera]}
-        env = RobotEnv(scene, spec, assets, root=root, **kwargs)
-        pictured = 0
-
-        def save(record):
-            # Written whole or not at all: the file marks the seed as done.
-            path = work / 'records' / f'{record["seed"]}.json'
-            path.with_suffix('.tmp').write_text(
-                json.dumps({'robot': spec.name, 'camera': camera, 'record': record}, indent=1, default=float))
-            os.replace(path.with_suffix('.tmp'), path)
-
-        erred = None      # the last seed that raised an error in this process
-        arrange = scene.LAYOUTS[args.layout]['arrange'] if args.layout else None
-        for seed in parse_seeds(args.seeds):
-            record = None
-            try:
-                _, record = initial_state(env, scene, assets, seed, initialize=arrange)
-                write_states(work / 'states' / f'{seed}.hdf5',
-                             {seed: (record['attempt'], to_numpy(env.env.scene.get_state(is_relative=True)))}, {})
-                if args.images or pictured < args.first:
-                    # RT2 denoises over time: the first render after a state change blends in the last one.
-                    env.render([camera])
-                    Image.fromarray(env.render([camera])[camera]['rgb'][0]).save(work / 'images' / f'{seed}.jpg',
-                                                                                quality=90)
-                    pictured += 1
-                print(seed, 'attempt', record['attempt'], flush=True)
-            except InitializationFailed as error:
-                record = {'seed': seed, 'attempt': None, 'attempts': error.attempts}
-                if erred is not None:
-                    # The error may have broken the process: the seed runs again in a new one.
-                    record['after_error'] = erred
-                print(seed, 'no valid state', flush=True)
-            except Exception:
-                # Kept as this seed's result if it errs again when retried in a new process.
-                traceback.print_exc()
-                erred = seed
-                (work / 'states' / f'{seed}.hdf5').unlink(missing_ok=True)
-                record = {'seed': seed, 'attempt': None, 'attempts': record['attempts'] if record else [],
-                          'error': traceback.format_exc().strip().splitlines()[-1]}
-            save(record)
-        env.close()
-    except Exception:
-        traceback.print_exc()
-        failed = True
-    app.close(exit_code=int(failed))
 
 
 def to_numpy(tree):
@@ -167,11 +84,12 @@ def thumbnail(image, path):
 
 
 def main(argv=None):
-    from table_1000.common.batch import add_arguments, job_count, parse_seeds, process_name, run_batch, seed_range, seeds_record
+    from table_1000.common.batch import add_arguments, job_count, parse_seeds, seed_range, seeds_record
+    from table_1000.common.batch_runtime import run as run_program
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
     parser.add_argument('--robot', help='supported robot name, default scene.ROBOT; all builds every robot')
-    parser.add_argument('--seeds', nargs='+', required=True, help='a:b (a to b - 1) and single seeds')
+    parser.add_argument('--seeds', nargs='+', help='a:b (a to b - 1) and single seeds')
     parser.add_argument('--layouts', nargs='+', default=['0'],
                         help="layouts, like --seeds: 0 is scene.initialize, n is scene.LAYOUTS[n] (default 0)")
     add_arguments(parser)
@@ -181,21 +99,16 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, help='results go to <output>/<scene>/<robot>/ (default: assets/scenes)')
     parser.add_argument('--root', type=Path, default=ROOT, help='repository root holding the scene and robot sources')
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets')
-    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--layout', type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument('--work', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--first', type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.worker:
-        worker(args)
-        return
     from table_1000.scenes import load, robot_config, initial_dir
     from table_1000.scenes.initial import read_states, summarize, write_states
-    jobs = job_count(parser, args)
+    job_count(parser, args)
+    if not args.seeds:
+        parser.error('--seeds is required')
     seeds, layouts = parse_seeds(args.seeds), parse_seeds(args.layouts)
     if not seeds:
         parser.error('no seeds')
-    root = args.root.resolve()
+    root, args.assets = args.root.resolve(), args.assets.resolve()
     scene = load(args.scene, root=root)
     if args.robot == 'all':
         failures = []
@@ -221,44 +134,30 @@ def main(argv=None):
     if unknown:
         parser.error(f'layouts {seed_range(unknown)} not in the scene\'s LAYOUTS ({seed_range(defined) or "none"})')
     output = initial_dir(args.output or args.assets / 'scenes', args.scene, args.robot).resolve()
-    staging, logs = output / 'staging', root / 'outputs' / 'scenes' / args.scene / args.robot / 'build'
-
-    def result(item):
-        """The latest result of ``(layout, seed)`` and the process directory holding it, or ``(None, None)``."""
-        for work in reversed(parts[item]):
-            if (work / 'records' / f'{item[1]}.json').is_file():
-                return json.loads((work / 'records' / f'{item[1]}.json').read_text()), work
-        return None, None
-
-    def rerun(item):
-        done, _ = result(item)
-        return not done or 'error' in done['record'] or 'after_error' in done['record']
 
     def named(layout, group):
-        return (f'layout {layout} ' if layout else '') + f'seeds {seed_range(group)}'
-
-    shutil.rmtree(staging, ignore_errors=True)
-    shutil.rmtree(logs, ignore_errors=True)
+        return (f'layout {layout} ' if layout else '') + seed_range(group)
+    batch_output = output / 'batch'
     first = args.grid[0] * args.grid[1] if args.grid else 0
-    parts = {}
+    logs = batch_output / 'workers'
+    def result(item):
+        path = batch_output / 'records' / str(item[0]) / f'{item[1]}.json'
+        if not path.exists():
+            return None, None
+        report = json.loads(path.read_text())
+        if report['status'] == 'error':
+            return dict(robot=args.robot, camera=None, record=dict(seed=item[1], attempt=None,
+                        attempts=[], error=report['failure']['reason'])), None
+        return report, Path(report['work'])
 
-    def command(part, index, attempt):
-        # A part holds seeds of one layout (run_batch keys items by layout).
-        layout, part_seeds = part[0][0], [seed for _, seed in part]
-        name = process_name(f'part{index}', attempt)
-        for item in part:
-            parts.setdefault(item, []).append(staging / name)
-        argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--robot', args.robot, '--layout', str(layout),
-                '--seeds', *seed_range(part_seeds).split(), '--work', str(staging / name), '--first', str(first),
-                '--root', str(root), '--assets', str(args.assets.resolve())]
-        argv += ['--images'] if args.images else []
-        argv += ['--camera', args.camera] if args.camera else []
-        return argv, logs / f'{name}.log', f'{args.scene} {name} {named(layout, part_seeds)}'
-
+    options = vars(args) | dict(units=[(layout, seed) for layout in layouts for seed in seeds],
+        first=first)
+    if not args.dry_run:
+        shutil.rmtree(batch_output, ignore_errors=True)
     started = time.perf_counter()
-    items = [(layout, seed) for layout in layouts for seed in seeds]
-    batch = run_batch(items, command=command, count=jobs, gpus=args.gpus, launcher=args.launcher,
-                      retries=args.retries, missing=rerun, key=lambda item: item[0], root=root)
+    batch = run_program('table_1000.scenes.build_program:program', options, root=root, output=batch_output)
+    if args.dry_run:
+        return
     missing, checkout = set(batch), batch.commit
     total_s = time.perf_counter() - started
 
@@ -270,9 +169,9 @@ def main(argv=None):
             if not done:
                 continue
             robot, camera, records[seed] = done['robot'], done['camera'], done['record']
-            if (work / 'states' / f'{seed}.hdf5').is_file():
+            if work is not None and (work / 'states' / f'{seed}.hdf5').is_file():
                 states.update(read_states(work / 'states' / f'{seed}.hdf5')[1])
-            if (work / 'images' / f'{seed}.jpg').is_file():
+            if work is not None and (work / 'images' / f'{seed}.jpg').is_file():
                 images[seed] = work / 'images' / f'{seed}.jpg'
         for seed in seeds:
             records.setdefault(seed, {'seed': seed, 'attempt': None, 'attempts': [], 'problems': ['process exited']})
@@ -315,7 +214,6 @@ def main(argv=None):
         problems += [(f'layout {layout} ' if layout else '') + f'seeds without a valid state: {seed_range(without)}'] if without else []
     if len(overview) > 1:
         grid(*zip(*overview), args.grid[0], output / 'layouts.jpg')
-    shutil.rmtree(staging, ignore_errors=True)
     if problems:
         raise SystemExit('; '.join(problems))
 

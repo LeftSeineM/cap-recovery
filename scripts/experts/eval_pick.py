@@ -11,9 +11,9 @@ YAW POSE`` (world frame: table centre at the origin, robot on the -Y side) runs 
 in the open scenario instead.
 
 Every trial of every group is a work unit; the units of one robot and scenario share a process
-kind (one environment), and ``--jobs`` processes run at once: spread over ``--gpus`` (default one
-per GPU), or each submitted through ``--launcher PREFIX``, a job scheduler that picks its GPU and
-sets ``CUDA_VISIBLE_DEVICES`` (e.g. ``--launcher "srun --gres=gpu:1"``, default 16 jobs). Each
+kind (one environment); local concurrency follows ``--gpus``, or all jobs are submitted through
+``--launcher PREFIX``, a job scheduler that picks its GPU and
+sets ``CUDA_VISIBLE_DEVICES`` (e.g. ``--launcher "srun --gres=gpu:1"``, default auto from timing history). Each
 trial writes ``<robot>/<scenario>-s<seed>/trials/<index>.json``; trials whose process died before
 that run again (``--retries``, default 1). Each group gets ``summary.json`` (success by object,
 failure reasons, unreachable placements) and ``trials.jsonl``; ``--output`` gets ``summary.json``
@@ -27,7 +27,6 @@ from pathlib import Path
 import shutil
 import sys
 import time
-import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -77,52 +76,6 @@ def trial_path(directory, index):
     return directory / 'trials' / f'{index:04d}.json'
 
 
-def worker(args):
-    """Run units ``args.units`` (``<seed>:<index>``) of robot ``args.robot`` in scenario ``args.scenario``,
-    each writing its report (and with ``--video`` a video) into its group."""
-    from table_1000.common.batch import worker_gpu
-    from table_1000.sim.isaaclab.app import start_app
-    app = start_app(gpu=worker_gpu(args.gpu), workers=4, cameras=args.video)
-    failed = False
-    evaluator = None
-    work = args.work
-    work.mkdir(parents=True, exist_ok=True)
-    try:
-        from table_1000.experts.evals.pick_eval import Evaluator, scene
-        from table_1000.sim.isaaclab.video import encode
-        views = {'wide': WIDE, 'close': CLOSE} if args.video else {}
-        evaluator = Evaluator(scene(args.gap, args.lift, robot=args.robot, scenario=args.scenario), args.assets, work, ROOT,
-                              views, args.random_pushes, profile=args.profile)
-        units = [tuple(map(int, unit.split(':'))) for unit in args.units]
-        for seed in sorted({seed for seed, _ in units}):
-            directory = group_dir(args.output, args.robot, args.scenario, seed, bool(args.case))
-            selected = {index for unit_seed, index in units if unit_seed == seed}
-            for index, name, placement in tasks(args, args.scenario, seed):
-                if index not in selected:
-                    continue
-                video = None
-                if args.video:
-                    video = Recorder(evaluator.env, views, work / 'frames')
-                    aim_close_view(evaluator.env, placement)
-                report = evaluator.trial(name, placement, seed * 100000 + index, video)
-                report.update(index=index, robot=args.robot, scenario=args.scenario, seed=seed)
-                if video is not None:
-                    (directory / 'videos').mkdir(parents=True, exist_ok=True)
-                    encode(work / 'frames', 25, directory / 'videos' / f'{index:03d}_{name}_{report["status"]}.mp4')
-                path = trial_path(directory, index)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.with_suffix('.part').write_text(dumps(report))
-                path.with_suffix('.part').replace(path)
-                print(args.robot, args.scenario, seed, index, name, placement['pose'], report['status'],
-                      report.get('failure', {}).get('reason', ''), f"{report['wall_s']:.0f} s", flush=True)
-    except Exception:
-        traceback.print_exc()
-        failed = True
-    if evaluator is not None:
-        evaluator.close()
-    app.close(exit_code=int(failed))
-
-
 def aim_close_view(env, placement):
     """Point the close camera at the object, from the side its walls leave open."""
     import torch
@@ -169,7 +122,8 @@ def summarize(reports):
 
 
 def main(argv=None):
-    from table_1000.common.batch import add_arguments, job_count, run_batch
+    from table_1000.common.batch import add_arguments, job_count
+    from table_1000.common.batch_runtime import run as run_program
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--robots', nargs='+', default=['x1pro'], help='robot names (asset_sources/robots/<name>)')
     parser.add_argument('--scenarios', nargs='+', default=['open'], choices=SCENARIOS, help='obstacles around the object')
@@ -186,55 +140,27 @@ def main(argv=None):
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets', help='asset root holding robots/<name>')
     add_arguments(parser)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--profile', action='store_true', help='record nested wall/CPU times and available instructions')
-    parser.add_argument('--robot', help=argparse.SUPPRESS)
-    parser.add_argument('--scenario', help=argparse.SUPPRESS)
-    parser.add_argument('--units', nargs='+', help=argparse.SUPPRESS)
-    parser.add_argument('--work', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     args.output = args.output.resolve()
-    if args.worker:
-        worker(args)
-        return
+    args.assets = args.assets.resolve()
     if args.case and (args.scenarios != ['open'] or len(args.seeds) > 1):
         parser.error('--case places objects in the open scenario, once')
-    jobs = job_count(parser, args)
+    job_count(parser, args)
     units = [(robot, scenario, seed, index) for robot in args.robots for scenario in args.scenarios
              for seed in args.seeds for index, _, _ in tasks(args, scenario, seed)
              if args.select is None or index in args.select]
     if not units:
         parser.error('give --trials or --case')
-    shutil.rmtree(args.output, ignore_errors=True)
-    args.output.mkdir(parents=True)
-    passthrough = ['--gap', str(args.gap), '--lift', str(args.lift), '--output', str(args.output),
-                   '--assets', str(args.assets.resolve()), '--random-pushes', str(args.random_pushes)]
-    if args.trials:
-        passthrough += ['--trials', str(args.trials)]
-    if args.objects:
-        passthrough += ['--objects', *args.objects]
-    for case in args.case or ():
-        passthrough += ['--case', *case]
-    if args.profile:
-        passthrough.append('--profile')
-    if args.video:
-        passthrough.append('--video')
-
+    if not args.dry_run:
+        shutil.rmtree(args.output, ignore_errors=True)
     def directory(unit):
         return group_dir(args.output, *unit[:3], bool(args.case))
-
-    def command(group, index, attempt):
-        robot, scenario = group[0][:2]
-        name = f'part{index}' + (f'-retry{attempt}' if attempt else '')
-        argv = [sys.executable, str(Path(__file__).resolve()), '--worker', '--robot', robot, '--scenario', scenario,
-                '--work', str(args.output / 'parts' / name),
-                '--units', *(f'{seed}:{trial}' for _, _, seed, trial in sorted(group)), *passthrough]
-        return argv, args.output / 'parts' / f'{name}.log', f'{name} {robot} {scenario}'
-
     started = time.perf_counter()
-    missing = run_batch(units, key=lambda unit: unit[:2], cost=lambda unit: 1., count=jobs,
-                        command=command, missing=lambda unit: not trial_path(directory(unit), unit[3]).exists(),
-                        gpus=args.gpus, launcher=args.launcher, retries=args.retries)
+    missing = run_program('table_1000.experts.evals.pick_program:program', vars(args) | dict(units=units),
+                          root=ROOT, output=args.output)
+    if args.dry_run:
+        return
     groups = {}
     for unit in units:
         groups.setdefault(directory(unit), []).append(unit)
@@ -258,7 +184,7 @@ def main(argv=None):
               f"reachable success {entry['reachable_rate'] if entry['reachable_rate'] is None else round(entry['reachable_rate'], 3)}")
     print(f"total {overall['total_s']:.0f} s")
     if missing:
-        raise SystemExit(f'no report of {len(missing)} trials; see {args.output / "parts"}')
+        raise SystemExit(f'no report of {len(missing)} trials; see {args.output / "workers"}')
 
 
 if __name__ == '__main__':

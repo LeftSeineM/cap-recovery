@@ -1,7 +1,7 @@
 """Evaluate isolated assets, recording every seed for later rendering.
 
 Formal: --config configs/asset_grasp_<scene>.py (full clean checkout only).
-Development: --dev [--name LABEL] (--config CONFIG [--asset PATH ...] | --asset PATH ... --robot ROBOT)
+Development: --dev [--name LABEL] (--config CONFIG [--items PATH ...] | --items PATH ... --robot ROBOT)
 [--seeds 0 1] [--video].
 Replay: render --result RESULT/objects/CATEGORY/ID --seed 0 --output VIDEO.mp4.
 Compare: compare --baseline BASELINE --run RUN --output OUTPUT.
@@ -18,16 +18,16 @@ sys.path.insert(0, str(ROOT))
 
 def main(argv=None):
     from table_1000.common.batch import add_arguments, job_count
-    from table_1000.experts.evals.asset_grasp.runner import run, worker
+    from table_1000.experts.evals.asset_grasp.runner import run
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', type=Path,
                         help='test profile: scene asset list, exclusions, robot and trials (configs/asset_grasp_*.py)')
-    parser.add_argument('--asset', nargs='+', help='asset paths, e.g. objects/soldering_iron/000000; '
+    parser.add_argument('--items', nargs='+', help='asset paths, e.g. objects/soldering_iron/000000; '
                         'with --config a subset of its assets, without it any built asset')
     parser.add_argument('--robot', help='robot (overrides the config; required without --config)')
     parser.add_argument('--physics', choices=['isaac-cpu', 'isaac-gpu'], default='isaac-cpu')
     parser.add_argument('--trials', type=int, help=f'random placements per asset (default config TRIALS, else {TRIALS})')
-    parser.add_argument('--seeds', nargs='+', type=int, help='explicit seeds instead of --trials')
+    parser.add_argument('--seeds', nargs='+', help='explicit seeds or a:b ranges instead of --trials')
     parser.add_argument('--center', nargs=2, type=float, help='world XY; default WORK + (0.05, 0) m')
     parser.add_argument('--region-size', type=float, default=.10, help='square side length in metres')
     parser.add_argument('--diagnostic-shake', action='store_true', help='append the optional vigorous wrist diagnostic')
@@ -39,18 +39,14 @@ def main(argv=None):
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets')
     parser.add_argument('--dev', action='store_true', help='development run under runs/grasp/<run_name>')
     parser.add_argument('--name', help='development run label')
-    parser.add_argument('--output', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--result', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--render-worker', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--render-output', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--work', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--output', type=Path, help='batch directory; --dry-run may be followed by a real run here')
     add_arguments(parser)
     args = parser.parse_args(argv)
-    if args.worker:
-        worker(args, ROOT)
-    else:
-        run(args, ROOT, job_count(parser, args), parser.error)
+    args.assets = args.assets.resolve()
+    if args.config:
+        args.config = args.config.resolve()
+    job_count(parser, args)
+    run(args, ROOT, parser.error)
 
 
 def render_main(argv):
@@ -63,7 +59,8 @@ def render_main(argv):
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets')
     add_arguments(parser)
     args = parser.parse_args(argv)
-    render_run(args, ROOT, job_count(parser, args))
+    job_count(parser, args)
+    render_run(args, ROOT)
 
 
 if __name__ == '__main__':

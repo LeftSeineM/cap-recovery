@@ -4,23 +4,30 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from tests.common.batch_worker import manifest, publish
 
-from table_1000.physics.test import main, run_case, summary
+from table_1000.physics.test import PhysicalFailure, main, run_case, run_test, summary
 
 
 class CaseResultsTests(unittest.TestCase):
     def test_definition_import_failure_closes_kit_with_nonzero_status(self):
-        # Kit's close() normally terminates the process before Python can
-        # propagate an exception. It must receive the failure explicitly.
+        from table_1000.common import batch_runtime as runtime
         with tempfile.TemporaryDirectory() as temporary:
-            app = Mock()
-            with patch('table_1000.sim.isaaclab.app.start_app', return_value=app), \
-                 patch('table_1000.physics.test.subprocess.run', return_value=Mock(stdout='GPU')), \
-                 patch('table_1000.physics.test.load_tests', side_effect=ImportError('broken definition')):
-                with self.assertRaisesRegex(ImportError, 'broken definition'):
-                    main(['--worker', temporary, '--physics', 'isaac-cpu', '--gpu', '0',
-                          '--script', str(Path(temporary) / 'physics_test.py')])
-            app.close.assert_called_once_with(exit_code=1)
+            root = Path(temporary)
+            units = [runtime.Unit((i,), dict(seed=i), f'{i}.json', ('physics', str(i)), ('load',)) for i in range(2)]
+            from dataclasses import asdict
+            path = root / 'units.json'
+            path.write_text(json.dumps(dict(root=str(root), output=str(root), work=str(root), options={},
+                commit='submitted', attempt=0, program='fake:program', units=[asdict(u) for u in units])))
+            program = Mock()
+            program.run_unit.side_effect = ImportError('broken definition')
+            with patch.object(runtime, '_program', return_value=program):
+                runtime.work(path, gpu=0)
+            self.assertEqual(program.run_unit.call_count, 2)
+            for i in range(2):
+                result = json.loads((root / f'{i}.json').read_text())
+                self.assertEqual(result['status'], 'error')
+                self.assertIn('broken definition', result['failure']['reason'])
 
     def test_benchmark_failure_removes_old_case_results(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -36,18 +43,54 @@ class CaseResultsTests(unittest.TestCase):
             other.write_bytes(b'other result')
             source = root / 'physics_test.py'
             source.write_text('TESTS = {}\n')
-            with patch('table_1000.physics.test.benchmark', side_effect=AssertionError('benchmark failed')), \
+            with patch('table_1000.physics.test.benchmark', side_effect=PhysicalFailure('benchmark failed')), \
                  patch('table_1000.physics.test.run_video') as render:
-                with self.assertRaisesRegex(AssertionError, 'benchmark failed'):
-                    run_case(root / 'object.usda', 'pull', None, output, None, 0, {}, standard=True)
+                result = run_case(root / 'object.usda', 'pull', None, output, None, 0, {}, standard=True)
                 render.assert_not_called()
             self.assertFalse(video.exists())
             self.assertFalse((case / 'frames').exists())
-            result = json.loads((case / 'result.json').read_text())
+            self.assertFalse((case / 'result.json').exists())
             self.assertEqual(result['execution_status'], 'failed')
             self.assertIn('benchmark failed', result['error'])
             self.assertEqual(other.read_bytes(), b'other result')
             self.assertEqual(source.read_text(), 'TESTS = {}\n')
+            with self.assertRaisesRegex(PhysicalFailure, 'did not settle'):
+                run_test(Mock(side_effect=AssertionError('did not settle')), None)
+            from types import SimpleNamespace
+            from table_1000.common import batch, batch_runtime as runtime
+            from table_1000.physics.batch_program import program
+            options = dict(source=str(root), units=[('cup', 'isaac-cpu', 'pull')],
+                           num_envs=1, benchmark=False, jobs=1, retries=1, gpus=[0])
+            rounds = []
+            def jobs(commands, gpus):
+                for command, _, _ in commands:
+                    data = manifest(command)
+                    rounds.append(data['attempt'])
+                    context = SimpleNamespace(options=options, loaded=dict(tests={'pull': None},
+                        app=None, startup=0., gpu_info={}, utilization=None))
+                    unit = next(program.units(options))
+                    if data['attempt'] == 0:
+                        with patch('table_1000.physics.test.run_video', side_effect=KeyboardInterrupt):
+                            with self.assertRaises(KeyboardInterrupt):
+                                program.run_unit(context, unit)
+                        self.assertFalse(Path(unit.result).exists())
+                    else:
+                        with patch('table_1000.physics.test.run_video', side_effect=PhysicalFailure('did not settle')):
+                            result = program.run_unit(context, unit)
+                        self.assertEqual(result.report['status'], 'failed')
+                        self.assertFalse(Path(unit.result).exists())
+                        with patch.object(runtime, '_program', return_value=Mock(run_unit=Mock(return_value=result))):
+                            runtime.work(command[command.index('table_1000.common.batch_runtime') + 1], gpu=0)
+                return []
+            with patch.object(batch, 'run_jobs', side_effect=jobs):
+                outcome = runtime.run('table_1000.physics.batch_program:program', options,
+                    root=root, output=root / 'batch')
+            self.assertEqual(rounds, [0, 1])
+            self.assertEqual(outcome, [])
+            self.assertFalse(runtime._pending(root / 'batch', next(program.units(options))))
+            published = json.loads(Path(next(program.units(options)).result).read_text())
+            self.assertEqual(published['status'], 'failed')
+            self.assertEqual(published['execution_status'], 'failed')
 
     def test_default_run_skips_the_standard_benchmark(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,12 +113,11 @@ class CaseResultsTests(unittest.TestCase):
             edited.write_text("TESTS = {'drop': None, 'close': None}\n")
             def run(jobs, gpus):
                 for command, _, _ in jobs:
-                    output = Path(command[command.index('--worker') + 1]) / 'physics_test' / command[command.index('--physics') + 1]
-                    (output / 'drop').mkdir(parents=True)
-                    (output / 'drop' / 'result.json').write_text(json.dumps({
-                        'execution_status': 'completed', 'conditions': {'isaac_version': ['5.1.0']},
-                        'environments': {'count': 1}, 'metrics': {},
-                        'performance': {'no_render': {'RTF': 1}, 'video_end_to_end': {'RTF': 1}}}))
+                    data = manifest(command)
+                    for unit in data['units']:
+                        publish(data, unit, dict(status='success', execution_status='completed',
+                            conditions={'isaac_version': ['5.1.0']}, environments={'count': 1}, metrics={},
+                            performance={'no_render': {'RTF': 1}, 'video_end_to_end': {'RTF': 1}}))
                 return []
             with patch('table_1000.common.batch.run_jobs', side_effect=run) as jobs, \
                  patch('table_1000.physics.test.ROOT', Path(checkout)), patch('builtins.print') as output:
@@ -85,8 +127,9 @@ class CaseResultsTests(unittest.TestCase):
             self.assertEqual(jobs.call_count, 1)
             commands = jobs.call_args.args[0]
             self.assertEqual(jobs.call_args.args[1], [1, 2])
-            self.assertEqual(sorted(label for _, _, label in commands),
-                             ['cabinet/000000 isaac-cpu', 'cabinet/000000 isaac-gpu', 'pen/000002 isaac-cpu', 'pen/000002 isaac-gpu'])
+            submitted = [tuple(unit['key']) for command, _, _ in commands for unit in manifest(command)['units']]
+            self.assertEqual(sorted(submitted), sorted((asset, backend, 'drop') for asset in ('pen/000002', 'cabinet/000000')
+                                                     for backend in ('isaac-cpu', 'isaac-gpu')))
             for reference in ('pen/000002', 'cabinet/000000'):
                 self.assertTrue((root / reference / 'physics_test/summary.json').exists())
 
@@ -147,7 +190,7 @@ class CaseResultsTests(unittest.TestCase):
                  patch('traceback.print_exc'):
                 with self.assertRaisesRegex(SystemExit, 'cabinet/000000'):
                     main(['--source', temporary, '--physics', 'isaac-cpu'])
-            self.assertEqual([label for _, _, label in jobs.call_args.args[0]], ['pen/000002 isaac-cpu'])
+            self.assertEqual([tuple(u['key']) for c, _, _ in jobs.call_args.args[0] for u in manifest(c)['units']], [('pen/000002', 'isaac-cpu', 'drop')])
             broken = json.loads((root / 'cabinet/000000/physics_test/summary.json').read_text())
             self.assertIn('broken', broken['error'])
             self.assertTrue((root / 'pen/000002/physics_test/summary.json').exists())

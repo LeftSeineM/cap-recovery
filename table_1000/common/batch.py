@@ -1,10 +1,10 @@
 """Batch runs of the scripts: work units packed into processes, seeds, the commit they ran from and the load.
 
 A batch script's work units (seeds, cases, asset backends) are packed into ``--jobs`` processes
-(:func:`plan`) that run at once: spread evenly over the local ``--gpus``, or each submitted through
+(:func:`plan`): local concurrency follows ``--gpus``, or all jobs are submitted through
 ``--launcher``, a job scheduler's command prefix such as ``srun --gres=gpu:1`` that picks the GPU.
 Units without a result (their process stopped first) run again (``--retries``); see
-:func:`run_batch`. Seeds are written as in ``--seeds``: ``a:b`` (``a`` to ``b - 1``) and single
+:mod:`table_1000.common.batch_runtime`. Seeds are written as in ``--seeds``: ``a:b`` (``a`` to ``b - 1``) and single
 seeds, e.g. ``0:100`` or ``20 64``.
 
 Git batches use one private detached worktree for all rounds, with the current Python environment
@@ -27,8 +27,6 @@ import tempfile
 import threading
 import time
 
-# Processes at once through a launcher, unless --jobs says otherwise.
-LAUNCHED_JOBS = 16
 LOAD_PERIOD = 30.   # s between samples of the load (see Load)
 SHARED = ('assets', 'data', 'runs', 'outputs')
 
@@ -73,24 +71,22 @@ def _run_processes(jobs, count, run):
 
 
 def add_arguments(parser):
-    """``--jobs``, ``--gpus``, ``--launcher`` and ``--retries`` of a batch script, and its workers' ``--gpu``."""
-    parser.add_argument('--jobs', type=int, help=f'processes at once (default: one per --gpus; {LAUNCHED_JOBS} with --launcher)')
-    parser.add_argument('--gpus', type=int, nargs='+', help='local GPUs the processes are spread over (default 0); '
-                        'not with --launcher')
-    parser.add_argument('--launcher', help='command prefix of a job scheduler that runs a process on a free GPU it sets '
-                        'CUDA_VISIBLE_DEVICES to; instead of --gpus')
-    parser.add_argument('--retries', type=int, default=1, help='reruns of work without a result, e.g. its process stopped first')
+    """Common batch options; local concurrency is the number of entries in --gpus."""
+    parser.add_argument('--jobs', type=lambda v: 'auto' if v == 'auto' else int(v), default='auto',
+                        help='whole-batch job count (default auto, from configuration and timing history)')
+    parser.add_argument('--dry-run', action='store_true', help='write plan.json without submitting work')
+    parser.add_argument('--gpus', type=int, nargs='+', help='local GPUs, one concurrent worker per entry (default 0)')
+    parser.add_argument('--launcher', help='scheduler command prefix; submits all jobs instead of local --gpus')
+    parser.add_argument('--retries', type=int, default=1, help='reruns of missing/error units; physical failures are results')
     parser.add_argument('--gpu', type=int, help=argparse.SUPPRESS)
 
 
 def job_count(parser, args):
-    """The processes at once of :func:`add_arguments`' options; sets the default ``args.gpus``."""
+    """Normalize local GPUs; configuration resolves the requested whole-batch job count."""
     if args.launcher and args.gpus:
         parser.error('--gpus runs locally; with --launcher the scheduler picks the GPUs')
-    if args.jobs is not None and args.jobs < 1:
-        parser.error('--jobs must be positive')
     args.gpus = args.gpus or [0]
-    return args.jobs or (LAUNCHED_JOBS if args.launcher else len(args.gpus))
+    return args.jobs
 
 
 def parse_seeds(values):
@@ -159,8 +155,8 @@ def run_jobs(jobs, gpus):
     return [job[2] for job, code in zip(jobs, codes) if code]
 
 
-def launch(jobs, launcher, limit):
-    """Run ``(command, log, label)`` jobs, ``limit`` at a time, each as ``<launcher> bash -c '<command> > <log> 2>&1'``;
+def launch(jobs, launcher):
+    """Submit all ``(command, log, label)`` jobs, each as ``<launcher> bash -c '<command> > <log> 2>&1'``;
     returns the failed labels. The launcher waits for a free GPU, sets ``CUDA_VISIBLE_DEVICES`` to it and returns
     the command's status; the command gets no ``--gpu`` and reads its GPU with :func:`worker_gpu`."""
     def run(job, start):
@@ -173,7 +169,7 @@ def launch(jobs, launcher, limit):
         return code
 
     # Launcher clients cancel their remote jobs when stopped (e.g. srun, gq submit --wait).
-    codes = _run_processes(jobs, min(limit, len(jobs)), run)
+    codes = _run_processes(jobs, len(jobs), run)
     return [job[2] for job, code in zip(jobs, codes) if code]
 
 
@@ -189,17 +185,21 @@ def pack(items, cost, count):
     return groups
 
 
-def plan(items, key, cost, count):
+def plan(items, key, cost, count, *, timing=None):
     """Groups of ``items`` for ``count`` processes: items of one ``key(item)`` share a process kind (e.g. one
     robot and physics backend) and are packed by :func:`pack`, or without ``cost`` (all alike) split into
     contiguous runs; each key gets processes in proportion to its total cost, at least one and at most one
-    per item. With more keys than ``count``, there are more groups than ``count``: :func:`run_batch` runs
-    ``count`` of them at a time."""
+    per item. With more keys than ``count``, there are more groups than ``count``;
+    local concurrency remains the number of entries in --gpus. Timed packing retains these hard partitions
+    and includes their startup/load costs when allocating processes."""
+    if timing is not None:
+        cost = timing.costs.__getitem__
     weight = cost or (lambda item: 1)
     by_key = {}
     for item in items:
         by_key.setdefault(key(item), []).append(item)
-    totals = {k: sum(map(weight, values)) for k, values in by_key.items()}
+    totals = {k: timing.wall(values) if timing is not None else sum(map(weight, values))
+              for k, values in by_key.items()}
     counts = {k: max(1, round(count * total / sum(totals.values()))) for k, total in totals.items()}
     while sum(counts.values()) > count and any(c > 1 for c in counts.values()):
         k = min((k for k in counts if counts[k] > 1), key=lambda k: totals[k] / counts[k])
@@ -210,8 +210,45 @@ def plan(items, key, cost, count):
         if not open_keys:
             break
         counts[max(open_keys, key=lambda k: totals[k] / counts[k])] += 1
-    return [group for k, values in by_key.items()
-            for group in (pack(values, cost, counts[k]) if cost else split(values, counts[k]))]
+    groups = [group for k, values in by_key.items()
+              for group in (_timed_plan(values, counts[k], timing) if timing is not None else
+                            pack(values, cost, counts[k]) if cost else split(values, counts[k]))]
+    return sorted(groups, key=timing.wall, reverse=True) if timing is not None else groups
+
+
+def _timed_plan(items, count, timing):
+    """Costliest units first, filling jobs with a fresh remaining-work target."""
+    from collections import Counter, deque
+    count = min(count, len(items))
+    pending = deque(sorted(items, key=timing.costs.__getitem__, reverse=True))
+    remaining = Counter(timing.load_key(item) for item in pending)
+    work = sum(timing.costs[item] for item in pending)
+    groups = []
+    while pending:
+        left = count - len(groups)
+        target = (work + sum(timing.loads[asset] for asset in remaining) + left * timing.startup) / left
+        group, loaded, wall = [], set(), timing.startup
+        while pending:
+            item = pending[0]
+            asset = timing.load_key(item)
+            added = timing.costs[item] + (0. if asset in loaded else timing.loads[asset])
+            if group and left > 1 and (wall + added > target or len(pending) < left):
+                break
+            pending.popleft()
+            group.append(item)
+            loaded.add(asset)
+            wall += added
+            work -= timing.costs[item]
+            remaining[asset] -= 1
+            if not remaining[asset]:
+                del remaining[asset]
+            if wall >= target and left > 1:
+                break
+        # Load each environment once, keeping its units together inside the job.
+        order = {timing.load_key(item): i for i, item in enumerate(group)}
+        group.sort(key=lambda item: order[timing.load_key(item)])
+        groups.append(group)
+    return sorted(groups, key=timing.wall, reverse=True)
 
 
 class BatchResult(list):
@@ -313,46 +350,6 @@ def _pinned_command(argv, root, checkout):
     # Do not resolve/rewrite argv[0]: it is the original environment's Python, often in .venv/.
     pythonpath = os.pathsep.join(filter(None, (str(checkout), os.environ.get('PYTHONPATH'))))
     return ['env', '-C', str(checkout), f'PYTHONPATH={pythonpath}', str(argv[0]), *map(redirect, argv[1:])]
-
-
-def run_batch(items, *, command, missing, count, gpus, launcher=None, retries=1, key=lambda item: None, cost=None,
-              root=None, source=None):
-    """Run ``items`` (work units) as processes (:func:`plan`), at most ``count`` at a time, on ``gpus``
-    (spread evenly, see :func:`run_jobs`) or each through ``launcher`` (see :func:`launch`).
-    ``command(group, index, attempt)`` gives a process's ``(argv, log, label)``. Items still ``missing(item)``
-    after a round (their process died, was killed or failed to start before writing them, or a result that
-    ``missing`` counts as not one, such as an error that may be the process's) run again, up to ``retries``
-    more rounds, in as many processes as before at most. Returns a :class:`BatchResult` of missing items.
-
-    A Git ``root`` (default: this package's repository) is checked out once before calling ``command``;
-    all rounds use its scripts, source paths and imports. Its ignored assets/data/runs/outputs remain
-    shared with ``root``. Dirty roots include working files and nonignored untracked files; non-Git
-    roots run in place. Reports use the result's ``record(directory)`` to save its patch and commit
-    rather than inspecting the mutable original checkout after the workers finish.
-    Pass that result as source for a later phase to reuse its exact commit and patch,
-    independent of subsequent edits or commits in the original working tree."""
-    pending = list(items)
-    root = Path(root or Path(__file__).resolve().parents[2]).resolve()
-    with _checkout(root, source) as (checkout, revision, patch):
-        for attempt in range(retries + 1):
-            if not pending:
-                break
-            if attempt:
-                print(f'RETRY {len(pending)} without a result (attempt {attempt})', flush=True)
-            jobs = [command(group, index, attempt) for index, group in enumerate(plan(pending, key, cost, count))]
-            if checkout != root:
-                jobs = [(_pinned_command(argv, root, checkout), log, label) for argv, log, label in jobs]
-            if launcher:
-                launch(jobs, launcher, count)
-            else:
-                run_jobs(jobs, [gpus[index % len(gpus)] for index in range(min(count, len(jobs)))])
-            pending = [item for item in pending if missing(item)]
-    return BatchResult(pending, revision, patch)
-
-
-def process_name(stem, attempt):
-    """Name of a process (its log, its work directory) in round ``attempt`` of :func:`run_batch`."""
-    return stem + (f'-retry{attempt}' if attempt else '')
 
 
 def worker_gpu(gpu):

@@ -8,11 +8,10 @@ from pathlib import Path
 import shutil
 import statistics
 import subprocess
-import sys
 import time
 import traceback
 
-from table_1000.common.batch import add_arguments, job_count, process_name, run_batch, worker_gpu
+from table_1000.common.batch import add_arguments, job_count
 
 
 def load_tests(path):
@@ -20,6 +19,17 @@ def load_tests(path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.TESTS
+
+
+class PhysicalFailure(Exception):
+    """An asset test's physical assertion failed."""
+
+
+def run_test(test, context):
+    try:
+        test(context)
+    except AssertionError as error:
+        raise PhysicalFailure(str(error)) from error
 
 
 def ground_clearance(model, rows, instance_names, ground_z):
@@ -68,7 +78,7 @@ def benchmark(asset,name,test,app,physics="cpu",num_envs=1,utilization=None):
     warm = TestContext(asset, name=name, app=app, physics=physics, num_envs=num_envs)
     start = time.perf_counter()
     try:
-        test(warm)
+        run_test(test, warm)
         assert warm.session.time >= 1., 'RTF warmup requires at least one simulated second'
         warmup = time.perf_counter()-start
     finally:
@@ -83,7 +93,7 @@ def benchmark(asset,name,test,app,physics="cpu",num_envs=1,utilization=None):
             ctx.utilization=utilization
             construction=time.perf_counter()-start
             try:
-                test(ctx)
+                run_test(test, ctx)
                 seconds+=ctx.session.time;wall+=time.perf_counter()-ctx.experiment_started
                 if utilization: utilization.stop()
                 prepare+=construction+ctx.preparation_seconds
@@ -175,7 +185,7 @@ def run_video(asset,name,test,output,app,startup,rtf,gpu,physics="cpu",num_envs=
     ctx.utilization=utilization
     construction=time.perf_counter()-started
     try:
-        test(ctx)
+        run_test(test, ctx)
         replica_deviation=max(instance.view.replica_deviation() for instance in ctx.session.instances.values())
         frames=directory/'frames';frames.mkdir()
         for i,image in enumerate(ctx.images):image.save(frames/f'{i:05}.jpg',quality=95)
@@ -218,7 +228,6 @@ def run_video(asset,name,test,output,app,startup,rtf,gpu,physics="cpu",num_envs=
         if getattr(ctx,'ground_config',None):
             result['ground_contact']=ground_clearance(json.loads((asset.parent/'model.json').read_text()),
                 ctx.rows,ctx.session.instances,ctx.ground_config['z'])
-        (directory/'result.json').write_text(json.dumps(result,indent=2)+'\n')
         print('PHYSICS_TEST_COMPLETED',name,flush=True)
         return result
     finally:
@@ -238,16 +247,13 @@ def run_case(asset,name,test,output,app,startup,gpu,physics="cpu",num_envs=1,uti
     try:
         rtf=benchmark(asset,name,test,app,physics=physics,num_envs=num_envs,utilization=utilization) if standard else None
         return run_video(asset,name,test,output,app,startup,rtf,gpu,physics=physics,num_envs=num_envs,utilization=utilization)
-    except Exception:
-        (directory/'result.json').write_text(json.dumps({'test':name,'execution_status':'failed',
-            'error':traceback.format_exc()},indent=2)+'\n')
-        raise
+    except PhysicalFailure:
+        return {'test':name,'execution_status':'failed','error':traceback.format_exc()}
 
 
 # Backend name -> PhysX device. Each backend writes physics_test/<name>/.
 BACKENDS={'isaac-cpu':'cpu','isaac-gpu':'gpu'}
 ROOT=Path(__file__).resolve().parents[2]
-ENTRY=ROOT/'scripts/assets/physics_test.py'
 
 
 def significant(value,digits=4):
@@ -299,56 +305,6 @@ def entry(directory):
     return directory/('object.usda' if (directory/'object.usda').exists() else 'object.usdz')
 
 
-def run_backend(asset,backend,*,gpu,script,tests=None,num_envs=None,benchmark=False):
-    """Run one asset on one backend in this process; Kit's close ends the process."""
-    physics=BACKENDS[backend]
-    num_envs=num_envs or (4 if physics=='gpu' else 1)
-    output=asset.parent/'physics_test'/backend
-    output.mkdir(parents=True,exist_ok=True)
-    started=time.perf_counter()
-    gpu_info={'physical_index':gpu,'before_process_start':subprocess.run(
-        ['nvidia-smi','--query-gpu=index,name,driver_version,memory.used,utilization.gpu','--format=csv'],
-        check=True,capture_output=True,text=True).stdout.strip()}
-    from table_1000.sim.isaaclab.app import start_app
-    from table_1000.sim.isaaclab.render import RT2_ARGS
-    app=start_app(gpu=gpu, device='cpu' if physics=='cpu' else 'cuda:0',
-                  extra_args=(*RT2_ARGS,'--/rtx/post/motionblur/enabled=False'))
-    startup=time.perf_counter()-started
-    failed=False
-    try:
-        selected=load_tests(script)
-        if tests:selected={name:selected[name] for name in tests}
-        import carb
-        from threadpoolctl import threadpool_limits
-        from table_1000.physics.simulation import enable_scripting
-        enable_scripting()
-        # Complete extension startup before replacing the launcher stage.
-        for _ in range(5):
-            app.update()
-        carb.settings.get_settings().set('/persistent/physics/numThreads',4)
-        carb.settings.get_settings().set('/rtx/post/motionblur/enabled',False)
-        # OpenMP is set before startup; changing it after Kit starts can stall RTX.
-        from table_1000.physics.utilization import Utilization
-        utilization=Utilization(gpu)
-        try:
-            with threadpool_limits(limits=1, user_api='blas'):
-                for name,test in selected.items():
-                    try:
-                        run_case(asset,name,test,output,app,startup,gpu_info,physics=physics,num_envs=num_envs,
-                                 utilization=utilization,standard=benchmark)
-                    except Exception:
-                        # run_case recorded the failure; the remaining tests still run.
-                        failed=True
-                        traceback.print_exc()
-        finally:
-            utilization.close()
-    except BaseException:
-        failed=True
-        traceback.print_exc()
-        raise
-    finally:
-        app.close(exit_code=int(failed))
-
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
@@ -361,15 +317,9 @@ def main(argv=None):
     parser.add_argument('--benchmark',action='store_true',help='standard RTF measurement: warmup and three timed rounds before the video run')
     parser.add_argument('--plots-only',action='store_true')
     add_arguments(parser)
-    parser.add_argument('--worker',type=Path,help=argparse.SUPPRESS)
-    parser.add_argument('--script',type=Path,help=argparse.SUPPRESS)
     args=parser.parse_args(argv)
     if args.num_envs is not None and args.num_envs<1:parser.error('--num-envs must be positive')
     source=args.source.resolve()
-    if args.worker:
-        run_backend(entry(args.worker),args.physics[0],gpu=worker_gpu(args.gpu),script=args.script,tests=args.tests,
-                    num_envs=args.num_envs,benchmark=args.benchmark)
-        return
     references=([Path(reference) for reference in args.assets] if args.assets is not None
                 else sorted(path.parent.relative_to(source) for path in source.rglob('physics_test.py')))
     scripts={reference:(args.scripts.resolve()/reference if args.scripts else source/reference)/'physics_test.py'
@@ -402,47 +352,44 @@ def main(argv=None):
         if broken:
             raise SystemExit('failed: '+', '.join(f'{reference} (physics_test.py)' for reference in broken))
         return
-    count=job_count(parser,args)
+    job_count(parser,args)
+    from table_1000.common.batch_runtime import run as run_program
     selected={}
-    for reference in names:
+    units=[]
+    for reference,names_for_asset in names.items():
         for backend in args.physics:
-            selected[reference,backend]=args.tests or names[reference]
-            for name in selected[reference,backend]:clear(source/reference/'physics_test'/backend,name)
-            for log in (source/reference/'physics_test'/backend).glob('run-retry*.log'):log.unlink()
-
-    def results(unit):
-        output=source/unit[0]/'physics_test'/unit[1]
-        return {name:output/name/'result.json' for name in selected[unit]}
-
-    def command(group,index,attempt):
-        (reference,backend),=group
-        command=[sys.executable,str(ENTRY),'--worker',str(source/reference),'--physics',backend,
-                 '--script',str(scripts[reference])]
-        # A rerun runs only the tests its stopped process left without a result.
-        remaining=[name for name,path in results(group[0]).items() if not path.exists()]
-        if remaining:command+=['--tests',*remaining]
-        if args.num_envs:command+=['--num-envs',str(args.num_envs)]
-        if args.benchmark:command.append('--benchmark')
-        log=source/reference/'physics_test'/backend/f"{process_name('run',attempt)}.log"
-        return command,log,f'{reference} {backend}'
-
-    # One process per asset and backend: Kit's close ends it.
-    batch=run_batch(list(selected),key=lambda unit:unit,command=command,
-              missing=lambda unit:not all(path.exists() for path in results(unit).values()),
-              count=count,gpus=args.gpus,launcher=args.launcher,retries=args.retries)
+            selected[reference,backend]=args.tests or names_for_asset
+            units.extend((reference,backend,name) for name in selected[reference,backend])
+    scripts_root=args.scripts.resolve() if args.scripts else source
+    if not args.dry_run:
+        for reference,backend,name in units:
+            clear(source/reference/'physics_test'/backend,name)
+    missing=run_program('table_1000.physics.batch_program:program', vars(args) | dict(
+        units=units,source=source,scripts=str(scripts_root),
+        scripts_relative=str(scripts_root.relative_to(ROOT)) if scripts_root.is_relative_to(ROOT)
+            and scripts_root.relative_to(ROOT).parts[0] not in ('assets','data','runs','outputs') else None),
+        root=ROOT,output=ROOT/'runs/physics-tests'/str(time.time_ns()))
+    if args.dry_run:
+        return
+    for unit in missing:
+        reference,backend,name=unit[:3]
+        path=source/reference/'physics_test'/backend/name/'result.json'
+        path.parent.mkdir(parents=True,exist_ok=True)
+        error=json.loads(path.read_text())['error'] if path.exists() else f'not run: {backend} worker exited before result.json'
+        path.write_text(json.dumps({'test':name,'execution_status':'failed','error':error},indent=2)+'\n')
     failed=[]
     for (reference,backend),tests in selected.items():
         output=source/reference/'physics_test'/backend
         for name in tests:
-            # The worker exited before reaching this test, e.g. at startup, in every attempt.
             if not (output/name/'result.json').exists():
                 (output/name).mkdir(parents=True,exist_ok=True)
                 (output/name/'result.json').write_text(json.dumps({'test':name,'execution_status':'failed',
-                    'error':f'not run: the {backend} process exited before this test; see {output}/run*.log'},indent=2)+'\n')
-        if any(json.loads(path.read_text())['execution_status']!='completed' for path in results((reference,backend)).values()):
+                    'error':f'not run: {backend} worker exited before result.json'},indent=2)+'\n')
+        if any(json.loads((output/name/'result.json').read_text())['execution_status']!='completed'
+               for name in tests):
             failed.append(f'{reference} {backend}')
     for reference in references:
-        print('SUMMARY',write_summary(source/reference,names.get(reference,[]),broken.get(reference),source=batch),flush=True)
+        print('SUMMARY',write_summary(source/reference,names.get(reference,[]),broken.get(reference),source=missing),flush=True)
     failed+=[f'{reference} (physics_test.py)' for reference in broken]
     if failed:
         raise SystemExit('failed: '+', '.join(failed))

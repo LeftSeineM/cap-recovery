@@ -109,9 +109,9 @@ runs/teleop/000000/<运行>/        人工遥操一个案例的一步（scripts/
 ```
 
 ```text
-runs/grasp/<日期>-<时间>-<提交>[-<标签>]/   eval_asset_grasp.py --dev [--name 标签]
+runs/grasp/<日期>-<时间>-<提交>[-<标签>]/   asset_grasp.py --dev [--name 标签]
   conditions.json、summary.json、summary.md  配置、协议、来源提交与批次汇总
-  source.patch                   仅工作区有未提交改动时保存；不复制源码目录
+  dirty.patch                    仅工作区有未提交改动时保存；不复制源码目录
   workers/                       工作进程日志
   objects/<category>/<编号>/     summary.json、trials/、trajectories/；仅要求时有 videos/
 ```

@@ -1,10 +1,10 @@
 # 资产抓取测试
 
-测试单个资产能否被专家第一次抓起并在持物动作中握稳。每个环境只放一个待测资产，用机器人验收的桌子和工作点，抓取候选、闭合检查和运动规划与专家共用。入口为 `scripts/experts/eval_asset_grasp.py`，实现见 [`evals/asset_grasp`](../../table_1000/experts/evals/asset_grasp/__init__.py)；共用的抓取策略见 [`skills/hold/frames.py`](../../table_1000/experts/skills/hold/frames.py) 与 [`skills/hold/pick.py`](../../table_1000/experts/skills/hold/pick.py)。
+测试单个资产能否被专家第一次抓起并在持物动作中握稳。每个环境只放一个待测资产，用机器人验收的桌子和工作点，抓取候选、闭合检查和运动规划与专家共用。入口为 `scripts/benchmarks/asset_grasp.py`，实现见 [`evals/asset_grasp`](../../table_1000/experts/evals/asset_grasp/__init__.py)；共用的抓取策略见 [`skills/hold/frames.py`](../../table_1000/experts/skills/hold/frames.py) 与 [`skills/hold/pick.py`](../../table_1000/experts/skills/hold/pick.py)。
 
 ## 协议
 
-- 资产由配置给出：`SCENE`、`ROBOT`、`TRIALS`（seed 为 `0..TRIALS-1`）、`EXCLUDED_INSTANCES`，可选 `ASSETS`。配置引用场景的资产清单并按资产路径去重，排除的实例逐个写明理由。单个资产也可用 `--asset` 和 `--robot` 直接测试。
+- 资产由配置给出：`SCENE`、`ROBOT`、`TRIALS`（seed 为 `0..TRIALS-1`）、`EXCLUDED_INSTANCES`，可选 `ASSETS`。配置引用场景的资产清单并按资产路径去重，排除的实例逐个写明理由。单个资产也可用 `--items` 和 `--robot` 直接测试。
 - 资产原点在测试中心周围 10 × 10 cm 内均匀采样，偏航在 [-π, π) 均匀采样，竖直方向取碰撞几何的稳定支撑姿态。直接放在桌面，不用垫台。
 - 每个 seed 只看第一次抓取：按专家策略选候选、闭合、抬升，实测上升不足 5 cm 即为失败。抬升与专家共用：先提 20 mm 确认两侧实际接触、物体随手，再提完其余高度。片状和细线物体走[薄物体路线](thin-grasp.md)，先移到桌边或指尖捏取。闭合检查只记录，不松手重抓。
 - 抬起后依次做三段持物动作：横移 50 mm、上移 50 mm、转动约 1 rad，每段原路返回，最后保持 0.5 s。允许伴随运动（横移时转动、上移时斜向或转动、转动时平移），因为专家的持物运动本身是平移与转动同时进行。指令目标为强度上限的约 95%，同时满足机器人的关节速度和加速度上限。
@@ -34,7 +34,7 @@
 | `trial.hold.preflight.selected.timing.<段>.constraint_ratios` | 指令的关节速度、加速度和 TCP 峰值与各自上限之比，用于判断强度受哪个约束限制；经过参考点转移的试次在 `trial.hold.preflight.relocation.actual_preflight.selected.timing` 下 |
 | `trial.cpu_s`、`wall_s`、`load` | CPU time、wall time 与主机负载；含偏好补测，首次与补测分别在 `first_attempt_timing`、`preference_timing` |
 
-`eval_asset_grasp.py compare` 按相同 seed 配对两批结果，两侧都按当前验收规则从 trial 重新判定。
+`asset_grasp.py compare` 按相同 seed 配对两批结果，两侧都按当前验收规则从 trial 重新判定。
 
 ## 已知限制
 

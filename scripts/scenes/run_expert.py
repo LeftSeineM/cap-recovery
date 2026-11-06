@@ -26,19 +26,17 @@ machine load). --repeats K adds reports <seed>-<repeat>.json with independent
 random streams after the first run; recovery trajectories are retained for a2/a3 clips, without extra checkpoints.
 Jobs freeze the submitted source and run through --gpus or --launcher, retrying
 seeds without an episode; logs and partial products are kept in the batch's
-parts/ (--dev) or outputs/scenes/<scene>/<robot>/<expert>/<backend>/<layout>/.
+workers/ (grouped units, retry attempts and process logs).
 Episode failures are results; a nonzero exit means some seed has no episode.
 """
 
 import argparse
-import itertools
 import json
 from pathlib import Path
 import shlex
 import shutil
 import sys
 import time
-import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -84,46 +82,10 @@ def check_checkpoint_name(attrs, expert_steps):
         raise ValueError(f'checkpoint step {index} name {saved!r} does not match current name {expected!r}; {hint}')
 
 
-def worker(args):
-    """One part: the given seeds' episodes in this process, into ``args.work``."""
-    work = args.work.resolve()
-    work.mkdir(parents=True, exist_ok=True)
-    from table_1000.common.batch import worker_gpu
-    from table_1000.sim.isaaclab.app import start_app
-    app = start_app(gpu=worker_gpu(args.gpu), workers=4, cameras=False)
-    failed = False
-    generator = None
-    try:
-        from table_1000.experts.generate import Generator, read_checkpoints
-        from table_1000.common.batch import parse_seeds
-        from table_1000.scenes.initial import read_states
-        if args.checkpoints:
-            attrs, states = read_checkpoints(args.states)
-            if attrs['step'] == 0:      # the initial states: run as from them
-                states = {seed: (attempt, state, start if '_expert_frame' in state else None)
-                          for seed, (attempt, state, start) in states.items()}
-        else:
-            states = {seed: (attempt, state, None) for seed, (attempt, state) in read_states(args.states)[1].items()}
-        generator = Generator(args.scene, work, args.assets.resolve(), args.root.resolve(), physics=args.physics,
-                              steps=args.steps, source=str(args.states) if args.checkpoints else None,
-                              problems=args.problems, skill_attempts=args.skill_attempts, profile=args.profile, robot=args.robot, expert=args.expert, layout=args.layout,
-                              outside_scope=args.outside_scope, record_root=args.batch_dir)
-        for seed, repeat in itertools.product(parse_seeds(args.seeds), range(args.repeats)):
-            report = generator.run(seed, *states[seed], repeat=repeat)
-            print(seed, *([f'repeat {repeat}'] if repeat else []), report['status'],
-                  report.get('failure', {}).get('reason', ''), f'{report["wall_s"]:.0f} s',
-                  flush=True)
-    except Exception:
-        traceback.print_exc()
-        failed = True
-    if generator is not None:
-        generator.close()
-    app.close(exit_code=int(failed))
-
-
 def main(argv=None):
     dump_stacks_every()
-    from table_1000.common.batch import add_arguments, commit, job_count, load_record, parse_seeds, process_name, run_batch, seed_range
+    from table_1000.common.batch import add_arguments, commit, job_count, load_record, parse_seeds, seed_range
+    from table_1000.common.batch_runtime import run as run_program
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
     parser.add_argument('--robot', help='default: scene.ROBOT')
@@ -154,20 +116,12 @@ def main(argv=None):
                              'none disables full problem recording and extra IK diagnostics')
     parser.add_argument('--skill-attempts', type=int, default=3,
                         help='total tries per retry callback, restoring entry before later random tries (default 3)')
-    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--seeds', nargs='+', help='only these seeds of the initial states or checkpoints: 12 27, 0:20')
-    parser.add_argument('--states', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--checkpoints', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--work', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--batch-dir', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.worker:
-        worker(args)
-        return
     import h5py
     from table_1000.experts.generate import checkpoint_path, merge_checkpoints, repeat_rates, step_rates, summarize
     from table_1000.scenes.recordings import clear_batch, merge
-    jobs = job_count(parser, args)
+    job_count(parser, args)
     root = args.root.resolve()
     from table_1000.scenes import load_expert, initial_dir, data_dir, dev_dir, batch_ref, outside_scope
     try:
@@ -258,73 +212,57 @@ def main(argv=None):
     if args.dev:
         run = run_name(checkout, '-'.join([robot, args.expert, f'layout{args.layout}', *([args.name] if args.name else [])]))
         directory = dev_dir(args.output or root / 'runs' / 'expert', args.scene, robot, args.expert, run).resolve()
-        try:        # claims the name: another run started in the same second gets an error
-            directory.mkdir(parents=True)
-        except FileExistsError:
+        if directory.exists() and (directory / 'summary.json').exists():
             parser.error(f'{directory} exists; give another --name')
     else:
         run = None
         directory = data_dir(args.output or root / 'data' / 'scenes', args.scene, robot, args.expert, args.physics, args.layout).resolve()
-    staging = directory / 'parts' if args.dev else root / 'outputs' / 'scenes' / args.scene / robot / args.expert / args.physics / str(args.layout)
-    clear_batch(directory, keep=('layouts',) if not args.dev and args.layout == 0 else ())
-    clear_batch(staging)
-    works = {}
-
-    def command(part, index, attempt):
-        name = process_name(f'part{index}', attempt)
-        works.update(dict.fromkeys(part, staging / name))
-        argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--physics', args.physics,
-                '--robot', robot, '--expert', args.expert, '--layout', str(args.layout),
-                '--seeds', *seed_range(part).split(), '--states', str(states), '--work', str(staging / name),
-                '--root', str(root), '--assets', str(args.assets.resolve()), '--repeats', str(args.repeats),
-                '--batch-dir', str(directory),
-                '--problems', args.problems, '--skill-attempts', str(args.skill_attempts),
-                *(['--steps', '-'.join(map(str, args.steps))] if args.steps else []),
-                *(['--checkpoints'] if args.source else []), *(['--profile'] if args.profile else []),
-                *(['--outside-scope'] if args.outside_scope else [])]
-        return argv, staging / f'{name}.log', f'{args.scene} {args.physics} {name} seeds {seed_range(part)}'
-
+    identity = (args.scene, robot, args.expert, str(args.layout),
+                '-'.join(map(str, args.steps)) if args.steps else 'all')
+    options = vars(args) | dict(units=[(identity, seed) for seed in seeds],
+        states=str(states), checkpoints=bool(args.source), assets=str(args.assets.resolve()))
+    if args.dry_run:
+        run_program('table_1000.experts.batch_program:program', options, root=root, output=directory)
+        return
+    clear_batch(directory, keep=('plan.json', 'layouts') if not args.dev and args.layout == 0 else ('plan.json',))
     started = time.perf_counter()
-    missing = run_batch(seeds, command=command, count=jobs, gpus=args.gpus, launcher=args.launcher, retries=args.retries,
-                        root=root,
-                        # A seed's first run is its episode (trajectory, checkpoints); a process stopped in
-                        # its later runs leaves it fewer of them (see repeat_rates), not to run again.
-                        missing=lambda seed: not (works[seed] / 'episodes' / f'{seed}.json').is_file())
+    missing = run_program('table_1000.experts.batch_program:program', options, root=root, output=directory)
     checkout = missing.commit
-    parts = sorted(staging.glob('part*/'))
-    (directory / 'episodes').mkdir(parents=True)
+    staging = directory / 'workers'
+    reports = [json.loads(path.read_text()) for path in sorted((directory / 'episodes').glob('*.json'))]
+    owners = {report['seed']: report['job'] for report in reports}
+    parts = [part for part in sorted(staging.glob('*/'))
+             if any((part / 'episodes' / f'{seed}.json').is_file()
+                    for seed, owner in owners.items() if part.name == owner)]
     for name in ('trajectories', 'trajectories_failed'):
-        # A stopped process may have recorded an episode without its report, which its rerun records again.
         merge([part / f'{name}.hdf5' for part in parts], directory / f'{name}.hdf5',
-              keep=lambda source, seed: (source.parent / 'episodes' / f'{seed}.json').is_file())
+              keep=lambda source, seed: owners.get(int(str(seed).split('-')[0])) == source.parent.name)
         for part in parts:
             (part / f'{name}.hdf5').unlink(missing_ok=True)
-    # A stopped process may have left a checkpoint without the episode's report, run again elsewhere.
-    sources = [path for path in staging.glob('part*/checkpoints/*.hdf5')
-               if (path.parent.parent / 'episodes' / f'{path.stem}.json').is_file()]
-    merge_checkpoints(sources, directory, {'scene': args.scene, 'robot': robot, 'expert': args.expert, 'layout': args.layout, 'physics': args.physics,
-                                           'commit': checkout or 'nocommit'})
-    for path in staging.glob('part*/checkpoints/*.hdf5'):
+    sources = [path for part in parts for path in (part / 'checkpoints').glob('*.hdf5')
+               if owners.get(int(path.stem)) == part.name]
+    merge_checkpoints(sources, directory, dict(scene=args.scene, robot=robot, expert=args.expert,
+        layout=args.layout, physics=args.physics, commit=checkout or 'nocommit'))
+    for path in sources:
         path.unlink()
-    for path in sorted(staging.glob('part*/attempts/*')):
-        target = directory / 'attempts' / path.name
-        target.parent.mkdir(exist_ok=True)
-        shutil.move(path, target)
-    runs = []
-    for kind in ('calls', 'problems', 'repeat-trajectories'):
-        (directory / kind).mkdir(exist_ok=True)
-        for path in sorted(staging.glob(f'part*/{kind}/*')):
-            name = path.name.removesuffix('.json.gz').removesuffix('.hdf5')
-            if (path.parent.parent / 'episodes' / f'{name}.json').is_file():
-                shutil.move(path, directory / kind / path.name)
-    for path in sorted(staging.glob('part*/episodes/*.json')):
-        runs.append(json.loads(path.read_text()))
-        shutil.move(path, directory / 'episodes' / path.name)
-    reports = [report for report in runs if not report.get('repeat')]
+    runs = reports.copy()
+    for part in parts:
+        for path in sorted((part / 'episodes').glob('*-*.json')):
+            report = json.loads(path.read_text())
+            if owners.get(report['seed']) == part.name:
+                runs.append(report)
+                shutil.move(path, directory / 'episodes' / path.name)
+        for kind in ('attempts', 'calls', 'problems', 'repeat-trajectories'):
+            for path in sorted((part / kind).glob('*')):
+                seed = int(path.name.split('-')[0].split('.')[0])
+                if owners.get(seed) == part.name:
+                    target = directory / kind / path.name
+                    target.parent.mkdir(exist_ok=True)
+                    shutil.move(path, target)
     summary = {'run': run, 'command': shlex.join(sys.argv if argv is None else ['run_expert.py', *argv]),
                'scene': args.scene, 'robot': robot, 'expert': args.expert, 'scope': selected.SCOPE,
                'layout': args.layout, 'outside_scope': args.outside_scope, 'physics': args.physics, **missing.record(directory),
-               'steps_run': args.steps, 'from': batch_ref(args.source, directory, root) if args.source else None,
+               'missing_seeds': [key[-1] for key in missing], 'steps_run': args.steps, 'from': batch_ref(args.source, directory, root) if args.source else None,
                'problems': args.problems, 'skill_attempts': args.skill_attempts,
                **summarize(reports, seeds), 'steps': step_rates(reports, seeds, parent),
                'repeats': repeat_rates(runs, seeds, args.repeats) if args.repeats > 1 else None,
@@ -336,7 +274,7 @@ def main(argv=None):
         print(f'STEP {row["step"]} {row["completed"]}/{row["started"]} progressive {row["progressive_rate"]:.2f}: '
               f'{row["name"]}', flush=True)
     if missing:
-        raise SystemExit(f'no episode: seeds {seed_range(missing)}; see {staging}')
+        raise SystemExit(f'no episode: seeds {seed_range(key[-1] for key in missing)}; see {staging}')
 
 
 if __name__ == '__main__':

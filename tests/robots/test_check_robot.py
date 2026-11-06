@@ -1,6 +1,7 @@
 """check_robot.py without a simulator: units packed into processes, reruns of missing results, the summary."""
 
 import json
+from tests.common.batch_worker import manifest, publish
 
 from scripts.robots import check_robot
 from table_1000.common import batch
@@ -24,18 +25,17 @@ def test_units_retries_and_summary(tmp_path, monkeypatch):
     def run_jobs(jobs, gpus):
         rounds.append((len(jobs), gpus))
         for command, _, label in jobs:
-            directory = check_robot.Path(command[command.index('--dir') + 1])
-            units = command[command.index('--units') + 1:command.index('--log')]
-            attempt = int(command[command.index('--attempt') + 1])
-            for case, trial in map(check_robot.parse_unit, units):
+            data = manifest(command)
+            for unit in data['units']:
+                case, trial = unit['data']['case'], unit['data']['trial']
+                attempt = data['attempt']
                 if case == 'grasp_and_push' and trial == 2 and attempt == 0:
-                    break         # the process died here: this unit and the rest of the process have no result
+                    continue
                 status = 'FAIL' if case == 'joint_limits' else 'PASS'
                 result = {'status': status, 'checks': {'held': status == 'PASS'}, 'wall_s': 1.}
                 if case == 'grasp_and_push':
                     result['trials'] = {str(trial): {}}
-                check_robot.write_report(check_robot.unit_dir(directory, case, trial),
-                                         {'attempt': attempt, 'result': result})
+                publish(data, unit, dict(status=status, result=result))
         return []
 
     monkeypatch.setattr(batch, 'run_jobs', run_jobs)
@@ -45,7 +45,7 @@ def test_units_retries_and_summary(tmp_path, monkeypatch):
                           '--jobs', '4', '--output', str(tmp_path)])
     except SystemExit as error:
         assert 'joint_limits' in str(error) and 'grasp_and_push' not in str(error)
-    assert rounds[0] == (4, [0, 1, 0, 1])                 # four processes at once over two GPUs
+    assert rounds[0] == (4, [0, 1])                 # four jobs, with two local workers
     assert len(rounds) == 2                               # one more round for the units without a result
     summary = json.loads((tmp_path / 'x1pro' / 'summary.json').read_text())
     assert summary['backends']['isaac-cpu'] == {'passed': 2, 'cases': 3, 'failed': ['joint_limits'], 'earlier': []}
@@ -53,6 +53,37 @@ def test_units_retries_and_summary(tmp_path, monkeypatch):
     assert summary['cases']['joint_limits']['isaac-cpu']['retried'] == 0     # failed, but not rerun
     report = json.loads((tmp_path / 'x1pro' / 'isaac-cpu' / 'report.json').read_text())
     assert list(report['cases']['grasp_and_push']['trials']) == ['0', '1', '2']
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from table_1000.common import batch_runtime as runtime
+    from table_1000.robots.batch_program import checks
+    options = dict(units=[('x1pro', 'isaac-gpu', case, None) for case in ('keyframes', 'parallel')],
+                   directories={'x1pro': str(tmp_path / 'paired')}, assets=str(tmp_path / 'assets'),
+                   jobs=1, retries=0, gpus=[0])
+    observed = []
+    def ordered_jobs(jobs, gpus):
+        assert len(jobs) == 1
+        data = manifest(jobs[0][0])
+        assert [unit['data']['case'] for unit in data['units']] == ['parallel', 'keyframes']
+        for unit in data['units']:
+            publish(data, unit, dict(status='PASS', result=dict(status='PASS')))
+        return []
+    monkeypatch.setattr(batch, 'run_jobs', ordered_jobs)
+    runtime.run('table_1000.robots.batch_program:checks', options, root=tmp_path, output=tmp_path / 'batch')
+    checker = SimpleNamespace(env=SimpleNamespace(close=lambda: observed.append('checker_close')),
+        states=[], run=lambda case: observed.append(case) or dict(status='PASS'))
+    def parallel(*args):
+        observed.extend(['parallel', 'parallel_close'])
+        return dict(status='PASS')
+    monkeypatch.setattr('table_1000.robots.parallel.check_parallel', parallel)
+    monkeypatch.setattr('table_1000.robots.checks.Checker', lambda *args, **kwargs:
+        observed.append('checker_open') or checker)
+    with ExitStack() as stack:
+        context = runtime.Context(tmp_path, tmp_path, options, 0, tmp_path, stack, loaded=dict(
+            spec=None, settings=None, checker=None, device='cuda:0', app_start_s=0., setup_s=0.))
+        for unit in sorted(checks.units(options), key=lambda u: u.priority):
+            checks.run_unit(context, unit)
+    assert observed == ['parallel', 'parallel_close', 'checker_open', 'keyframes']
 
 
 def test_trajectory_round_trip(tmp_path):

@@ -1,3 +1,4 @@
+from tests.common.batch_worker import manifest, publish, expert_job, expert_result
 """Batch runs and the three scene steps without a simulator: processes, seeds, initial-state files, merged batches,
 the choice of renders."""
 
@@ -30,13 +31,36 @@ def scene_sources(tmp_path):
     shutil.copytree(ROOT / 'asset_sources' / 'scenes' / '000000', destination)
 
 
-def test_seeds_are_ranges_and_single_seeds():
+def test_seeds_are_ranges_and_single_seeds(tmp_path):
     assert parse_seeds(['100:103', '7', '101']) == [7, 100, 101, 102]
     assert seed_range([0, 1, 2, 5, 7, 8]) == '0:3 5 7:9'
     assert parse_seeds(seed_range([3, 4, 9]).split()) == [3, 4, 9]
     assert split(list(range(10)), 3) == [[0, 1, 2, 3], [4, 5, 6], [7, 8, 9]]
     assert split([5, 6], 8) == [[5], [6]]
     assert plan(list(range(10)), lambda seed: None, None, 3) == [[0, 1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    from table_1000.common.batch_runtime import Unit, load_config
+    from table_1000.common.batch_timing import Timings, record
+    units = [Unit((asset, seed), {}, f'{asset}/{seed}.json', ('asset', asset, 'robot', 'cpu', str(seed)),
+                  ('asset', asset, 'robot', 'cpu'))
+             for asset, seeds in [('a', range(4)), ('b', range(2)), ('c', range(2))] for seed in seeds]
+    keys = [u.key for u in units]
+    empty = Timings(tmp_path, units)
+    cold = plan(keys, lambda key: None, None, 3, timing=empty)
+    assert len(cold) == 3 and sorted(item for part in cold for item in part) == sorted(keys)
+    by_key = {u.key: u for u in units}
+    for asset, seed, wall in [('a', 0, 100), ('a', 1, 300), ('b', 0, 20)]:
+        record(tmp_path, tmp_path / 'batch', by_key[asset, seed], dict(wall_s=wall, cpu_s=wall,
+               save_wall_s=10., save_cpu_s=5., status='success', app_start_s=10., asset_load_s=30.))
+    timing = Timings(tmp_path, units)
+    assert timing.coverage == (3, 8)
+    assert timing.costs['a', 2] == 210 and timing.costs['b', 1] == 30 and timing.costs['c', 0] == 110
+    parts = plan(keys, lambda key: None, None, 3, timing=timing)
+    assert len(parts) == 3 and sorted(item for part in parts for item in part) == sorted(keys)
+    assert list(map(timing.wall, parts)) == sorted(map(timing.wall, parts), reverse=True)
+    assert any(len({asset for asset, _ in part}) > 1 for part in parts)
+    assert len(plan(keys, lambda key: key[0], None, 5, timing=timing)) == 5
+    assert load_config().jobs('auto', 12000., 200) == 20
+
 
 
 def test_jobs_share_the_listed_gpus(tmp_path, monkeypatch):
@@ -57,7 +81,7 @@ def test_launcher_runs_every_part_with_its_gpu(tmp_path):
     show = 'from table_1000.common.batch import worker_gpu; import sys; print(worker_gpu(None)); sys.exit(len(sys.argv) - 1)'
     jobs = [([sys.executable, '-c', show, *extra], tmp_path / name / 'run.log', name)
             for name, extra in (('a', []), ('b', ['fail']))]
-    failed = launch(jobs, 'env CUDA_VISIBLE_DEVICES=5', 2)
+    failed = launch(jobs, 'env CUDA_VISIBLE_DEVICES=5')
     assert failed == ['b']
     assert (tmp_path / 'a' / 'run.log').read_text().strip() == '5'
 
@@ -135,20 +159,6 @@ def batch(tmp_path):
     return directory
 
 
-def test_render_rejects_seeds_without_episode(batch, tmp_path, capsys):
-    with pytest.raises(SystemExit):
-        render.main(['000000', '--physics', 'isaac-cpu', '--cameras', 'wide', '--seeds', '1:4',
-                     '--input', str(tmp_path / 'data')])
-    assert 'seeds 2:4 have no episode; the batch covers 0:5, failed: none' in capsys.readouterr().err
-
-
-def test_render_rejects_unknown_cameras(batch, tmp_path, capsys):
-    with pytest.raises(SystemExit):
-        render.main(['000000', '--physics', 'isaac-cpu', '--cameras', 'wide', 'face_depth',
-                     '--input', str(tmp_path / 'data')])
-    assert 'face_depth is not an RGB camera of the robot' in capsys.readouterr().err
-
-
 def test_render_keeps_other_videos(batch, tmp_path, monkeypatch):
     trajectory_file(batch / 'trajectories_failed.hdf5', [3, 2])
     video_path(batch, 4, 'wide').parent.mkdir(parents=True)
@@ -157,15 +167,17 @@ def test_render_keeps_other_videos(batch, tmp_path, monkeypatch):
     chosen = []
 
     def jobs(commands, gpus):
-        assert gpus == [0, 1, 0, 1][:len(commands)]
+        assert gpus == [0, 1]
         for command, _, _ in commands:
-            seeds = parse_seeds(command[command.index('--seeds') + 1:command.index('--batch')])
+            data = manifest(command)
+            seeds = [unit['data']['seed'] for unit in data['units']]
             chosen.append(seeds)
-            merge = '--merge' in command
+            merge = data['options']['merge']
             for seed in seeds:
                 target = video_path(batch, seed, None if merge else 'wide', failed=seed in (2, 3))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b'new')
+                publish(data, next(u for u in data['units'] if u['data']['seed'] == seed), {'status': 'success'})
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
@@ -193,35 +205,37 @@ def test_run_expert_merges_parts(tmp_path, monkeypatch):
     def jobs(commands, gpus):
         rounds.append(len(commands))
         for command, _, _ in commands:
-            work = tmp_path / command[command.index('--work') + 1]
-            seeds = parse_seeds(command[command.index('--seeds') + 1:command.index('--states')])
+            data, work, seeds = expert_job(command)
             (work / 'episodes').mkdir(parents=True)
-            # Seed 2 kills its process in every attempt, after its episode is recorded, before its report.
+            # Seed 2 is cancelled during an HDF5 write, before its report.
             trajectory_file(work / 'trajectories.hdf5', [seed for seed in seeds if seed <= 2])
             if 2 in seeds:
+                (work / 'trajectories.hdf5').write_bytes(b'\x89HDF\r\n\x1a\n')
                 continue
             trajectory_file(work / 'trajectories.hdf5', seeds)
             for seed in seeds:
-                (work / 'episodes' / f'{seed}.json').write_text(json.dumps(
-                    {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 2.}))
+                expert_result(data, work, seed, {'seed': seed,
+                    'status': 'error' if seed == 1 and data['attempt'] == 0 else 'success',
+                    'failure': {'reason': 'interrupted result'}, 'duration_s': 1., 'wall_s': 2.})
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
     output = tmp_path / 'data'
     with pytest.raises(SystemExit, match='no episode: seeds 2;'):
-        run_expert.main(['000000', '--physics', 'isaac-cpu', '--gpus', '0', '1', '--input', str(tmp_path / 'assets/scenes'),
+        run_expert.main(['000000', '--physics', 'isaac-cpu', '--gpus', '0', '1', '--jobs', '3', '--input', str(tmp_path / 'assets/scenes'),
                          '--output', str(output), '--root', str(tmp_path / 'checkout')])
-    assert rounds == [2, 2]          # seeds 2 and 3 once more
+    assert rounds == [3, 2]          # seeds 2 and 3 once more
     directory = output / '000000' / 'x1pro' / '0000' / 'isaac-cpu'
     summary = json.loads((directory / 'summary.json').read_text())
     assert summary['failures'] == {PROCESS_EXITED: [2]} and summary['succeeded'] == 3
+    assert summary['missing_seeds'] == [2]
     assert sorted(path.name for path in (directory / 'episodes').iterdir()) == ['0.json', '1.json', '3.json']
     with h5py.File(directory / 'trajectories.hdf5', 'r') as file:
         assert sorted(file['data']) == ['demo_0', 'demo_1', 'demo_3']
 
 
 @pytest.mark.parametrize('problems', ['failed', 'all', 'none'])
-def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
+def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems, capfd):
     initial = tmp_path / 'assets' / 'scenes' / '000000' / 'x1pro'
     initial.mkdir(parents=True)
     write_states(initial / 'initial_states.hdf5', {seed: (0, STATE) for seed in range(4)},
@@ -229,14 +243,12 @@ def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
 
     def jobs(commands, gpus):
         for command, _, _ in commands:
-            assert command[command.index('--problems') + 1] == problems
-            work = tmp_path / command[command.index('--work') + 1]
-            seeds = parse_seeds(command[command.index('--seeds') + 1:command.index('--states')])
+            assert manifest(command)['options']['problems'] == problems
+            data, work, seeds = expert_job(command)
             (work / 'episodes').mkdir(parents=True)
             trajectory_file(work / 'trajectories.hdf5', seeds)
             for seed in seeds:
-                (work / 'episodes' / f'{seed}.json').write_text(json.dumps(
-                    {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 2.}))
+                expert_result(data, work, seed, {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 2.})
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
@@ -245,9 +257,12 @@ def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
     with pytest.raises(SystemExit):     # some seeds are a development run
         run_expert.main([*common, '--output', str(tmp_path / 'data'), '--seeds', '1'])
     assert not (tmp_path / 'data').exists()
+    run_expert.main([*common, '--dev', '--seeds', '1', '3', '--output', str(tmp_path / 'runs'), '--dry-run'])
+    assert "BATCH ('000000', 'x1pro'): 2 jobs" in capfd.readouterr().out
+    assert list((tmp_path / 'runs').rglob('plan.json'))
     run_expert.main([*common, '--dev', '--name', 'try', '--seeds', '1', '3', '--output', str(tmp_path / 'runs'),
                      *(['--problems', problems] if problems != 'none' else [])])
-    [directory] = (tmp_path / 'runs' / '000000' / 'x1pro' / '0000').iterdir()
+    [directory] = [p.parent for p in (tmp_path / 'runs').rglob('summary.json')]
     assert directory.name.endswith('-nocommit-x1pro-0000-layout0-try')
     summary = json.loads((directory / 'summary.json').read_text())
     assert summary['run'] == directory.name and '--dev' in summary['command'] and summary['succeeded'] == 2
@@ -257,53 +272,52 @@ def test_run_expert_dev_runs_are_kept_apart(tmp_path, monkeypatch, problems):
 
 
 def test_run_names_carry_the_commit():
-    assert run_expert.run_name('ab12cd3+dirty', 'step2').endswith('-ab12cd3-dirty-step2')
+    from uuid import uuid4
+    head = uuid4().hex[:7]
+    assert run_expert.run_name(head + '+dirty', 'step2').endswith(f'-{head}-dirty-step2')
     assert run_expert.run_name(None).endswith('-nocommit')
-
-
-def test_run_expert_rejects_another_robot(tmp_path, monkeypatch):
-    initial = tmp_path / '000000' / 'x1pro'
-    initial.mkdir(parents=True)
-    write_states(initial / 'initial_states.hdf5', {0: (0, STATE)}, {'scene': '000000', 'robot': 'other'})
-    with pytest.raises(SystemExit):
-        run_expert.main(['000000', '--physics', 'isaac-cpu', '--input', str(tmp_path), '--output', str(tmp_path / 'out')])
 
 
 def test_build_scene_combines_parts(tmp_path, monkeypatch):
     rounds = []
+    assets = tmp_path / 'alternate-assets'
+    assets.mkdir()
+    monkeypatch.chdir(tmp_path / 'checkout')
 
     def jobs(commands, gpus):
         for command, _, _ in commands:
-            work = tmp_path / command[command.index('--work') + 1]
-            seeds = parse_seeds(command[command.index('--seeds') + 1:command.index('--work')])
+            data = manifest(command)
+            assert Path(data['options']['assets']) == assets
+            seeds = [u['data']['seed'] for u in data['units']]
+            work = Path(data['work']) / str(data['units'][0]['data']['layout'])
             rounds.append(seeds)
             for name in ('states', 'images', 'records'):
                 (work / name).mkdir(parents=True)
             for seed in seeds:
-                if seed == 2 and len(rounds) == 1 or seed == 3 and len(rounds) == 3:
-                    break      # the process died here: earlier seeds keep their results
+                if seed == 2 and data['attempt'] == 0 or seed == 3 and data['attempt'] == 1:
+                    continue      # the process died here: earlier seeds keep their results
                 if seed != 1:
                     write_states(work / 'states' / f'{seed}.hdf5', {seed: (0, STATE)}, {'scene': '000000', 'robot': 'x1pro'})
                     Image.new('RGB', (64, 36), 'red').save(work / 'images' / f'{seed}.jpg')
                 record = {'seed': seed, 'attempt': None if seed == 1 else 0,
                           'attempts': [{'attempt': 0, 'settle': {'objects': {}, 'robot_contacts': []}}]}
-                if len(rounds) == 2:
-                    # seed 3 errs, then its rerun dies before it; seed 4 finds no valid state after the error
+                if seed == 3:
                     (work / 'states' / f'{seed}.hdf5').unlink()
-                    record.update({'attempt': None, 'error': 'RuntimeError: CUDA error'} if seed == 3 else
-                                  {'attempt': None, 'after_error': 3})
-                (work / 'records' / f'{seed}.json').write_text(
-                    json.dumps({'robot': 'x1pro', 'camera': 'face_view', 'record': record}))
+                    record.update(attempt=None, error='RuntimeError: CUDA error')
+                publish(data, next(u for u in data['units'] if u['data']['seed'] == seed), dict(
+                    status='error' if 'error' in record else 'failed' if record['attempt'] is None else 'success',
+                    failure={'reason': record.get('error')}, robot='x1pro', camera='face_view', record=record, work=str(work)))
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
     root = tmp_path / 'checkout'
     output = tmp_path / 'custom'
     (output / '000000' / 'x1pro' / 'initial').mkdir(parents=True)
-    with pytest.raises(SystemExit, match=r'errors: seeds 3 \(see .*\); seeds without a valid state: 1$'):
-        build_scene.main(['000000', '--seeds', '0:5', '--gpus', '0', '1', '--grid', '2x1', '--output', str(output),
-                          '--root', str(root)])
-    assert rounds == [[0, 1, 2], [3, 4], [2, 3], [4]]  # seeds without a result or with an error run again
+    with pytest.raises(SystemExit, match=r'errors: 3 \(see .*\); seeds without a valid state: 1$'):
+        build_scene.main(['000000', '--jobs', '2', '--seeds', '0:5', '--gpus', '0', '1', '--grid', '2x1', '--output', str(output),
+                          '--root', str(root), '--assets', '../alternate-assets'])
+    assert sorted(seed for group in rounds[:2] for seed in group) == list(range(5))
+    assert sorted(seed for group in rounds[2:] for seed in group) == [2, 3]  # seeds without a result or with an error run again
     directory = output / '000000' / 'x1pro'
     report = json.loads((directory / 'initial.json').read_text())
     assert report['seeds'] == {'range': '0:5', 'count': 5} and report['without_state'] == [1, 3]
@@ -321,9 +335,10 @@ def test_build_scene_layouts(tmp_path, monkeypatch):
 
     def jobs(commands, gpus):
         for command, _, _ in commands:
-            work = tmp_path / command[command.index('--work') + 1]
-            layout = int(command[command.index('--layout') + 1])
-            seeds = parse_seeds(command[command.index('--seeds') + 1:command.index('--work')])
+            data = manifest(command)
+            layout = data['units'][0]['data']['layout']
+            seeds = [u['data']['seed'] for u in data['units']]
+            work = Path(data['work']) / str(layout)
             for name in ('states', 'images', 'records'):
                 (work / name).mkdir(parents=True)
             for seed in seeds:
@@ -331,8 +346,7 @@ def test_build_scene_layouts(tmp_path, monkeypatch):
                 write_states(work / 'states' / f'{seed}.hdf5', {seed: (0, STATE)}, {})
                 Image.new('RGB', (64, 36), 'red').save(work / 'images' / f'{seed}.jpg')
                 record = {'seed': seed, 'attempt': 0, 'attempts': [{'attempt': 0, 'settle': None}]}
-                (work / 'records' / f'{seed}.json').write_text(
-                    json.dumps({'robot': 'x1pro', 'camera': 'top', 'record': record}))
+                publish(data, next(u for u in data['units'] if u['data']['seed'] == seed), dict(status='success', robot='x1pro', camera='top', record=record, work=str(work)))
         return []
 
     monkeypatch.setattr(scene_batch, 'run_jobs', jobs)
@@ -356,7 +370,7 @@ def test_build_scene_layouts(tmp_path, monkeypatch):
     assert Image.open(directory / 'layouts.jpg').size == (2 * build_scene.TILE_WIDTH, 2 * (216 + build_scene.CAPTION))
 
 
-def test_repeat_rates_count_every_run():
+def test_repeat_rates_count_every_run(tmp_path, monkeypatch):
     from table_1000.experts.generate import repeat_rates
     reports = [{'seed': 4, 'repeat': 0, 'status': 'success'}, {'seed': 4, 'repeat': 1, 'status': 'failed',
                                                                'failure': {'subtask': 'open', 'reason': 'no reachable grasp'}},
@@ -366,3 +380,56 @@ def test_repeat_rates_count_every_run():
     assert rates['succeeded'] == {'4': 1, '72': 0} and rates['success_rate'] == .25 and rates['short'] == {}
     assert repeat_rates(reports[:3], [4, 72], 2)['short'] == {'72': 1}
     assert rates['failures'] == {'take: no reachable grasp': {'72': 2}, 'open: no reachable grasp': {'4': 1}}
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from table_1000.common import batch_runtime as runtime
+    from table_1000.common.batch_timing import Timings, timing_path
+    from table_1000.experts.batch_program import program
+    options = dict(units=[(('000003', 'robot', '0000', 0), 4)], layout=0, steps=None,
+                   physics='isaac-cpu', repeats=3)
+    unit = next(program.units(options))
+    singles = next(program.units(options | dict(repeats=1)))
+    assert unit.timing_key != singles.timing_key
+    class Generator:
+        load_s = 5.
+        def run(self, seed, *state, repeat):
+            return dict(status='success', wall_s=10. * (repeat + 1), cpu_s=8. * (repeat + 1))
+    with ExitStack() as stack:
+        context = runtime.Context(tmp_path, tmp_path, options, 0, tmp_path, stack,
+            loaded=(Generator(), {4: (0, {}, None)}, 2.))
+        result = program.run_unit(context, unit)
+    assert result.report['wall_s'] == 10. and result.report['cpu_s'] == 8.
+    assert result.timing == dict(wall_s=60., cpu_s=48.)
+    from dataclasses import asdict
+    manifest_path = tmp_path / 'units.json'
+    manifest_path.write_text(json.dumps(dict(root=str(tmp_path), output=str(tmp_path), work=str(tmp_path),
+        options=options, commit='submitted', attempt=0, program='fixture:program', units=[asdict(unit)])))
+    monkeypatch.setattr(runtime, '_program', lambda _: SimpleNamespace(run_unit=lambda *args: result))
+    runtime.work(manifest_path, gpu=0)
+    report = json.loads((tmp_path / unit.result).read_text())
+    assert report['wall_s'] == 10. and report['unit_timing']['wall_s'] == 60.
+    timing = json.loads(timing_path(tmp_path, unit.timing_key).read_text())
+    assert timing['wall_s'] == 60. and timing['cpu_s'] == 48.
+    assert Timings(tmp_path, [unit]).costs[unit.key] == 60.
+
+
+def test_render_rejects_seeds_without_episode(batch, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        render.main(['000000', '--physics', 'isaac-cpu', '--cameras', 'wide', '--seeds', '1:4',
+                     '--input', str(tmp_path / 'data')])
+    assert 'seeds 2:4 have no episode; the batch covers 0:5, failed: none' in capsys.readouterr().err
+
+
+def test_render_rejects_unknown_cameras(batch, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        render.main(['000000', '--physics', 'isaac-cpu', '--cameras', 'wide', 'face_depth',
+                     '--input', str(tmp_path / 'data')])
+    assert 'face_depth is not an RGB camera of the robot' in capsys.readouterr().err
+
+
+def test_run_expert_rejects_another_robot(tmp_path, monkeypatch):
+    initial = tmp_path / '000000' / 'x1pro'
+    initial.mkdir(parents=True)
+    write_states(initial / 'initial_states.hdf5', {0: (0, STATE)}, {'scene': '000000', 'robot': 'other'})
+    with pytest.raises(SystemExit):
+        run_expert.main(['000000', '--physics', 'isaac-cpu', '--input', str(tmp_path), '--output', str(tmp_path / 'out')])

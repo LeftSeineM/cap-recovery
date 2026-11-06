@@ -30,8 +30,6 @@ import json
 from pathlib import Path
 import shutil
 import sys
-import time
-import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -79,73 +77,10 @@ def check_cameras(scene, robot, root, names):
     camera_sets(load(scene, 'scene', root), load_spec(robot, root), names)
 
 
-def worker(args):
-    """Render ``args.seeds`` of the batch in this process."""
-    from table_1000.common.batch import worker_gpu
-    from table_1000.sim.isaaclab.app import start_app
-    from table_1000.sim.isaaclab.render import RT2_ARGS
-    app = start_app(gpu=worker_gpu(args.gpu), workers=4, extra_args=RT2_ARGS)
-    failed = False
-    try:
-        from PIL import Image
-        from table_1000.robots import load_spec
-        from table_1000.scenes import load
-        from table_1000.common.batch import parse_seeds
-        from table_1000.scenes.recordings import MERGED, demo_name, video_path
-        from table_1000.sim import CONTROL_HZ
-        from table_1000.sim.isaaclab import render, replay
-        from table_1000.sim.isaaclab.env import RobotEnv
-        from table_1000.sim.isaaclab.video import caption, encode, save_frame, tile
-        render.configure()
-        directory, work = args.batch.resolve(), args.work.resolve()
-        file, episodes = replay.episodes(directory / 'trajectories.hdf5')
-        meta = replay.env_args(file)
-        failures = {}
-        if (directory / 'trajectories_failed.hdf5').is_file():
-            failures = replay.episodes(directory / 'trajectories_failed.hdf5')[1]
-            episodes.update(failures)
-        scene = load(meta['scene'], 'scene', args.root)
-        spec = load_spec(meta['robot'], args.root)
-        cameras, views = camera_sets(scene, spec, args.cameras)
-        env = RobotEnv(scene, spec, args.assets.resolve(), cameras=cameras, views=views, root=args.root)
-        outputs = [MERGED] if args.merge else list(args.cameras)
-        cell_height = None
-        for seed in parse_seeds(args.seeds):
-            started = time.perf_counter()
-            name = demo_name(seed)
-            episode = episodes[name]
-            failure = episode.attrs.get('failure')
-            note = f'    FAILED {failure["subtask"]}: {failure["reason"]}' if failure else ''
-            frames = work / name
-            shutil.rmtree(frames, ignore_errors=True)
-            for output in outputs:
-                (frames / output).mkdir(parents=True)
-            for t in range(episode.length):
-                replay.set_state(env, episode.state(t))
-                for _ in range(FIRST_FRAME_RENDERS - 1 if t == 0 else 0):
-                    env.render([])
-                rendered = env.render(args.cameras)
-                images = {camera: Image.fromarray(rendered[camera]['rgb'][0]) for camera in args.cameras}
-                cell_height = cell_height or min(image.height for image in images.values())
-                left, right = f'{episode.subtask(t) or ""}{note}', f'{t / CONTROL_HZ:.2f} s'
-                for output in outputs:
-                    image = tile([images[c] for c in args.cameras], cell_height) if output == MERGED else images[output]
-                    save_frame(caption(image, left, right) if args.captions else image, frames / output / f'{t:05d}.jpg')
-            for output in outputs:
-                target = video_path(directory, seed, None if output == MERGED else output, failed=name in failures)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(encode(frames / output, CONTROL_HZ, frames / f'{output}.mp4'), target)
-            shutil.rmtree(frames)
-            print(name, episode.length, f'{time.perf_counter() - started:.0f} s', flush=True)
-        env.close()
-    except Exception:
-        traceback.print_exc()
-        failed = True
-    app.close(exit_code=int(failed))
-
 
 def main(argv=None):
-    from table_1000.common.batch import add_arguments, job_count, parse_seeds, process_name, run_batch, seed_range
+    from table_1000.common.batch import add_arguments, job_count, parse_seeds, seed_range
+    from table_1000.common.batch_runtime import run as run_program
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('scene')
     parser.add_argument('--robot', help='default scene robot, ignored with --batch')
@@ -163,16 +98,11 @@ def main(argv=None):
                         help='the batch in <input>/<scene>/<robot>/<expert>/<backend>/, videos written next to it')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--assets', type=Path, default=ROOT / 'assets')
-    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--batch', type=Path, help='this batch directory instead of <input>/<scene>/<robot>/<expert>/<backend>/')
-    parser.add_argument('--work', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.worker:
-        worker(args)
-        return
     import h5py
     from table_1000.scenes.recordings import MERGED, video_path, videos
-    jobs = job_count(parser, args)
+    job_count(parser, args)
     if args.count is not None and args.count < 1:
         parser.error('--count must be positive')
     if len(set(args.cameras)) != len(args.cameras):
@@ -186,7 +116,7 @@ def main(argv=None):
     trajectories = directory / 'trajectories.hdf5'
     if not trajectories.is_file():
         parser.error(f'no trajectories {trajectories}; run run_expert.py first')
-    root = args.root.resolve()
+    root, args.assets = args.root.resolve(), args.assets.resolve()
     with h5py.File(trajectories, 'r') as file:
         env_args = json.loads(file['data'].attrs['env_args'])
     robot = env_args['robot']
@@ -216,32 +146,27 @@ def main(argv=None):
         parser.error('no episodes to render')
     # Per batch directory: renders of different batches run at once without sharing it.
     staging = root / 'outputs' / 'scenes' / args.scene / 'render' / hashlib.sha1(str(directory).encode()).hexdigest()[:12]
-    shutil.rmtree(staging, ignore_errors=True)
+    if not args.dry_run:
+        shutil.rmtree(staging, ignore_errors=True)
     targets = {seed: [video_path(directory, seed, None if output == MERGED else output, failed=seed in failed)
                       for output in ([MERGED] if args.merge else args.cameras)] for seed in seeds}
-    for path in (path for paths in targets.values() for path in paths):
-        path.unlink(missing_ok=True)
-
-    def command(part, index, attempt):
-        name = process_name(f'part{index}', attempt)
-        argv = [sys.executable, str(Path(__file__).resolve()), args.scene, '--worker', '--physics', args.physics,
-                '--cameras', *args.cameras, '--seeds', *seed_range(part).split(), '--batch', str(directory),
-                '--work', str(staging / name), '--root', str(root), '--assets', str(args.assets.resolve())]
-        argv += ['--merge'] if args.merge else []
-        argv += ['--captions'] if args.captions else []
-        return argv, staging / f'{name}.log', f'{args.scene} render {name} seeds {seed_range(part)}'
+    if not args.dry_run:
+        for path in (path for paths in targets.values() for path in paths):
+            path.unlink(missing_ok=True)
 
     lengths = {**succeeded, **failed}
-    missing = run_batch(seeds, command=command, cost=lambda seed: lengths[seed], count=jobs, gpus=args.gpus,
-                        launcher=args.launcher, retries=args.retries,
-                        missing=lambda seed: not all(path.is_file() for path in targets[seed]))
+    missing = run_program('table_1000.scenes.render_program:program', vars(args) | dict(
+        batch=directory, robot=robot, batch_key=staging.name, units=[(seed, lengths[seed]) for seed in seeds]),
+        root=root, output=staging)
+    if args.dry_run:
+        return
     summary['render'] = missing.record(directory, patch_name='render-dirty.patch')
     for key, kinds in videos(directory).items():
         summary[key] = {kind: seed_range(values) for kind, values in kinds.items()}
     (directory / 'summary.json').write_text(json.dumps(summary, indent=1, ensure_ascii=False, default=float) + '\n')
     print('VIDEOS', json.dumps({key: summary[key] for key in ('videos', 'fails')}), flush=True)
     if missing:
-        raise SystemExit(f'no video: seeds {seed_range(missing)}; see {staging}')
+        raise SystemExit(f'no video: seeds {seed_range([unit[0] for unit in missing])}; see {staging}')
 
 
 if __name__ == '__main__':

@@ -12,7 +12,39 @@ import venv
 
 import pytest
 
-from table_1000.common import batch
+from table_1000.common import batch, batch_runtime as runtime
+
+
+FIXTURE = """
+from pathlib import Path
+import os, subprocess, sys, time
+from table_1000.common.batch_runtime import Unit, UnitResult
+class Program:
+    def units(self, options):
+        for item in options.get('units', [0, 1, 2]):
+            yield Unit((item,), dict(item=item), f'unit-{item}.json', ('fixture', str(item)), ('fixture-load',))
+    def pack_key(self, unit):
+        return unit.key
+    def run_unit(self, context, unit):
+        if context.options.get('sleep'):
+            ready = Path(context.options['sleep'])
+            temporary = ready.with_suffix('.part')
+            temporary.write_text(str(os.getpid()))
+            temporary.replace(ready)
+            time.sleep(60)
+        item = unit.key[0]
+        attempt = int(context.work.name.split('attempt')[1])
+        subprocess.run([sys.executable, str(context.root / 'scripts/worker.py'),
+            context.options['original'], str(context.root), str(item), str(attempt)], check=True)
+        ok = (context.root / 'outputs' / f'done-{item}').exists()
+        return UnitResult(dict(status='success' if ok else 'error', attempt=99))
+program = Program()
+"""
+
+
+def execute(root, **options):
+    return runtime.run('table_1000.fixture:program', dict(original=str(root / '.local/..'),
+        jobs=1, gpus=[0], retries=1) | options, root=root, output=root / 'outputs')
 
 
 def git(root, *args):
@@ -21,7 +53,7 @@ def git(root, *args):
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path, monkeypatch):
     root = tmp_path / 'repo with spaces'
     root.mkdir()
     git(root, 'init', '-q')
@@ -59,6 +91,17 @@ if item == '0' and attempt == 0:
 if item != '1' or attempt:
     (root / 'outputs' / f'done-{item}').touch()
 ''')
+    source = Path(batch.__file__).parent
+    (root / 'table_1000/common').mkdir()
+    (root / 'table_1000/common/__init__.py').touch()
+    for name in ('batch.py', 'batch_runtime.py', 'batch_timing.py', 'serialization.py'):
+        shutil.copy2(source / name, root / 'table_1000/common' / name)
+    (root / 'configs').mkdir()
+    shutil.copy2(source.parents[1] / 'configs/batch.toml', root / 'configs/batch.toml')
+    (root / 'table_1000/fixture.py').write_text(FIXTURE)
+    import runpy
+    implementation = runpy.run_path(str(root / 'table_1000/fixture.py'))['program']
+    monkeypatch.setattr(runtime, '_program', lambda _: implementation)
     git(root, 'add', '.')
     git(root, 'commit', '-qm', 'submitted')
     return root
@@ -82,18 +125,12 @@ def test_workers_and_retries_keep_submitted_code_and_editable_imports(repo, monk
     assert subprocess.check_output([str(python), '-c', 'import table_1000; print(table_1000.__file__)'],
                                    cwd=repo, text=True).strip() == str(repo / 'table_1000/__init__.py')
 
-    def command(group, index, attempt):
-        item, = group
-        # The original path is intentionally carried as a non-source payload to let worker 0 edit it.
-        argv = [str(python), str(repo / 'scripts/worker.py'), str(repo / '.local' / '..'),
-                str(repo), str(item), str(attempt)]
-        return argv, repo / 'outputs' / f'{item}-{attempt}.log', str(item)
-
     (repo / '.local').mkdir()
-    # Resolve '..' only inside the worker, so redirecting sources does not rewrite the edit target.
-    result = batch.run_batch([0, 1, 2], command=command, missing=lambda item: not (repo / 'outputs' / f'done-{item}').exists(),
-                             key=lambda item: item, count=1, gpus=[0], launcher=launcher, retries=1, root=repo)
+    monkeypatch.setattr(runtime.sys, 'executable', str(python))
+    result = execute(repo, launcher=launcher)
     assert result == [] and result.commit == head
+    report = json.loads((repo / 'outputs/unit-1.json').read_text())
+    assert report['attempt'] == 99 and report['worker_attempt'] == 1
     assert batch.commit(repo) != head
     checkouts = set()
     for item, attempt in ((0, 0), (1, 0), (2, 0), (1, 1)):
@@ -132,18 +169,12 @@ def test_dirty_workers_and_retries_keep_working_files_and_patch(repo, monkeypatc
     monkeypatch.setenv('PYTHONPATH', str(repo))
     (repo / '.local').mkdir()
 
-    def command(group, index, attempt):
-        # Snapshot creation must not touch the source files or index before the first worker starts.
-        if group == [0] and not attempt:
-            assert all(path.read_bytes() == data for path, data in original_files.items())
-            assert git(repo, 'status', '--porcelain') == original_status
+    run_jobs = batch.run_jobs
+    def checked_jobs(jobs, gpus):
         assert (repo / '.git/index').read_bytes() == original_index
-        item, = group
-        return ([sys.executable, str(worker), str(repo / '.local/..'), str(repo), str(item), str(attempt)],
-                repo / 'outputs' / f'{item}-{attempt}.log', str(item))
-
-    result = batch.run_batch([0, 1, 2], command=command, missing=lambda item: not (repo / 'outputs' / f'done-{item}').exists(),
-                             key=lambda item: item, count=1, gpus=[0], launcher=launcher, retries=1, root=repo)
+        return run_jobs(jobs, gpus)
+    monkeypatch.setattr(batch, 'run_jobs', checked_jobs)
+    result = execute(repo, launcher=launcher)
     assert result == [] and result.commit == head + '+dirty'
     assert (repo / '.git/index').read_bytes() == original_index
     assert not new.exists() and 'changed after submission' in value.read_text()
@@ -205,12 +236,37 @@ def test_non_git_sources_run_in_place(repo, monkeypatch):
     with batch._checkout(copy) as (checkout, revision, patch):
         assert checkout == copy and revision is None and patch is None
     monkeypatch.chdir(copy)
-    result = batch.run_batch([0], root=copy, count=1, gpus=[0], missing=lambda _: False,
-                             command=lambda *_: ([sys.executable, '-c', 'import pathlib; print(pathlib.Path.cwd())', '--'],
-                                                 copy / 'worker.log', 'copy'))
+    (copy / 'scripts').mkdir()
+    shutil.copy2(repo / 'scripts/worker.py', copy / 'scripts/worker.py')
+    # A dry run uses the same output without executing or reserving it.
+    result = runtime.run('table_1000.fixture:program', dict(jobs=1, dry_run=True), root=copy, output=copy / 'outputs')
     assert result.commit is None and result.patch is None
     assert result.record(copy) == {'commit': None}
-    assert (copy / 'worker.log').read_text().strip() == str(copy)
+    assert (copy / 'outputs/plan.json').is_file()
+    from table_1000.common.batch_runtime import Unit, load_config
+    from table_1000.common.batch_timing import Timings, record, timing_path
+    units = [Unit((seed,), {}, f'{seed}.json', ('asset', 'cup', 'robot', 'cpu', str(seed)),
+                  ('asset', 'cup', 'robot', 'cpu')) for seed in (0, 1)]
+    report = dict(status='failed', wall_s=110., cpu_s=95., save_wall_s=20., save_cpu_s=10.,
+                  app_start_s=20., asset_load_s=30., commit='frozen')
+    record(repo, copy, units[0], report)
+    key = units[0].timing_key
+    value = json.loads(timing_path(repo, key).read_text())
+    assert value['commit'] == 'frozen' and value['batch'] == str(copy) and value['wall_s'] == 110.
+    record(repo, copy, units[0], report | dict(wall_s=120., commit='new'))
+    assert json.loads(timing_path(repo, key).read_text())['wall_s'] == 120.
+    assert list(timing_path(repo, key).parent.iterdir()) == [timing_path(repo, key)]
+    timing = Timings(repo, units)
+    assert timing.coverage == (1, 2) and set(timing.costs.values()) == {140.}
+    assert timing.wall([u.key for u in units]) == 330.
+    machine = copy / 'machine.toml'
+    machine.write_text('max_jobs = 10\n')
+    assert load_config(path=machine).jobs('auto', 60000., 200) == 10
+    assert load_config(dict(max_jobs=30), path=machine).jobs(30, 60000., 200) == 30
+    config = load_config(path=copy / 'absent.toml')
+    assert config.jobs('auto', 1500., 200) == 5
+    assert config.jobs('auto', 12000., 200) == 20
+    assert config.jobs('auto', 120000., 200) == 100
 
 
 def test_pinned_command_redirects_bare_relative_files(repo, monkeypatch):
@@ -279,20 +335,17 @@ def test_checkout_cleanup_error_does_not_mask_add_interruption(repo, monkeypatch
 
 
 @pytest.mark.parametrize('dirty', [False, True])
-def test_failed_and_exceptional_batches_remove_their_checkout(repo, dirty):
+def test_failed_and_exceptional_batches_remove_their_checkout(repo, monkeypatch, dirty):
     if dirty:
         (repo / 'new.py').write_text('NEW = True\n')
-    def command(group, index, attempt):
-        return [sys.executable, '-c', 'raise SystemExit(1)', '--'], repo / 'outputs/failed.log', 'failed'
-
-    result = batch.run_batch([0], command=command, missing=lambda _: True, count=1, gpus=[0], retries=0, root=repo)
-    assert result == [0] and registered(repo) == [f'worktree {repo}']
-
+    monkeypatch.setattr(batch, 'run_jobs', lambda *args: ['failed'])
+    result = execute(repo, units=[0], retries=0)
+    assert result == [(0,)] and registered(repo) == [f'worktree {repo}']
     def broken(*args):
-        raise RuntimeError('command failed')
-
-    with pytest.raises(RuntimeError, match='command failed'):
-        batch.run_batch([0], command=broken, missing=lambda _: True, count=1, gpus=[0], root=repo)
+        raise RuntimeError('submission failed')
+    monkeypatch.setattr(batch, 'run_jobs', broken)
+    with pytest.raises(RuntimeError, match='submission failed'):
+        execute(repo, units=[0])
     assert registered(repo) == [f'worktree {repo}']
 
 
@@ -321,13 +374,14 @@ def test_interruption_stops_workers_and_removes_checkout(repo, tmp_path, signum,
 import sys
 from pathlib import Path
 sys.path.insert(0, {str(Path(batch.__file__).resolve().parents[2])!r})
-from table_1000.common.batch import run_batch
+from table_1000.common.batch_runtime import run
+import runpy
+import table_1000.common.batch_runtime as runtime
 root = Path({str(repo)!r})
-def command(group, index, attempt):
-    code = "import os, pathlib, time; pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
-    return [sys.executable, '-c', code, '--'], root / 'outputs/worker.log', 'sleep'
-run_batch([0, 1], command=command, key=lambda item: item, missing=lambda _: True,
-          count=1, gpus=[0], root=root, launcher={launcher!r})
+implementation = runpy.run_path(str(root / 'table_1000/fixture.py'))['program']
+runtime._program = lambda _: implementation
+run('table_1000.fixture:program', dict(units=[0,1], jobs=1, gpus=[0], sleep={str(ready)!r},
+    launcher={launcher!r}), root=root, output=root / 'outputs')
 ''')
     with subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, start_new_session=True) as process:
@@ -353,8 +407,8 @@ run_batch([0, 1], command=command, key=lambda item: item, missing=lambda _: True
 
 def test_later_phase_reuses_frozen_dirty_source_after_original_changes(repo):
     (repo / 'table_1000/value.py').write_text("VALUE = 'frozen dirty'\n")
-    result = batch.run_batch([], command=lambda *args: None, missing=lambda _: False,
-                             count=1, gpus=[0], root=repo)
+    with batch._checkout(repo) as (_, commit, patch):
+        result = batch.BatchResult([], commit, patch)
     assert result.patch
     (repo / 'table_1000/value.py').write_text("VALUE = 'next task'\n")
     (repo / 'new.py').write_text('NEXT = True\n')

@@ -1,6 +1,6 @@
 """Compare first-attempt acceptance counts and export grasp preference data.
 
-uv run python scripts/experts/eval_asset_grasp.py compare --baseline runs/grasp/000103/unified-regression-02 --run runs/grasp/RUN --output outputs/asset-grasp/comparison
+uv run python scripts/benchmarks/asset_grasp.py compare --baseline runs/grasp/000103/unified-regression-02 --run runs/grasp/RUN --output outputs/asset-grasp/comparison
 Different acceptance protocols are reported side by side, not treated as a
 controlled measurement of the policy change alone. Thin-object categories are
 reported separately; this classification never changes the grasp policy.

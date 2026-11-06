@@ -18,7 +18,7 @@
 | `docs/` | 文档，分类见[文档写法](writing.md) | 提交 |
 | `assets/` | 由源码构建或下载的资产，以及验收看的预览、测试结果和场景初态 | 忽略 |
 | `data/` | 生成的数据：专家轨迹及其录像；`data/cases/` 为人工挑选、长期留存的卡点用例 | 忽略 |
-| `runs/` | 开发和实验运行，按类型分子目录（`runs/expert/`、`runs/teleop/`、`runs/resolve/`），每次运行一个新目录，不覆盖 | 忽略 |
+| `runs/` | 开发和实验运行，按类型分子目录（`runs/expert/`、`runs/teleop/`、`runs/resolve/`），每次运行一个新目录，不覆盖；`runs/.batch-timing/` 为各测试单元最近一次耗时的派生索引，可随时删除 | 忽略 |
 | `outputs/` | 日志和临时结果，可随时清理 | 忽略 |
 | `.local/` | 本机说明与脚本；批量运行时代码的临时检出（`.local/batch-checkouts/`，批次结束后删除，见[批量运行](../tutorials/README.md#批量运行的通用参数)） | 忽略 |
 

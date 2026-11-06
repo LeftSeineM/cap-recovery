@@ -1,0 +1,10 @@
+# Whole-batch job count; machine overrides: ~/.config/table-1000/batch.toml.
+max_jobs = 100
+
+[[auto]]
+job_seconds = 600
+min_jobs = 20
+
+[[auto]]
+job_seconds = 300
+max_jobs = 20

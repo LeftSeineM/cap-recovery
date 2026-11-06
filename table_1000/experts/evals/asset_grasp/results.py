@@ -1,20 +1,6 @@
 """Output and provenance of isolated asset grasp tests (no simulator required)."""
 
-from pathlib import Path
 import shutil
-
-from table_1000.common.batch import run_name
-
-
-def prepare(root, *, dev, label, checkout):
-    if not dev and (checkout is None or checkout.endswith('+dirty')):
-        raise ValueError('正式运行要求干净的 Git 提交；未提交的开发运行请加 --dev')
-    if label and (Path(label).name != label or label in {'.', '..'}):
-        raise ValueError('--name 必须是单个目录名')
-    name = run_name(checkout, label)
-    output = root / ('runs/grasp' if dev else 'outputs/asset-grasp') / name
-    output.mkdir(parents=True, exist_ok=False)
-    return name, output
 
 
 def require_mode(*, dev, asset, seeds, video, label, trials, configured_trials):

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import h5py
 import pytest
 
+from tests.common.batch_worker import manifest, expert_job, expert_result
+
 from table_1000.scenes import (robot_config, load_expert, parse_scope, outside_scope,
                                initial_dir, data_dir, case_dir, dev_dir, dev_batches,
                                batch_ref, resolve_batch_ref)
@@ -50,18 +52,6 @@ def test_steps_only_expert_can_share_scene_helpers(tmp_path):
         "from ..common import DESCRIPTION\nROBOT = 'a'\nSCOPE = {0: None}\nSTEPS = []\n")
     expert = load_expert('demo', root=tmp_path)
     assert expert.DESCRIPTION == 'shared helper' and callable(expert.solve)
-
-
-def test_expert_robot_must_match_directory(tmp_path):
-    sources(tmp_path, "ROBOT = 'b'\nSCOPE = {0: None}\n")
-    with pytest.raises(ValueError, match='differs from directory'):
-        load_expert('demo', root=tmp_path)
-
-
-@pytest.mark.parametrize('scope', [{}, {'0': None}, {0: 'all'}, {0: []}, {0: [1,1]}, {-1: None}])
-def test_invalid_scope(scope):
-    with pytest.raises(ValueError, match='SCOPE'):
-        parse_scope(scope)
 
 
 def test_scope_and_product_paths():
@@ -149,20 +139,6 @@ def test_checkpoint_identity(saved, message):
         check_identity(saved, 'a', '0000', 'batch')
 
 
-def test_scope_cli_rejects_outside_and_formal_override(tmp_path):
-    sources(tmp_path)
-    directory = initial_dir(tmp_path / 'assets/scenes', 'demo', 'a', 2)
-    directory.mkdir(parents=True)
-    with h5py.File(directory / 'initial_states.hdf5', 'w') as file:
-        file.attrs.update(scene='demo', robot='a')
-        file.create_group('2')
-    base = ['demo', '--physics', 'isaac-cpu', '--root', str(tmp_path), '--input', str(tmp_path / 'assets/scenes')]
-    with pytest.raises(SystemExit):
-        main([*base, '--dev', '--layout', '2', '--seeds', '2'])
-    with pytest.raises(SystemExit):
-        main([*base, '--outside-scope'])
-
-
 @pytest.mark.parametrize('summary_changes, checkpoint_changes, message', [
     ({'expert': None}, {}, 'batch predates robot/expert tags; rerun it on the current code'),
     ({'robot': 'b'}, {}, "robot 'b' differs"),
@@ -199,20 +175,20 @@ def test_scope_defaults_run_every_layout_with_its_own_seeds(tmp_path, monkeypatc
 
     def jobs(commands, gpus):
         for command, _, _ in commands:
-            layout = int(command[command.index('--layout') + 1])
-            seeds = batch.parse_seeds(command[command.index('--seeds') + 1:command.index('--states')])
+            data = manifest(command)
+            layout = data['options']['layout']
+            data, work, seeds = expert_job(command)
             selected.append((layout, seeds))
-            work = Path(command[command.index('--work') + 1])
             (work / 'episodes').mkdir(parents=True)
             for seed in seeds:
-                (work / f'episodes/{seed}.json').write_text(json.dumps(
-                    {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 1.}))
+                expert_result(data, work, seed, {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 1.})
         return []
 
     monkeypatch.setattr(batch, 'run_jobs', jobs)
     main(['demo', '--physics', 'isaac-cpu', '--root', str(tmp_path),
           '--input', str(tmp_path / 'assets/scenes'), '--output', str(tmp_path / 'data/scenes')])
-    assert selected == [(0, [0, 1, 2]), (2, [1, 3])]
+    assert {layout: sorted(seed for key, seeds in selected if key == layout for seed in seeds)
+            for layout in (0, 2)} == {0: [0, 1, 2], 2: [1, 3]}
     for layout in [0, 2]:
         directory = data_dir(tmp_path / 'data/scenes', 'demo', 'a', '0002', 'isaac-cpu', layout)
         summary = json.loads((directory / 'summary.json').read_text())
@@ -249,13 +225,11 @@ def test_partial_scope_development_runs_and_records_available_seeds(tmp_path, mo
 
     def jobs(commands, gpus):
         for command, _, _ in commands:
-            seeds = batch.parse_seeds(command[command.index('--seeds') + 1:command.index('--states')])
+            data, work, seeds = expert_job(command)
             scheduled.extend(seeds)
-            work = Path(command[command.index('--work') + 1])
             (work / 'episodes').mkdir(parents=True)
             for seed in seeds:
-                (work / f'episodes/{seed}.json').write_text(json.dumps(
-                    {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 1.}))
+                expert_result(data, work, seed, {'seed': seed, 'status': 'success', 'duration_s': 1., 'wall_s': 1.})
         return []
 
     monkeypatch.setattr(batch, 'run_jobs', jobs)
@@ -285,3 +259,29 @@ def test_explicit_resume_seed_still_checks_scope(tmp_path, capfd):
     with pytest.raises(SystemExit):
         main([*args, '--dev', '--seeds', '2'])
     assert 'outside SCOPE' in capfd.readouterr().err
+
+
+def test_expert_robot_must_match_directory(tmp_path):
+    sources(tmp_path, "ROBOT = 'b'\nSCOPE = {0: None}\n")
+    with pytest.raises(ValueError, match='differs from directory'):
+        load_expert('demo', root=tmp_path)
+
+
+@pytest.mark.parametrize('scope', [{}, {'0': None}, {0: 'all'}, {0: []}, {0: [1,1]}, {-1: None}])
+def test_invalid_scope(scope):
+    with pytest.raises(ValueError, match='SCOPE'):
+        parse_scope(scope)
+
+
+def test_scope_cli_rejects_outside_and_formal_override(tmp_path):
+    sources(tmp_path)
+    directory = initial_dir(tmp_path / 'assets/scenes', 'demo', 'a', 2)
+    directory.mkdir(parents=True)
+    with h5py.File(directory / 'initial_states.hdf5', 'w') as file:
+        file.attrs.update(scene='demo', robot='a')
+        file.create_group('2')
+    base = ['demo', '--physics', 'isaac-cpu', '--root', str(tmp_path), '--input', str(tmp_path / 'assets/scenes')]
+    with pytest.raises(SystemExit):
+        main([*base, '--dev', '--layout', '2', '--seeds', '2'])
+    with pytest.raises(SystemExit):
+        main([*base, '--outside-scope'])
