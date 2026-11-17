@@ -1,0 +1,2 @@
+# Preserve the byte identity of the native-validated source snapshot.
+*.py -text whitespace=trailing-space,space-before-tab,cr-at-eol
