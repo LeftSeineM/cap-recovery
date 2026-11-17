@@ -15,6 +15,7 @@
 | [场景](scenes.md) | `scene.py`：随机初始化、布局、初态检查 |
 | [专家](experts.md) | `experts/<机器人>/<NNNN>.py`：文件与适用范围、分层、编写规则、步骤、重试与失败恢复 |
 | [专家数据](expert-data.md) | 批次、轨迹、报告、检查点、调用帧与求解记录 |
+| [RoboDojo 搭塔恢复](robodojo-tower-recovery.md) | 外部 backend 源码包、数据校验与证据分类 |
 
 本页说明每个文件放在哪里，以及资产共用的单位、名称表示和 README。
 

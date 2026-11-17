@@ -1,0 +1,83 @@
+{
+  "version": "tower_s1_protected_rotation_clearance_v031",
+  "backend": "RoboDojo ARM2 build_tower, arx_x5; separate from Table1000 ctx interface",
+  "package_fingerprint_sha256": "26d23c1269d7702184d85dcd9ed6c8bfd6b34287d7299075206efaec2dc334cb",
+  "python_files_sha256": {
+    "entry_state.py": "2aabfbbc84980a28eccad5f240fe8b6efc4230068792dc717dd524205df6ce06",
+    "feedback_target.py": "fdc9e374b278752578bc6fb1b02f1c5b74adc80a760ca893c8925fab9d8e71de",
+    "feedback_transport.py": "03f76ad42a4dd11c8b8958d5fb2226a6b8c1b826d916e3ca7a478a7e58f61662",
+    "finish_primitives.py": "c70fb832637b05cf8acd128df9ecb873c73bac848128d72447a22d518e643e1f",
+    "future_pickup.py": "06c2d8cd7012711eb9c6524f5582a1236a4d0e5d219086c06118e7f7db835143",
+    "grasp_diagnostic.py": "22b8a20cd79d9bf32669996f63f93b605f45c3f6e1413213a4e2b75adb5782c5",
+    "legal_joint_representative.py": "f5fcc55a9c50672b473449cc05ba7043bfbcd3b71bc8511045002641517dd770",
+    "measured_geometry.py": "70988202a8a9fda8a747b3fbd21d83d2c57a01cfa76aa817381d6a81ff63ffd5",
+    "motion.py": "65c6141bbe061a2ee5aa9503b45bc44097708cc88bd36790384abac9537c1d7b",
+    "multisolution.py": "03e54939de644224dd67b38017559cef4aa7f960ae0ae825bce3b635f762827e",
+    "paired_motion.py": "5af6dfece5fa48f9d95b06a9b28599bdf9ddc7ec251ff86daa5b370683387962",
+    "pair_control.py": "8caa81b61a1833cbd6d6b68e5aec17dd193e4ea497df1db8549e7c1a7f2c6a8f",
+    "planner.py": "8c1b195219be71104defa7aee4679f808a42da9a2fcc3fbd23156aee64979bce",
+    "preflight_model.py": "86d830bafa5789847bc810e226230f5680d69fcc1bf0d0261c883089406a0c9e",
+    "rightmost_target.py": "dee6764389a8e79483dc365e56da5e4d41a32558249c49b091e5cf29b70070e8",
+    "scene_adapter.py": "09ac1b4ef70e6263ac9542f5ab89f6a78781b9a4a9862c623f7a4280b84e8379",
+    "self_clearance.py": "d50d33cd6aa891540d8ccae10ac93896e87028fe742cf7a99e5119d038504b71",
+    "skills.py": "0ce70a01471260fff38949bf99b9b0e6d10bdc33fbbf343d64fb92a0bb88844b",
+    "skill_contract.py": "24dece8b51dacd29b6ac40ee6be22b521953a44820c399eeca570e9b93dedb85",
+    "style.py": "949729652f9665344620d9085c478df02f96c540750a39e1314330a5a0438ac7",
+    "support_release.py": "1b6b142574afaec2c6de64cfcde3369db4f1a28fd9282a6f52ef60b1063d3b9b",
+    "tower_strategy.py": "6fc37079d64978ebf038f32e000d73dd42c77177529f0267b02a76c20cbf1064",
+    "__init__.py": "e9ccead1eba3e92b2a99c3de9e6bc40eff96b32982449e23e88413b65fa286ec"
+  },
+  "external_runtime_files_sha256": {
+    "CAPABILITIES.json": "fc98746c91076e36b11c44e2983166eaceee45402faee16ed972e5597b9e7fef",
+    "geometry_assets.json": "2d321c91faa2a59b81a18736d5ab99a01e163ec8e977664d9268ac2367804987",
+    "inherited_grasp_template.json": "cb918ee0f4fcae367b2ad744be34367c761fe33ec4ea16e20feffaec3d763f8e",
+    "prism_grasp_template.json": "2a1a6858b96170d705617903ca22afca02b9e3d39a54e495599c2e5d6cd4762a"
+  },
+  "validated_native_cases": [
+    {
+      "round": "r1",
+      "selector": 2,
+      "layout": 15,
+      "E_frame": 0,
+      "T_step": 1,
+      "classification": "after_development",
+      "native_end_step": 956,
+      "expert_actions": 955,
+      "archive_sha256": "7ccc0e4d2deb7e66e1cde6fe308f295ba81445f6c6291c4074b2821dc55d638a"
+    },
+    {
+      "round": "r2",
+      "selector": 0,
+      "layout": 2,
+      "E_frame": 0,
+      "T_step": 1,
+      "classification": "frozen_first_reuse",
+      "native_end_step": 972,
+      "expert_actions": 971,
+      "archive_sha256": "1a4ea97127b220fda1f71103793959ced24ea85dad4d0274b547e419070056bd"
+    }
+  ],
+  "unaccepted_limitations": [
+    {
+      "round": "r1",
+      "selector": 2,
+      "layout": 43,
+      "version": "v031",
+      "native_stop_step": 796,
+      "reason": "supported cap/upperboard drift >2mm at withdrawal"
+    },
+    {
+      "round": "r2",
+      "selector": 0,
+      "layout": 26,
+      "version": "v031",
+      "native_stop_step": 887,
+      "reason": "roof carry support drift >2mm; no release"
+    }
+  ],
+  "strict_unseen_layout_claim": false,
+  "rollbacks_included": false,
+  "native_total_limit": 1050,
+  "wall_limit_seconds": 1500,
+  "snapshot_files_published": false
+}
