@@ -55,6 +55,18 @@
       "native_end_step": 972,
       "expert_actions": 971,
       "archive_sha256": "1a4ea97127b220fda1f71103793959ced24ea85dad4d0274b547e419070056bd"
+    },
+    {
+      "round": "r2",
+      "selector": 0,
+      "layout": 54,
+      "E_frame": 0,
+      "T_step": 1,
+      "classification": "frozen_first_reuse",
+      "native_end_step": 1004,
+      "expert_actions": 1003,
+      "archive_sha256": "d923a984596f53f23cdaf478a5790037821f7449dff7a47348ba402c727adb40",
+      "adapter_note": "Read-only stable-boundary recording sidecar failed to save due a missing import; no extra native actions or intermediate restores; original frozen S1 and native judge unchanged"
     }
   ],
   "unaccepted_limitations": [
