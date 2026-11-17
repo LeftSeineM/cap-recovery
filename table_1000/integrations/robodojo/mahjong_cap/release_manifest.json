@@ -1,0 +1,28 @@
+{
+  "release": "robodojo-mahjong-v020",
+  "origin_full_freeze_semantic_sha256": "f020f620f01d60c562f3b304da4d8e9644eddab2929d15d0f59129f2af221846",
+  "origin_validated_job": "MK59-FLORA-DEV-R1-S1L37-PENDINGARM-20261116T225255",
+  "policy_and_short_prior_files_sha256": {
+    "__init__.py": "a568e3481eb8aed0c58b3a0a3259abe05cc90459df3ecd362fb9531d8eaab93f",
+    "bonus_handover.py": "49f3a45bf1fb1d57ab749b9fb6415e66d56abc8c2f258202d91d52a89be64402",
+    "bonus_pickup.py": "a2192fc3ddc02e779ed6fe7cc29be5d7189249a65e2be8e89bd6b5bd22cd5bec",
+    "bonus_suffix.py": "52ca352bc9011e960f76df2668008c8648cfb0a48a510c9e87a32e8594a15981",
+    "finish_primitives.py": "c70fb832637b05cf8acd128df9ecb873c73bac848128d72447a22d518e643e1f",
+    "grasp_prior_380_415.npz": "3025c50b31c0b5e92612d5abd1eabccbf9ae53fc0b5507dbc3f614a19d2fbc60",
+    "grip_continuity.py": "28486afea2478168a3bf1fc166db43e81bd9dc066b754644af9450b0e6d10644",
+    "handover_prior_415_490.npz": "e4d162867d650d8a73a331b08ed89beb8405dc75444ef07ef38d1d7a632dc4ae",
+    "json_safety.py": "09d964ea49253f1562e64d1c974e2c359369fbd72bbe98e52ff7787090b018e2",
+    "legal_joint_representative.py": "f5fcc55a9c50672b473449cc05ba7043bfbcd3b71bc8511045002641517dd770",
+    "motion.py": "6b4233c88a1448a57912452afbd754b3d421077cf94bf2cc1e23fc69ae01677a",
+    "place.py": "549f25bdf77a332f894417916b81de8f9bcab3a680a17ca9f6ce6786e044f660",
+    "right_prepare.py": "82b4daa0d772bcf57adb8e3be68385be8d7d81ac717f7c736c6e43d43a3daa9a",
+    "rightmost_target.py": "dee6764389a8e79483dc365e56da5e4d41a32558249c49b091e5cf29b70070e8",
+    "style.py": "949729652f9665344620d9085c478df02f96c540750a39e1314330a5a0438ac7",
+    "validated_push_style.npz": "42a74e91c3467a5c3f11311204b52ebd6ce5509756ffffdafa862b3217235b26"
+  },
+  "source_specific_geometry_rebind_required": true,
+  "geometry_example_job": "MK59-FLORA-FROZEN-R1-S2L36-20261116T230940",
+  "geometry_metadata_change": "Only file paths normalized; numerical bounds and asset SHA preserved",
+  "restore_helper_sha256": "5ce654f07e27f05640a0a805db3a2546174d1d11d919fa8a1a0c51780086a36f",
+  "new_public_commit_not_claimed_to_have_generated_historical_native_runs": true
+}
