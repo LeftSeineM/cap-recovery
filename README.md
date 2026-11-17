@@ -13,6 +13,8 @@ Table-1000 是面向机器人桌面整理任务的 benchmark 与场景资产项�
 | [方案选择](docs/decisions/pen-cap-snap.md) | 所有人 | 重要方案的结论与依据 |
 | [实验台账](docs/experiments/README.md) | 所有人 | 研究结论与关键实验结果，可按提交复现 |
 
+外部 RoboDojo make_kong 恢复适配器见[麻将CAP接入说明](docs/tutorials/robodojo-mahjong-cap.md)和[验证证据与能力边界](docs/experiments/20261117-robodojo-mahjong/README.md)。
+
 ## 开发环境
 
 在仓库根目录执行：

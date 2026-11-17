@@ -1,0 +1,120 @@
+{
+  "scope": "Capability gaps remain in the260 target; resolved revisits identified separately",
+  "items": [
+    {
+      "capability": "physically_restand_previously_disturbed_non_target_hand_tile",
+      "source_id": "clean1_make_kong_s2_l26",
+      "E_frame": 173,
+      "T_step": 148,
+      "status": "pending_capability_development; eligible other sources continue"
+    },
+    {
+      "capability": "fit_three_reveals_and_bonus_place_in_native600_preserving_effective_contact_timing",
+      "source_id": "clean2_make_kong_s2_l34",
+      "E_frame": 173,
+      "T_step": 148,
+      "native_trials": 6,
+      "last_failed_job": "MK59-FLORA-DEV-R2-S2L34-BUDGET-20261116T224047",
+      "status": "revisit_three_trials_completed;new_efficiency_capability_pending"
+    },
+    {
+      "capability": "physically_complete_reveal_of_stably_partly_toppled_matching_tile",
+      "source_id": "clean1_make_kong_s0_l24",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 3,
+      "last_failed_job": "MK59-FLORA-REVISIT-R1-S0L24-20261116T220324",
+      "status": "revisit_failed;bounded20mmextension_insufficient"
+    },
+    {
+      "capability": "confirm_stable_simultaneous_matching_target_entry_with_bounded_native_settling",
+      "source_id": "clean1_make_kong_s0_l26",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 3,
+      "last_failed_job": "MK59-FLORA-DEV-R1-S0L26-STABLE-20261116T210901",
+      "status": "resolved_by_verified_native_revisit"
+    },
+    {
+      "capability": "physically_complete_reveal_of_stably_partly_toppled_matching_tile",
+      "source_id": "clean1_make_kong_s0_l3",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 2,
+      "last_failed_job": "MK59-FLORA-DEV-R1-S0L3-20261116T211806",
+      "status": "resolved_by_verified_native_revisit"
+    },
+    {
+      "capability": "physically_restand_previously_disturbed_non_target_hand_tile",
+      "source_id": "clean1_make_kong_s0_l59",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R1-S0L59-20261116T213612",
+      "status": "pending_validated_capability; next source continues"
+    },
+    {
+      "capability": "physically_restand_fallen_non_target_hand_tile",
+      "source_id": "clean1_make_kong_s1_l62",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R1-S1L62-20261116T230000",
+      "status": "pending_validated_capability"
+    },
+    {
+      "capability": "physically_restand_previously_disturbed_non_target_hand_tile",
+      "source_id": "clean2_make_kong_s0_l0",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R2-S0L0-20261116T231543",
+      "status": "pending_validated_capability"
+    },
+    {
+      "capability": "physically_clear_faceup_landing_space_or_reorient_grasp",
+      "source_id": "clean2_make_kong_s0_l21",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R2-S0L21-20261117T033424",
+      "status": "pending_validated_capability"
+    },
+    {
+      "capability": "recover_multiple_stable_partial_matching_targets_with_landing_space",
+      "source_id": "clean2_make_kong_s0_l24",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R2-S0L24-20261117T034130",
+      "status": "pending_validated_capability"
+    },
+    {
+      "capability": "physical_face_down_matching_tile_turnover",
+      "source_id": "clean2_make_kong_s0_l64",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R2-S0L64-20261117T034737",
+      "status": "pending_validated_capability"
+    },
+    {
+      "capability": "clear_landing_obstruction_with_changed_contact_or_grasp",
+      "source_id": "clean2_make_kong_s1_l3",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 2,
+      "last_failed_job": "MK59-FLORA-DEV-R2-S1L3-SLIDING-20261117T040012",
+      "status": "pending_validated_capability"
+    },
+    {
+      "capability": "physical_face_down_matching_tile_turnover",
+      "source_id": "clean2_make_kong_s1_l32",
+      "E_frame": 210,
+      "T_step": 185,
+      "native_trials": 1,
+      "last_failed_job": "MK59-FLORA-FROZEN-R2-S1L32-20261117T040514",
+      "status": "pending_validated_capability"
+    }
+  ]
+}
